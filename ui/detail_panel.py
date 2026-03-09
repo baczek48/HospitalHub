@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QGroupBox, QFrame, QScrollArea, QMessageBox, QApplication,
     QSplitter, QMenu,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent, QSize
 from PyQt6.QtGui import QFont, QBrush, QColor
 
 
@@ -157,14 +157,14 @@ class DetailPanel(QWidget):
         header.addWidget(self._stats_badge)
 
         btn_sqld = QToolButton()
-        btn_sqld.setText("⛃")
+        btn_sqld.setIcon(QApplication.instance().windowIcon())
+        btn_sqld.setIconSize(QSize(20, 20))
         btn_sqld.setFixedSize(26, 26)
         btn_sqld.setToolTip("Uruchom SQL Developer")
         btn_sqld.setStyleSheet(
-            "QToolButton { background: transparent; color: #f0a500;"
-            " border: 1px solid #7a5200; border-radius: 5px; font-size: 14px; }"
-            "QToolButton:hover { background: #2a1a00; border-color: #f0a500; }"
-            "QToolButton:pressed { background: #c47d00; color: #fff; }"
+            "QToolButton { background: transparent; border: 1px solid #30363d; border-radius: 5px; }"
+            "QToolButton:hover { background: #21262d; border-color: #58a6ff; }"
+            "QToolButton:pressed { background: #1f6feb; }"
         )
         btn_sqld.clicked.connect(lambda: launch_sqldeveloper(self))
         header.addWidget(btn_sqld)
