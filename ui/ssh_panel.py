@@ -33,7 +33,7 @@ _LOG_RULES = [
      '\x1b[2;37m'),
     # Success / positive — green
     (re.compile(
-        r'\b(OK|SUCCESS(?:FUL(?:LY)?)?|SUKCES(?:FUL(?:NIE)?)?'
+        r'\b(OK|ACCEPT(?:ED)?|SUCCESS(?:FUL(?:LY)?)?|SUKCES(?:FUL(?:NIE)?)?'
         r'|DONE|PASS(?:ED)?|STARTED|RUNNING|UP'
         r'|DEPLOYED|REDEPLOYED|REGISTERED)\b'),
      '\x1b[1;32m'),
@@ -45,6 +45,12 @@ _LOG_RULES = [
     # Docker image/container lifecycle
     (re.compile(r'\b(Pulling|Pulled|Pushing|Pushed|Building|Built|Created|Removed)\b'),
      '\x1b[0;36m'),
+    # IPv4 addresses — bright cyan
+    (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'),
+     '\x1b[0;96m'),
+    # CLI flags: -x  --long-flag  --key=value — bright yellow
+    (re.compile(r'(?:(?<=\s)|(?<=^))(--?[a-zA-Z][\w\-=.]*)'),
+     '\x1b[0;93m'),
 ]
 
 def _colorize_log(text: str) -> str:
