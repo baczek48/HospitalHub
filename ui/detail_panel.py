@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QTextEdit, QGroupBox, QFrame, QScrollArea, QMessageBox, QApplication,
     QSplitter, QMenu,
@@ -61,6 +61,7 @@ from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard
 from ui.utils import confirm
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
+from ui.db_connect import launch_sqldeveloper
 from config import load_column_widths, save_column_widths
 
 # stretch_col: fills remaining space, pins Akcje to right edge
@@ -154,6 +155,19 @@ class DetailPanel(QWidget):
             " padding: 3px 12px; letter-spacing: 0.5px;"
         )
         header.addWidget(self._stats_badge)
+
+        btn_sqld = QToolButton()
+        btn_sqld.setText("⛃")
+        btn_sqld.setFixedSize(26, 26)
+        btn_sqld.setToolTip("Uruchom SQL Developer")
+        btn_sqld.setStyleSheet(
+            "QToolButton { background: transparent; color: #f0a500;"
+            " border: 1px solid #7a5200; border-radius: 5px; font-size: 14px; }"
+            "QToolButton:hover { background: #2a1a00; border-color: #f0a500; }"
+            "QToolButton:pressed { background: #c47d00; color: #fff; }"
+        )
+        btn_sqld.clicked.connect(lambda: launch_sqldeveloper(self))
+        header.addWidget(btn_sqld)
 
         content_layout.addLayout(header)
 

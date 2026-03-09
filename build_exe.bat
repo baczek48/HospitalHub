@@ -5,13 +5,13 @@ pip install pyinstaller --quiet
 echo.
 echo Budowanie Hospital Vault.exe...
 pyinstaller --onefile --windowed ^
-    --name "HospitalVault" ^
+    --name "HospitalHub" ^
     --add-data "ui;ui" ^
     main.py
 
 echo.
-if exist "dist\HospitalVault.exe" (
-    echo SUKCES! Plik: dist\HospitalVault.exe
+if exist "dist\HospitalHub.exe" (
+    echo SUKCES! Plik: dist\HospitalHub.exe
 ) else (
     echo BLAD - sprawdz logi powyzej
 )

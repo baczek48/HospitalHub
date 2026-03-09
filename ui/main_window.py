@@ -5,7 +5,7 @@ import tempfile
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QLineEdit, QPushButton, QLabel,
-    QSplitter, QMessageBox, QFileDialog, QMenu, QToolButton,
+    QSplitter, QMessageBox, QFileDialog, QMenu,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -16,7 +16,6 @@ import models
 from config import save_last_vault
 from ui.detail_panel import DetailPanel
 from ui.dialogs import HospitalDialog, ChangePasswordDialog
-from ui.db_connect import launch_sqldeveloper
 
 
 class MainWindow(QMainWindow):
@@ -57,33 +56,13 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(10, 12, 10, 10)
         left_layout.setSpacing(8)
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(4)
-
         lbl = QLabel("Szpitale")
         font = QFont()
         font.setBold(True)
         font.setPointSize(11)
         lbl.setFont(font)
         lbl.setStyleSheet("color: #c9d1d9; letter-spacing: 0.5px;")
-        header_row.addWidget(lbl)
-        header_row.addStretch()
-
-        btn_sqld = QToolButton()
-        btn_sqld.setText("⛃")
-        btn_sqld.setFixedSize(24, 24)
-        btn_sqld.setToolTip("Uruchom SQL Developer")
-        btn_sqld.setStyleSheet(
-            "QToolButton { background: transparent; color: #f0a500;"
-            " border: 1px solid #7a5200; border-radius: 4px; font-size: 13px; }"
-            "QToolButton:hover { background: #2a1a00; border-color: #f0a500; }"
-            "QToolButton:pressed { background: #c47d00; color: #fff; }"
-        )
-        btn_sqld.clicked.connect(lambda: launch_sqldeveloper(self))
-        header_row.addWidget(btn_sqld)
-
-        left_layout.addLayout(header_row)
+        left_layout.addWidget(lbl)
 
         self._search_edit = QLineEdit()
         self._search_edit.setPlaceholderText("Szukaj...")
