@@ -5,7 +5,70 @@ from PyQt6.QtWidgets import (
     QSplitter, QMenu,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent, QSize
-from PyQt6.QtGui import QFont, QBrush, QColor
+from PyQt6.QtGui import QFont, QBrush, QColor, QIcon, QPixmap, QPainter, QPainterPath, QPen
+
+
+def _make_db_connect_icon(size: int = 24) -> QIcon:
+    """3 stacked database discs with a green play triangle — SQL launcher icon."""
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    disc_color = QColor(58, 130, 200)      # steel blue
+    rim_color  = QColor(80, 160, 230)
+    play_color = QColor(50, 200, 80)       # green
+
+    n = 3
+    disc_h   = size * 0.13              # height of each ellipse rim
+    disc_ry  = disc_h / 2
+    disc_rx  = size * 0.38
+    gap      = size * 0.155             # vertical gap between disc centres
+    top_cy   = size * 0.22             # centre y of topmost disc
+    cx       = size * 0.44
+
+    # Draw discs bottom → top (so top disc paints over lower ones)
+    for i in range(n - 1, -1, -1):
+        cy = top_cy + i * gap
+        # Cylinder body: filled rect between this disc and next
+        if i < n - 1:
+            next_cy = top_cy + (i + 1) * gap
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(disc_color)
+            p.drawRect(
+                int(cx - disc_rx), int(cy),
+                int(disc_rx * 2),  int(next_cy - cy + 1),
+            )
+        # Top ellipse face
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(disc_color.lighter(130) if i == 0 else disc_color)
+        p.drawEllipse(
+            int(cx - disc_rx), int(cy - disc_ry),
+            int(disc_rx * 2),   int(disc_ry * 2),
+        )
+        # Rim highlight
+        p.setPen(QPen(rim_color, max(1, size * 0.03)))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(
+            int(cx - disc_rx), int(cy - disc_ry),
+            int(disc_rx * 2),   int(disc_ry * 2),
+        )
+
+    # Green play triangle — bottom-right corner
+    ts  = size * 0.36          # triangle bounding box
+    tx  = size - ts * 0.95     # left edge of triangle area
+    ty  = size - ts * 0.95     # top edge
+    tri = QPainterPath()
+    tri.moveTo(tx,        ty)
+    tri.lineTo(tx + ts,   ty + ts / 2)
+    tri.lineTo(tx,        ty + ts)
+    tri.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(play_color)
+    p.fillPath(tri, play_color)
+
+    p.end()
+    return QIcon(px)
 
 
 class _HeaderMenuFilter(QObject):
@@ -61,7 +124,7 @@ from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard
 from ui.utils import confirm
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
-from ui.db_connect import launch_sqldeveloper
+from ui.db_connect import connect_db, launch_sqldeveloper
 from config import load_column_widths, save_column_widths
 
 # stretch_col: fills remaining space, pins Akcje to right edge
@@ -74,7 +137,7 @@ _MACHINES_AKCJE_WIDTH = 290
 _DB_STRETCH_COL = 4         # Notatka (ostatnia kolumna danych, jak Opis w maszynach)
 _DB_AKCJE_COL = 5
 _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
-_DB_AKCJE_WIDTH = 220
+_DB_AKCJE_WIDTH = 255
 
 
 def _setup_table_columns(
@@ -587,6 +650,19 @@ class DetailPanel(QWidget):
                 lambda _, c=first_db_cred: _clipboard_copy(c.password)
             )
         row.addWidget(btn_copy)
+
+        btn_sqld = QToolButton()
+        btn_sqld.setIcon(_make_db_connect_icon(24))
+        btn_sqld.setIconSize(QSize(18, 18))
+        btn_sqld.setFixedSize(28, 28)
+        btn_sqld.setToolTip("Uruchom SQL Developer")
+        btn_sqld.setStyleSheet(
+            "QToolButton { background: transparent; border: 1px solid #30363d; border-radius: 4px; }"
+            "QToolButton:hover { background: #21262d; border-color: #3a82c8; }"
+            "QToolButton:pressed { background: #1a4a70; }"
+        )
+        btn_sqld.clicked.connect(lambda _, d=db: connect_db(d, self))
+        row.addWidget(btn_sqld)
 
         btn_edit = QPushButton("⚙")
         btn_edit.setFixedSize(28, 28)
