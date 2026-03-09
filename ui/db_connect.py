@@ -123,6 +123,19 @@ def _build_reference(db: models.Database, cred: "models.Credential | None") -> E
     return ref
 
 
+def _is_sqldeveloper_running() -> bool:
+    """Return True if sqldeveloper.exe is already in the process list."""
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq sqldeveloper.exe", "/NH"],
+            creationflags=_NO_WIN,
+            stderr=subprocess.DEVNULL,
+        ).decode(errors="replace")
+        return "sqldeveloper.exe" in out.lower()
+    except Exception:
+        return False
+
+
 def _inject_connection(db: models.Database, cred: "models.Credential | None") -> bool:
     """Add/update the connection entry in SQL Developer's connections.xml.
     Returns True on success."""
@@ -179,6 +192,7 @@ def connect_db(db: models.Database, parent=None) -> None:
         save_sqldeveloper_path(path)
 
     cred = db.credentials[0] if db.credentials else None
+    was_running = _is_sqldeveloper_running()
     injected = _inject_connection(db, cred)
 
     try:
@@ -208,7 +222,8 @@ def connect_db(db: models.Database, parent=None) -> None:
     lines.append("")
     if injected:
         lines.append(f"Połączenie '{conn_name}' dodane do drzewa Connections.")
-        lines.append("Jeśli SQL Developer był już otwarty — uruchom go ponownie.")
+        if was_running:
+            lines.append("SQL Developer był już otwarty — uruchom go ponownie aby zobaczyć połączenie.")
     else:
         lines.append("(Nie udało się auto-dodać połączenia — dodaj ręcznie.)")
 
