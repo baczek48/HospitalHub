@@ -124,7 +124,7 @@ from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard
 from ui.utils import confirm
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
-from ui.db_connect import connect_db, launch_sqldeveloper
+from ui.db_connect import launch_sqldeveloper
 from config import load_column_widths, save_column_widths
 
 # stretch_col: fills remaining space, pins Akcje to right edge
@@ -137,7 +137,7 @@ _MACHINES_AKCJE_WIDTH = 290
 _DB_STRETCH_COL = 4         # Notatka (ostatnia kolumna danych, jak Opis w maszynach)
 _DB_AKCJE_COL = 5
 _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
-_DB_AKCJE_WIDTH = 255
+_DB_AKCJE_WIDTH = 220
 
 
 def _setup_table_columns(
@@ -220,14 +220,14 @@ class DetailPanel(QWidget):
         header.addWidget(self._stats_badge)
 
         btn_sqld = QToolButton()
-        btn_sqld.setIcon(QApplication.instance().windowIcon())
+        btn_sqld.setIcon(_make_db_connect_icon(26))
         btn_sqld.setIconSize(QSize(20, 20))
         btn_sqld.setFixedSize(26, 26)
         btn_sqld.setToolTip("Uruchom SQL Developer")
         btn_sqld.setStyleSheet(
             "QToolButton { background: transparent; border: 1px solid #30363d; border-radius: 5px; }"
-            "QToolButton:hover { background: #21262d; border-color: #58a6ff; }"
-            "QToolButton:pressed { background: #1f6feb; }"
+            "QToolButton:hover { background: #21262d; border-color: #3a82c8; }"
+            "QToolButton:pressed { background: #1a4a70; }"
         )
         btn_sqld.clicked.connect(lambda: launch_sqldeveloper(self))
         header.addWidget(btn_sqld)
@@ -650,19 +650,6 @@ class DetailPanel(QWidget):
                 lambda _, c=first_db_cred: _clipboard_copy(c.password)
             )
         row.addWidget(btn_copy)
-
-        btn_sqld = QToolButton()
-        btn_sqld.setIcon(_make_db_connect_icon(24))
-        btn_sqld.setIconSize(QSize(18, 18))
-        btn_sqld.setFixedSize(28, 28)
-        btn_sqld.setToolTip("Uruchom SQL Developer")
-        btn_sqld.setStyleSheet(
-            "QToolButton { background: transparent; border: 1px solid #30363d; border-radius: 4px; }"
-            "QToolButton:hover { background: #21262d; border-color: #3a82c8; }"
-            "QToolButton:pressed { background: #1a4a70; }"
-        )
-        btn_sqld.clicked.connect(lambda _, d=db: connect_db(d, self))
-        row.addWidget(btn_sqld)
 
         btn_edit = QPushButton("⚙")
         btn_edit.setFixedSize(28, 28)

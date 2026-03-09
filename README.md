@@ -2,134 +2,119 @@
 
 > © 2026 Sebastian Bąk. Wszelkie prawa zastrzeżone.
 
-Menedzer danych infrastruktury IT dla szpitali. Przechowuje adresy IP maszyn, dane dostepu do baz danych oraz poswiadczenia w jednym zaszyfrowanym pliku `.vault`.
+Narzędzie do zarządzania infrastrukturą IT szpitali. Przechowuje dane połączeń, poświadczenia i notatki w zaszyfrowanym vaulcie — jedno okno zamiast rozrzuconych plików i karteczek.
 
 ---
 
-## Pierwsze uruchomienie
+## Pobieranie
 
-Przy pierwszym uruchomieniu aplikacja zapyta o utworzenie nowego vaulta lub otwarcie istniejacego.
+Gotowy plik exe (bez instalacji, bez Pythona) w zakładce [**Releases**](https://github.com/baczek48/HospitalHub/releases).
 
-### Tworzenie nowego vaulta
-
-1. Kliknij **Utworz nowy vault**.
-2. Wybierz lokalizacje i nazwe pliku (np. `infrastruktura.vault`).
-3. Ustaw haslo glowne — minimum 8 znakow. Haslo musi byc silne, poniewaz chroni wszystkie dane.
-4. Kliknij **Utworz vault** — aplikacja otworzy sie z pustym vaultem.
-
-### Otwarcie istniejacego vaulta
-
-1. Kliknij **Otworz istniejacy vault**.
-2. Wskazplik `.vault`.
-3. Podaj haslo glowne.
-
-Po pierwszym otwarciu aplikacja zapamietuje sciezke do pliku. Nastepne uruchomienie pokazuje od razu pole hasla — bez koniecznosci wskazywania pliku ponownie.
+> **Windows SmartScreen** może zapytać przy pierwszym uruchomieniu — kliknij **Więcej informacji → Uruchom mimo to**. Przy kolejnych uruchomieniach nie pyta.
 
 ---
 
-## Struktura danych
+## Funkcje
 
-Dane sa zorganizowane hierachicznie:
+### Zaszyfrowany vault
+- Szyfrowanie **AES-256-GCM** + wyprowadzanie klucza **Argon2id** (64 MB RAM, 3 iteracje)
+- Atomiczny zapis — awaria w trakcie zapisu nie uszkodzi pliku
+- Hasło główne nigdy nie jest przechowywane — weryfikowane przy każdym otwarciu
+- Plik `.vault` można bezpiecznie przesłać e-mailem — jest w całości zaszyfrowany
 
+### Maszyny / Hosty
+- Połączenia **SSH** z wbudowanym terminalem i przeglądarką plików **SFTP**
+- Połączenia **RDP** z automatycznym wstrzykiwaniem poświadczeń (Windows Credential Manager, czyszczone po 10 s)
+- Wiele zestawów login/hasło na maszynę
+- Przeciąganie wierszy, konfigurowalny drag & drop
+
+### Bazy danych
+- Obsługa **Oracle**, **MSSQL** i innych typów
+- Wiele zestawów poświadczeń na bazę
+- Przycisk ⛃ w nagłówku panelu uruchamia **SQL Developer** i kopiuje hasło do schowka
+- Kopiowanie hasła jednym kliknięciem (auto-wyczyszczenie schowka po 30 s)
+
+### Terminal SSH
+- Pełny emulator terminala (VT220/pyte), historia **50 000 linii**
+- Kolorowanie logów: błędy — czerwony, ostrzeżenia — żółty, OK/ACCEPT — zielony, adresy IP — cyjan, flagi `-x`/`--flag` — żółty
+- Natychmiastowa reakcja na **Ctrl+C** (drain bufora PTY, brak zamrożenia)
+- Wiele zakładek sesji, automatyczny resize PTY
+
+### Bezpieczeństwo
+- Polityka **TOFU** dla kluczy SSH — ostrzeżenie przy zmianie klucza hosta (możliwy MitM)
+- Sanityzacja błędów — hasła nigdy nie trafiają do komunikatów wyjątków
+- Ochrona przed **path traversal** przy pobieraniu plików przez SFTP
+- Walidacja adresów IP i portów przed uruchomieniem RDP
+- Działa w pełni **offline** — brak zewnętrznych połączeń
+
+---
+
+## Obsługa
+
+### Pierwsze uruchomienie
+Przy starcie aplikacja pyta o vault:
+- **Utwórz nowy vault** → wybierz lokalizację i ustaw hasło główne (min. 8 znaków)
+- **Otwórz istniejący vault** → wskaż plik `.vault` i podaj hasło
+
+Ścieżka do pliku jest zapamiętywana — przy kolejnym uruchomieniu od razu pojawia się pole hasła.
+
+### Struktura danych
 ```
 Szpital
-  Maszyny / Hosty
-    Adres IP
-    Nazwa
-    Opis
-    Poswiadczenia (login + haslo + notatka, mozna dodac wiele)
-  Bazy danych
-    Host, Port, Nazwa bazy, Typ (MSSQL / Oracle / PostgreSQL / ...)
-    Login, Haslo, Notatka
-  Notatki o srodowisku (dowolny tekst)
+  ├─ Maszyny / Hosty  (IP, nazwa, opis, poświadczenia, SSH/RDP)
+  ├─ Bazy danych      (host, port, nazwa, typ, poświadczenia, notatka)
+  └─ Notatki o środowisku
+```
+
+### Zapis
+Zmiany **nie są zapisywane automatycznie**. Pasek tytułowy pokazuje `[niezapisane]`.
+
+| Akcja | Skrót |
+|---|---|
+| Zapisz | `Ctrl+S` |
+| Zapisz jako / kopia | `Ctrl+Shift+S` |
+
+### Kopiowanie danych
+Kliknięcie dowolnej komórki tabeli kopiuje jej zawartość do schowka.
+Przycisk z nazwą użytkownika (kolumna Akcje) kopiuje **hasło** — tooltip wskazuje czyje.
+
+### Szerokość kolumn
+Przeciągnij krawędź nagłówka aby zmienić szerokość.
+Prawy przycisk myszy na nagłówku → **Zapisz szerokości kolumn** — układ zapamiętany na stałe.
+
+---
+
+## Uruchomienie ze źródeł
+
+```bash
+git clone https://github.com/baczek48/HospitalHub.git
+cd HospitalHub
+pip install -r requirements.txt
+python main.py
+```
+
+Wymagania: **Python 3.11+**, Windows 10/11
+
+### Budowanie exe
+
+```bat
+build_exe.bat
+```
+
+lub ręcznie:
+```bash
+pip install pyinstaller
+pyinstaller HospitalVault.spec
+# wynik: dist/HospitalHub.exe
 ```
 
 ---
 
-## Podstawowa obsługa
+## Stos technologiczny
 
-### Dodawanie szpitala
-
-Kliknij **+ Dodaj szpital** w lewym panelu, wpisz nazwe i zatwierdz.
-
-### Dodawanie maszyny
-
-Po wybraniu szpitala z listy, w prawym panelu kliknij **+ Dodaj maszyne**.
-Wypelnij pola IP (wymagane), Nazwa, Opis.
-W oknie maszyny mozna od razu dodac poswiadczenia — kliknij **+ Dodaj poswiadczenie**.
-
-### Dodawanie bazy danych
-
-Kliknij **+ Dodaj baze danych**, wypelnij Host (wymagane), Port, Nazwe bazy, Typ, Login, Haslo, Notatke.
-
-### Edycja i usuwanie
-
-Kazdy wiersz w tabeli ma przyciski **Edytuj** i **Usun** po prawej stronie (kolumna Akcje).
-
-### Zmiana kolejnosci wierszy
-
-Wiersze w tabelach mozna przestawiac przeciagajac i upuszczajac (drag & drop).
-
----
-
-## Kopiowanie danych do schowka
-
-Klikniecie dowolnej komorki w tabeli (IP, Nazwa, Opis, Host, Port itd.) kopiuje jej zawartosc do schowka.
-
-Przycisk z nazwa uzytkownika (kolumna Akcje) kopiuje **haslo** tego uzytkownika do schowka.
-Tooltip przycisku pokazuje, czyje haslo zostanie skopiowane.
-
----
-
-## Zapis
-
-Zmiany **nie sa zapisywane automatycznie**. Pasek tytulowy pokazuje `[niezapisane]` gdy sa niezapisane zmiany.
-
-| Akcja | Skrot |
+| Warstwa | Biblioteka |
 |---|---|
-| Zapisz | `Ctrl+S` |
-| Zapisz jako / Eksportuj kopie | `Ctrl+Shift+S` |
-
-Przy zamykaniu aplikacji z niezapisanymi zmianami pojawi sie pytanie o zapis.
-
----
-
-## Zmiana hasla glownego
-
-Menu **Plik → Zmien haslo glowne...**
-Nalezy podac biezace haslo, nowe haslo (min. 8 znakow) i je potwierdzic.
-Vault zostaje natychmiast ponownie zaszyfrowany nowym haslem i zapisany.
-
----
-
-## Wspoldzielenie vaulta z innymi osobami
-
-Plik `.vault` jest w calosci zaszyfrowany — mozna go bezpiecznie przeslac przez e-mail lub komunikator.
-Odbiorca otwiera go w swojej kopii HospitalHub tym samym haslem glownym.
-
-Kazda osoba pracuje na swojej kopii pliku. Przy aktualizacji przesyla sie zaktualizowany plik.
-
----
-
-## Ustawienia kolumn
-
-Szerokosc kolumn w tabelach mozna zmieniac przeciagajac krawedzie naglowkow.
-Kliknij prawym przyciskiem myszy na naglowek tabeli i wybierz **Zapisz szerokosci kolumn**, aby zapamietac biezacy uklad na stale.
-
----
-
-## Bezpieczenstwo
-
-- Wszystkie dane sa szyfrowane algorytmem **AES-256-GCM**.
-- Klucz szyfrujacy jest wyprowadzany z hasla glownego za pomoca **Argon2id** (64 MB RAM, 3 iteracje) — silna ochrona przed atakami brute-force.
-- Kazdy zapis generuje nowe losowe **salt** i **nonce** — ten sam plik zaszyfrowany dwa razy da rozne wyniki.
-- Zapis jest **atomowy**: dane trafiaja najpierw do pliku tymczasowego, a dopiero po pomyslnym zapisie zastepuja oryginalny plik. Awaria w trakcie zapisu nie uszkodzi vaulta.
-- Haslo nie jest nigdzie przechowywane — jedynie sciezka do pliku jest zapamietana lokalnie w `%APPDATA%\HospitalHub\config.json`.
-
----
-
-## Wymagania systemowe
-
-- Windows 10 / 11
-- Python 3.11+ (jezeli uruchamiane ze zrodla)
-- Lub plik `.exe` (jezeli dostarczony jako skompilowana aplikacja)
+| UI | PyQt6 |
+| Terminal emulator | pyte (VT220) |
+| SSH / SFTP | paramiko |
+| Szyfrowanie | cryptography (AES-GCM), argon2-cffi |
