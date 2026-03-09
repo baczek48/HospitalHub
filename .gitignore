@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller build artifacts
+build/
+dist/HospitalHub/
+dist/HospitalHub.zip
+dist/security_info.txt
+
+# Test / scratch files
+_test_tmp.py
+test_terminal_deep.py
+test_terminal_history.py
+
+# Vault data files (user data, never commit)
+*.vault
+
+# Config (local user settings)
+# config.json is stored in %APPDATA%\HospitalHub, not here
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,73 @@
+Hasło nigdzie nie jest zapisane                                                                                                                                
+  - config.json przechowuje tylko ścieżkę do pliku .vault                                                                                                      
+  - Hasło istnieje tylko w pamięci RAM podczas działania aplikacji, i to tylko tymczasowo (po użyciu jest zerowane przez bytearray → _zero())                  
+  
+  Plik .vault bez hasła to zaszyfrowany blob
+  - Algorytm: AES-256-GCM — standard militarny
+  - Klucz nie jest wyprowadzany bezpośrednio z hasła, tylko przez Argon2id z parametrami:
+    - 64 MB RAM + 3 iteracje + 4 wątki per próba
+    - To oznacza ~0.5–1 sekundy na każdą próbę hasła nawet na mocnym sprzęcie
+    - Brute-force GPU jest praktycznie niemożliwy (wymóg 64 MB RAM blokuje masowe równoległe próby)
+
+  Każdy zapis jest inny
+  - Nowe losowe salt i nonce przy każdym zapisie — ten sam vault zapisany dwa razy ma różny ciphertext
+  - Uniemożliwia ataki porównawcze
+
+  Podsumowanie praktyczne:
+
+  Przy silnym haśle (12+ znaków, mieszane) — plik jest praktycznie nie do złamania w rozsądnym horyzoncie czasowym. Jedyna realna droga to:
+  - słabe hasło (krótkie/słownikowe)
+  - dostęp do pamięci RAM działającej aplikacji
+
+────────────────────────────────────────────────────────────────────────────────
+BEZPIECZEŃSTWO POŁĄCZEŃ SSH
+────────────────────────────────────────────────────────────────────────────────
+
+  Weryfikacja klucza hosta — TOFU (Trust On First Use)
+  - Przy pierwszym połączeniu z serwerem aplikacja zapisuje fingerprint SHA-256
+    klucza hosta do pliku ~/.hospitalhub_known_hosts
+  - Każde kolejne połączenie weryfikuje czy klucz się nie zmienił
+  - Zmiana klucza = połączenie odrzucone z ostrzeżeniem o możliwym ataku MitM
+  - Zapobiega atakom Man-in-the-Middle (podstawienie fałszywego serwera)
+
+  Ograniczony zakres uwierzytelnienia
+  - look_for_keys=False — aplikacja nie używa kluczy SSH z systemu użytkownika
+  - allow_agent=False — aplikacja nie korzysta z SSH agenta systemowego
+  - Tylko hasło z vaulta jest używane do logowania
+
+  Bezpieczne komunikaty błędów
+  - Błędy połączenia nie ujawniają haseł ani danych wrażliwych
+  - Wyjątki paramiko są przechwytywane i zamieniane na bezpieczne komunikaty
+  - Typy błędów: autentykacja / zły klucz hosta / błąd SSH / błąd sieci
+
+────────────────────────────────────────────────────────────────────────────────
+BEZPIECZEŃSTWO POŁĄCZEŃ RDP
+────────────────────────────────────────────────────────────────────────────────
+
+  Walidacja parametrów przed uruchomieniem mstsc.exe
+  - Adres IP/hostname: dozwolone tylko znaki alfanumeryczne, kropki i myślniki
+  - Port: musi być liczbą całkowitą z zakresu 1–65535
+  - Nieprawidłowe wartości odrzucane przed wywołaniem procesu
+
+  Tymczasowe poświadczenia w Windows Credential Manager
+  - Hasło jest zapisywane do Credential Manager tylko na czas połączenia
+  - Automatyczne usunięcie po ~10 sekundach od uruchomienia mstsc.exe
+  - Hasło nie jest nigdy przekazywane jako argument wiersza poleceń
+
+────────────────────────────────────────────────────────────────────────────────
+BEZPIECZEŃSTWO SCHOWKA
+────────────────────────────────────────────────────────────────────────────────
+
+  Automatyczne czyszczenie skopiowanego hasła
+  - Po skopiowaniu hasła do schowka jest ono automatycznie usuwane po 30 sekundach
+  - Czyszczenie jest warunkowe — jeśli użytkownik skopiował coś innego, nie nadpisuje
+  - Ogranicza czas ekspozycji hasła dla innych aplikacji czytających schowek
+
+────────────────────────────────────────────────────────────────────────────────
+BEZPIECZEŃSTWO SFTP
+────────────────────────────────────────────────────────────────────────────────
+
+  Ochrona przed path traversal
+  - Nazwy plików pobieranych przez SFTP są sanityzowane przez os.path.basename()
+  - Uniemożliwia serwerowi wymuszenie zapisu poza katalogiem tymczasowym
+  - Pliki tymczasowe zapisywane w dedykowanym podkatalogu z PID procesu
