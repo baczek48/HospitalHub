@@ -29,6 +29,7 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
+    icon='icon.ico',
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
