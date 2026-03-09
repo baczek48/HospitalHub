@@ -56,6 +56,30 @@ def _parse_host(raw: str) -> str:
 
 # ──────────────────────────────────────────────────────────────────────────────
 
+def launch_sqldeveloper(parent=None) -> None:
+    """Just open SQL Developer — no database context."""
+    path = _find_sqldeveloper()
+
+    if path is None:
+        path, _ = QFileDialog.getOpenFileName(
+            parent,
+            "Zlokalizuj SQL Developer",
+            r"C:\Program Files",
+            "SQL Developer (sqldeveloper.exe);;Wszystkie pliki (*.*)",
+        )
+        if not path:
+            return
+        save_sqldeveloper_path(path)
+
+    try:
+        subprocess.Popen([path], creationflags=_NO_WIN)
+    except Exception as exc:
+        QMessageBox.critical(
+            parent, "Błąd SQL Developer",
+            f"Nie można uruchomić SQL Developer:\n{exc}",
+        )
+
+
 def connect_db(db: models.Database, parent=None) -> None:
     """Launch SQL Developer and copy the first credential's password to clipboard."""
     path = _find_sqldeveloper()

@@ -61,7 +61,6 @@ from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard
 from ui.utils import confirm
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
-from ui.db_connect import connect_db
 from config import load_column_widths, save_column_widths
 
 # stretch_col: fills remaining space, pins Akcje to right edge
@@ -74,7 +73,7 @@ _MACHINES_AKCJE_WIDTH = 290
 _DB_STRETCH_COL = 4         # Notatka (ostatnia kolumna danych, jak Opis w maszynach)
 _DB_AKCJE_COL = 5
 _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
-_DB_AKCJE_WIDTH = 260
+_DB_AKCJE_WIDTH = 220
 
 
 def _setup_table_columns(
@@ -574,17 +573,6 @@ class DetailPanel(QWidget):
                 lambda _, c=first_db_cred: _clipboard_copy(c.password)
             )
         row.addWidget(btn_copy)
-
-        btn_sql = QPushButton("SQL")
-        btn_sql.setFixedSize(38, 28)
-        btn_sql.setToolTip("Połącz — otwórz SQL Developer z danymi tej bazy")
-        btn_sql.setStyleSheet(
-            "QPushButton { background: #1a1a0a; color: #f0a500; border: 1px solid #7a5200;"
-            " border-radius: 4px; font-size: 10px; font-weight: bold; padding: 0; }"
-            "QPushButton:hover { background: #c47d00; color: #fff; border-color: #f0a500; }"
-        )
-        btn_sql.clicked.connect(lambda _, d=db: connect_db(d, self))
-        row.addWidget(btn_sql)
 
         btn_edit = QPushButton("⚙")
         btn_edit.setFixedSize(28, 28)
