@@ -1,73 +1,133 @@
-Hasło nigdzie nie jest zapisane                                                                                                                                
-  - config.json przechowuje tylko ścieżkę do pliku .vault                                                                                                      
-  - Hasło istnieje tylko w pamięci RAM podczas działania aplikacji, i to tylko tymczasowo (po użyciu jest zerowane przez bytearray → _zero())                  
-  
+════════════════════════════════════════════════════════════════════════════════
+                        HospitalHub — Informacje o bezpieczeństwie
+════════════════════════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────────────────────────
+SZYFROWANIE VAULT
+────────────────────────────────────────────────────────────────────────────────
+
+  Hasło nigdzie nie jest zapisane
+  - config.json przechowuje tylko ścieżkę do pliku .vault
+  - Hasło istnieje tylko w pamięci RAM podczas działania aplikacji
+
   Plik .vault bez hasła to zaszyfrowany blob
   - Algorytm: AES-256-GCM — standard militarny
-  - Klucz nie jest wyprowadzany bezpośrednio z hasła, tylko przez Argon2id z parametrami:
+  - Klucz wyprowadzany przez Argon2id z parametrami:
     - 64 MB RAM + 3 iteracje + 4 wątki per próba
-    - To oznacza ~0.5–1 sekundy na każdą próbę hasła nawet na mocnym sprzęcie
-    - Brute-force GPU jest praktycznie niemożliwy (wymóg 64 MB RAM blokuje masowe równoległe próby)
+    - ~0.5–1 sekundy na każdą próbę hasła nawet na mocnym sprzęcie
+    - Brute-force GPU praktycznie niemożliwy (wymóg 64 MB RAM blokuje
+      masowe równoległe próby)
 
   Każdy zapis jest inny
-  - Nowe losowe salt i nonce przy każdym zapisie — ten sam vault zapisany dwa razy ma różny ciphertext
+  - Nowe losowe salt i nonce przy każdym zapisie — ten sam vault zapisany
+    dwa razy ma różny ciphertext
   - Uniemożliwia ataki porównawcze
 
-  Podsumowanie praktyczne:
+  Atomiczny zapis
+  - Dane najpierw zapisywane do pliku tymczasowego, potem os.replace()
+  - Awaria w trakcie zapisu nie uszkodzi istniejącego pliku vault
 
-  Przy silnym haśle (12+ znaków, mieszane) — plik jest praktycznie nie do złamania w rozsądnym horyzoncie czasowym. Jedyna realna droga to:
-  - słabe hasło (krótkie/słownikowe)
-  - dostęp do pamięci RAM działającej aplikacji
+  Podsumowanie:
+  Przy silnym haśle (12+ znaków, mieszane) — plik jest praktycznie nie do
+  złamania. Jedyna realna droga to:
+    - słabe hasło (krótkie/słownikowe)
+    - dostęp do pamięci RAM działającej aplikacji
+
+────────────────────────────────────────────────────────────────────────────────
+TRYB ADMINA
+────────────────────────────────────────────────────────────────────────────────
+
+  Oddzielne hasło admina
+  - Hashowane Argon2id (ten sam algorytm co vault — 64 MB RAM, 3 iteracje)
+  - Hash i salt przechowywane wewnątrz zaszyfrowanego vault — nie
+    do odczytania bez hasła głównego
+  - Porównywanie hasła przez hmac.compare_digest() — odporne na
+    timing attacks
+
+  Automatyczna blokada
+  - Tryb admina blokuje się automatycznie po 5 minutach nieaktywności
+  - Po zablokowaniu wrażliwe elementy (maszyny, bazy, poświadczenia
+    oznaczone jako "admin only") znikają z widoku
+
+  Dwupoziomowe zabezpieczenie
+  - Hasło główne → dostęp do vault (maszyny, bazy, poświadczenia)
+  - Hasło admina → dostęp do elementów ukrytych (wrażliwe środowiska)
+  - Użytkownik bez hasła admina widzi tylko elementy publiczne
 
 ────────────────────────────────────────────────────────────────────────────────
 BEZPIECZEŃSTWO POŁĄCZEŃ SSH
 ────────────────────────────────────────────────────────────────────────────────
 
   Weryfikacja klucza hosta — TOFU (Trust On First Use)
-  - Przy pierwszym połączeniu z serwerem aplikacja zapisuje fingerprint SHA-256
-    klucza hosta do pliku ~/.hospitalhub_known_hosts
+  - Przy pierwszym połączeniu z serwerem aplikacja zapisuje fingerprint
+    SHA-256 klucza hosta do pliku ~/.hospitalhub_known_hosts
   - Każde kolejne połączenie weryfikuje czy klucz się nie zmienił
-  - Zmiana klucza = połączenie odrzucone z ostrzeżeniem o możliwym ataku MitM
-  - Zapobiega atakom Man-in-the-Middle (podstawienie fałszywego serwera)
+  - Zmiana klucza = połączenie odrzucone z ostrzeżeniem o możliwym
+    ataku MitM (Man-in-the-Middle)
 
   Ograniczony zakres uwierzytelnienia
-  - look_for_keys=False — aplikacja nie używa kluczy SSH z systemu użytkownika
+  - look_for_keys=False — aplikacja nie używa kluczy SSH z systemu
   - allow_agent=False — aplikacja nie korzysta z SSH agenta systemowego
   - Tylko hasło z vaulta jest używane do logowania
 
   Bezpieczne komunikaty błędów
   - Błędy połączenia nie ujawniają haseł ani danych wrażliwych
   - Wyjątki paramiko są przechwytywane i zamieniane na bezpieczne komunikaty
-  - Typy błędów: autentykacja / zły klucz hosta / błąd SSH / błąd sieci
 
 ────────────────────────────────────────────────────────────────────────────────
 BEZPIECZEŃSTWO POŁĄCZEŃ RDP
 ────────────────────────────────────────────────────────────────────────────────
 
-  Walidacja parametrów przed uruchomieniem mstsc.exe
-  - Adres IP/hostname: dozwolone tylko znaki alfanumeryczne, kropki i myślniki
+  Walidacja parametrów
+  - Adres IP/hostname: dozwolone tylko znaki alfanumeryczne, kropki
+    i myślniki (regex)
   - Port: musi być liczbą całkowitą z zakresu 1–65535
   - Nieprawidłowe wartości odrzucane przed wywołaniem procesu
 
-  Tymczasowe poświadczenia w Windows Credential Manager
-  - Hasło jest zapisywane do Credential Manager tylko na czas połączenia
-  - Automatyczne usunięcie po ~10 sekundach od uruchomienia mstsc.exe
-  - Hasło nie jest nigdy przekazywane jako argument wiersza poleceń
+  Poświadczenia przez ctypes CredWriteW (od v1.3.0)
+  - Hasło wstrzykiwane bezpośrednio przez Windows API (ctypes)
+  - NIE jest przekazywane jako argument wiersza poleceń — nie widoczne
+    w Task Managerze ani w logach audytu procesów
+  - Automatyczne usunięcie z Credential Manager po 30 sekundach
+
+  Tymczasowy plik .rdp
+  - Generowany z nieprzewidywalną nazwą (mkstemp)
+  - Zawiera tylko ustawienia sesji (dyski, schowek) — bez haseł
+  - Automatycznie usuwany po 30 sekundach
 
 ────────────────────────────────────────────────────────────────────────────────
 BEZPIECZEŃSTWO SCHOWKA
 ────────────────────────────────────────────────────────────────────────────────
 
-  Automatyczne czyszczenie skopiowanego hasła
-  - Po skopiowaniu hasła do schowka jest ono automatycznie usuwane po 30 sekundach
-  - Czyszczenie jest warunkowe — jeśli użytkownik skopiował coś innego, nie nadpisuje
-  - Ogranicza czas ekspozycji hasła dla innych aplikacji czytających schowek
+  Automatyczne czyszczenie
+  - Skopiowane hasło usuwane ze schowka po 15 sekundach
+  - Czyszczenie warunkowe — jeśli użytkownik skopiował coś innego,
+    nie nadpisuje nowej zawartości
+  - Ogranicza czas ekspozycji hasła dla innych aplikacji
 
 ────────────────────────────────────────────────────────────────────────────────
 BEZPIECZEŃSTWO SFTP
 ────────────────────────────────────────────────────────────────────────────────
 
   Ochrona przed path traversal
-  - Nazwy plików pobieranych przez SFTP są sanityzowane przez os.path.basename()
+  - Nazwy plików pobieranych przez SFTP sanityzowane przez
+    os.path.basename()
   - Uniemożliwia serwerowi wymuszenie zapisu poza katalogiem tymczasowym
-  - Pliki tymczasowe zapisywane w dedykowanym podkatalogu z PID procesu
+
+  Izolacja plików tymczasowych
+  - Pliki tymczasowe zapisywane w dedykowanym podkatalogu
+    z PID procesu (HospitalHub_{pid})
+  - Automatyczne czyszczenie przy zamknięciu aplikacji (atexit)
+
+────────────────────────────────────────────────────────────────────────────────
+DZIAŁANIE OFFLINE
+────────────────────────────────────────────────────────────────────────────────
+
+  - Aplikacja nie łączy się z żadnym zewnętrznym serwisem
+  - Brak telemetrii, brak auto-aktualizacji, brak analytics
+  - Jedyne połączenia sieciowe to te inicjowane jawnie przez
+    użytkownika (SSH, RDP, SFTP)
+  - Plik .vault można bezpiecznie przesyłać e-mailem — jest w całości
+    zaszyfrowany
+
+════════════════════════════════════════════════════════════════════════════════

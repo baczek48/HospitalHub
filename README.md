@@ -24,27 +24,52 @@ Gotowy plik exe (bez instalacji, bez Pythona) w zakładce [**Releases**](https:/
 
 ### Maszyny / Hosty
 - Połączenia **SSH** z wbudowanym terminalem i przeglądarką plików **SFTP**
-- Połączenia **RDP** z automatycznym wstrzykiwaniem poświadczeń (Windows Credential Manager, czyszczone po 10 s)
+- Połączenia **RDP** z automatycznym wstrzykiwaniem poświadczeń (ctypes CredWriteW, czyszczone po 30 s)
+- **Mapowanie dysków RDP** — wybór lokalnych dysków udostępnianych w sesji
 - Wiele zestawów login/hasło na maszynę
 - Przeciąganie wierszy, konfigurowalny drag & drop
+- **Szybkie połączenie SSH** — przycisk ⇆ w nagłówku, połącz się z dowolnym hostem bez dodawania do vault
 
 ### Bazy danych
 - Obsługa **Oracle**, **MSSQL** i innych typów
 - Wiele zestawów poświadczeń na bazę
 - Przycisk ⛃ w nagłówku panelu uruchamia **SQL Developer** i kopiuje hasło do schowka
-- Kopiowanie hasła jednym kliknięciem (auto-wyczyszczenie schowka po 30 s)
+- Kopiowanie hasła jednym kliknięciem (auto-wyczyszczenie schowka po 15 s)
 
 ### Terminal SSH
 - Pełny emulator terminala (VT220/pyte), historia **50 000 linii**
-- Kolorowanie logów: błędy — czerwony, ostrzeżenia — żółty, OK/ACCEPT — zielony, adresy IP — cyjan, flagi `-x`/`--flag` — żółty
+- Rozszerzone kolorowanie logów:
+  - Błędy, ostrzeżenia, OK/ACCEPT — czerwony / żółty / zielony
+  - Adresy **IPv4** (z portem), **IPv6**, **MAC** — cyjan
+  - Metody HTTP (GET, POST...) — żółte; kody **2xx/4xx/5xx** — zielony/żółty/czerwony
+  - Adresy e-mail — zielone; daty — szare
+  - Słowa odmowy (denied, rejected, down...) — czerwone
+  - Słowa pozytywne (enabled, active, true...) — zielone
+  - Detekcja promptów powłoki
 - Natychmiastowa reakcja na **Ctrl+C** (drain bufora PTY, brak zamrożenia)
 - Wiele zakładek sesji, automatyczny resize PTY
+- Panel sesji SSH z selektorem szpitali i maszyn
+
+### Przeglądarka SFTP
+- Ikony typów plików (foldery, skrypty, logi, archiwa, obrazy, PDF, konfiguracje)
+- Edytowalna belka ścieżki — kliknij i wpisz ręcznie
+- Historia nawigacji
+- Sortowanie z folderami na górze
+- Ochrona przed path traversal
+- Pliki tymczasowe czyszczone przy zamknięciu aplikacji
+
+### Tryb admina
+- Oddzielne hasło admina hashowane **Argon2id**
+- Ukrywanie wrażliwych maszyn, baz danych i poświadczeń (fioletowe oznaczenie + 🔒)
+- Automatyczna blokada po **5 minutach** nieaktywności
+- Ustawianie hasła: **Plik → Ustaw / zmień hasło admina**
 
 ### Bezpieczeństwo
 - Polityka **TOFU** dla kluczy SSH — ostrzeżenie przy zmianie klucza hosta (możliwy MitM)
 - Sanityzacja błędów — hasła nigdy nie trafiają do komunikatów wyjątków
 - Ochrona przed **path traversal** przy pobieraniu plików przez SFTP
 - Walidacja adresów IP i portów przed uruchomieniem RDP
+- RDP: poświadczenia przez **ctypes CredWriteW** — hasło nie pojawia się w argumentach procesu
 - Działa w pełni **offline** — brak zewnętrznych połączeń
 
 ---
@@ -104,7 +129,7 @@ build_exe.bat
 lub ręcznie:
 ```bash
 pip install pyinstaller
-pyinstaller HospitalVault.spec
+pyinstaller HospitalHub.spec
 # wynik: dist/HospitalHub.exe
 ```
 
