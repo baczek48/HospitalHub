@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QFormLayout, QMessageBox,
-    QApplication,
+    QApplication, QCheckBox, QWidget,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIntValidator
@@ -15,11 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import models
 from ui.utils import confirm
 
-_CLIPBOARD_CLEAR_MS = 30_000   # auto-clear password after 30 s
+_CLIPBOARD_CLEAR_MS = 15_000   # auto-clear password after 15 s
 
 
 def _clipboard_copy(text: str) -> None:
-    """Copy text to clipboard and schedule automatic clearing after 30 s."""
+    """Copy text to clipboard and schedule automatic clearing after 15 s."""
     cb = QApplication.clipboard()
     cb.setText(text)
     QTimer.singleShot(_CLIPBOARD_CLEAR_MS,
@@ -67,11 +67,13 @@ class HospitalDialog(QDialog):
 
 
 class CredentialDialog(QDialog):
-    def __init__(self, parent=None, credential: models.Credential = None):
+    def __init__(self, parent=None, credential: models.Credential = None,
+                 admin_mode: bool = False):
         super().__init__(parent)
         self._cred = copy.deepcopy(credential) if credential else models.Credential()
+        self._admin_mode = admin_mode
         self.setWindowTitle("Poświadczenie")
-        self.setFixedSize(400, 200)
+        self.setFixedSize(400, 230 if admin_mode else 200)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
 
         layout = QVBoxLayout(self)
@@ -104,6 +106,11 @@ class CredentialDialog(QDialog):
         self._note_edit.setPlaceholderText("np. konto serwisowe, konto admina")
         form.addRow("Notatka:", self._note_edit)
 
+        if self._admin_mode:
+            self._admin_cb = QCheckBox("Tylko admin (ukryte bez odblokowania)")
+            self._admin_cb.setChecked(self._cred.admin_only)
+            form.addRow("", self._admin_cb)
+
         layout.addLayout(form)
         layout.addStretch()
 
@@ -125,6 +132,8 @@ class CredentialDialog(QDialog):
         self._cred.login = login
         self._cred.password = self._pass_edit.text()
         self._cred.note = self._note_edit.text().strip()
+        if self._admin_mode:
+            self._cred.admin_only = self._admin_cb.isChecked()
         self.accept()
 
     def get_credential(self) -> models.Credential:
@@ -132,9 +141,11 @@ class CredentialDialog(QDialog):
 
 
 class MachineDialog(QDialog):
-    def __init__(self, parent=None, machine: models.Machine = None):
+    def __init__(self, parent=None, machine: models.Machine = None,
+                 admin_mode: bool = False):
         super().__init__(parent)
         self._machine = copy.deepcopy(machine) if machine else models.Machine()
+        self._admin_mode = admin_mode
         self.setWindowTitle("Maszyna / Host")
         self.setMinimumSize(560, 460)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
@@ -158,6 +169,12 @@ class MachineDialog(QDialog):
         self._desc_edit.setPlaceholderText("np. Usługi integracyjne — Tomcat/Apache, Wildfly")
         self._form.addRow("Opis:", self._desc_edit)
 
+        # Admin only — visible only in admin mode
+        if self._admin_mode:
+            self._admin_cb = QCheckBox("Tylko admin (ukryta bez odblokowania)")
+            self._admin_cb.setChecked(self._machine.admin_only)
+            self._form.addRow("", self._admin_cb)
+
         # Connection type
         self._type_combo = QComboBox()
         self._type_combo.addItems(["SSH", "RDP"])
@@ -173,6 +190,23 @@ class MachineDialog(QDialog):
         self._rdp_port_edit.setValidator(QIntValidator(1, 65535, self))
         self._form.addRow("Port RDP:", self._rdp_port_edit)
         self._rdp_port_row = self._form.rowCount() - 1   # index of the row just added
+
+        # RDP drive mapping — detect local drives and show checkboxes
+        self._rdp_drive_widget = QWidget()
+        drive_lay = QHBoxLayout(self._rdp_drive_widget)
+        drive_lay.setContentsMargins(0, 0, 0, 0)
+        drive_lay.setSpacing(12)
+        self._drive_checkboxes: list[QCheckBox] = []
+        saved = set(self._machine.rdp_drives)
+        for letter in self._detect_drives():
+            cb = QCheckBox(letter)
+            cb.setChecked(letter in saved)
+            self._drive_checkboxes.append(cb)
+            drive_lay.addWidget(cb)
+        drive_lay.addStretch()
+        self._rdp_drive_label = QLabel("Dyski:")
+        self._form.addRow(self._rdp_drive_label, self._rdp_drive_widget)
+
         # Set initial visibility
         self._on_type_changed(self._type_combo.currentText())
 
@@ -216,11 +250,17 @@ class MachineDialog(QDialog):
 
         self._refresh_credentials()
 
+    def _visible_creds(self):
+        if self._admin_mode:
+            return self._machine.credentials
+        return [c for c in self._machine.credentials if not c.admin_only]
+
     def _refresh_credentials(self):
         self._cred_table.setRowCount(0)
-        for i, cred in enumerate(self._machine.credentials):
+        for i, cred in enumerate(self._visible_creds()):
             self._cred_table.insertRow(i)
-            self._cred_table.setItem(i, 0, QTableWidgetItem(cred.login))
+            prefix = "🔒 " if cred.admin_only else ""
+            self._cred_table.setItem(i, 0, QTableWidgetItem(prefix + cred.login))
             self._cred_table.setItem(i, 1, QTableWidgetItem(cred.note))
             self._cred_table.setCellWidget(i, 2, self._make_cred_actions(cred))
             self._cred_table.setRowHeight(i, 36)
@@ -250,18 +290,19 @@ class MachineDialog(QDialog):
         return w
 
     def _add_credential(self):
-        dlg = CredentialDialog(self)
+        dlg = CredentialDialog(self, admin_mode=self._admin_mode)
         if dlg.exec():
             self._machine.credentials.append(dlg.get_credential())
             self._refresh_credentials()
 
     def _edit_credential(self, cred: models.Credential):
-        dlg = CredentialDialog(self, cred)
+        dlg = CredentialDialog(self, cred, admin_mode=self._admin_mode)
         if dlg.exec():
             updated = dlg.get_credential()
             cred.login = updated.login
             cred.password = updated.password
             cred.note = updated.note
+            cred.admin_only = updated.admin_only
             self._refresh_credentials()
 
     def _delete_credential(self, cred: models.Credential):
@@ -275,6 +316,20 @@ class MachineDialog(QDialog):
         lbl = self._form.labelForField(self._rdp_port_edit)
         if lbl:
             lbl.setVisible(is_rdp)
+        self._rdp_drive_widget.setVisible(is_rdp)
+        self._rdp_drive_label.setVisible(is_rdp)
+
+    @staticmethod
+    def _detect_drives() -> list[str]:
+        """Return list of drive letters present on this machine, e.g. ['C:', 'D:']."""
+        drives = []
+        if sys.platform == 'win32':
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            for i in range(26):
+                if bitmask & (1 << i):
+                    drives.append(f"{chr(65 + i)}:")
+        return drives
 
     def _accept(self):
         ip = self._ip_edit.text().strip()
@@ -286,6 +341,9 @@ class MachineDialog(QDialog):
         self._machine.description = self._desc_edit.text().strip()
         self._machine.connection_type = self._type_combo.currentText()
         self._machine.rdp_port = self._rdp_port_edit.text().strip() or "3389"
+        self._machine.rdp_drives = [cb.text() for cb in self._drive_checkboxes if cb.isChecked()]
+        if self._admin_mode:
+            self._machine.admin_only = self._admin_cb.isChecked()
         self.accept()
 
     def get_machine(self) -> models.Machine:
@@ -293,9 +351,11 @@ class MachineDialog(QDialog):
 
 
 class DatabaseDialog(QDialog):
-    def __init__(self, parent=None, database: models.Database = None):
+    def __init__(self, parent=None, database: models.Database = None,
+                 admin_mode: bool = False):
         super().__init__(parent)
         self._db = copy.deepcopy(database) if database else models.Database()
+        self._admin_mode = admin_mode
         self.setWindowTitle("Baza danych")
         self.setMinimumSize(520, 480)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
@@ -333,6 +393,11 @@ class DatabaseDialog(QDialog):
         self._note_edit = QLineEdit(self._db.note)
         self._note_edit.setPlaceholderText("Opcjonalna notatka")
         form.addRow("Notatka:", self._note_edit)
+
+        if self._admin_mode:
+            self._admin_cb = QCheckBox("Tylko admin (ukryta bez odblokowania)")
+            self._admin_cb.setChecked(self._db.admin_only)
+            form.addRow("", self._admin_cb)
 
         layout.addLayout(form)
 
@@ -374,11 +439,17 @@ class DatabaseDialog(QDialog):
 
         self._refresh_credentials()
 
+    def _visible_creds(self):
+        if self._admin_mode:
+            return self._db.credentials
+        return [c for c in self._db.credentials if not c.admin_only]
+
     def _refresh_credentials(self):
         self._cred_table.setRowCount(0)
-        for i, cred in enumerate(self._db.credentials):
+        for i, cred in enumerate(self._visible_creds()):
             self._cred_table.insertRow(i)
-            self._cred_table.setItem(i, 0, QTableWidgetItem(cred.login))
+            prefix = "🔒 " if cred.admin_only else ""
+            self._cred_table.setItem(i, 0, QTableWidgetItem(prefix + cred.login))
             self._cred_table.setItem(i, 1, QTableWidgetItem(cred.note))
             self._cred_table.setCellWidget(i, 2, self._make_cred_actions(cred))
             self._cred_table.setRowHeight(i, 36)
@@ -408,18 +479,19 @@ class DatabaseDialog(QDialog):
         return w
 
     def _add_credential(self):
-        dlg = CredentialDialog(self)
+        dlg = CredentialDialog(self, admin_mode=self._admin_mode)
         if dlg.exec():
             self._db.credentials.append(dlg.get_credential())
             self._refresh_credentials()
 
     def _edit_credential(self, cred: models.Credential):
-        dlg = CredentialDialog(self, cred)
+        dlg = CredentialDialog(self, cred, admin_mode=self._admin_mode)
         if dlg.exec():
             updated = dlg.get_credential()
             cred.login    = updated.login
             cred.password = updated.password
             cred.note     = updated.note
+            cred.admin_only = updated.admin_only
             self._refresh_credentials()
 
     def _delete_credential(self, cred: models.Credential):
@@ -437,6 +509,8 @@ class DatabaseDialog(QDialog):
         self._db.name = self._name_edit.text().strip()
         self._db.db_type = self._type_combo.currentText()
         self._db.note = self._note_edit.text().strip()
+        if self._admin_mode:
+            self._db.admin_only = self._admin_cb.isChecked()
         self.accept()
 
     def get_database(self) -> models.Database:
@@ -505,3 +579,110 @@ class ChangePasswordDialog(QDialog):
 
     def get_passwords(self):
         return self._result
+
+
+class AdminSetupDialog(QDialog):
+    """Dialog to set or change the admin password."""
+    def __init__(self, parent=None, is_change: bool = False):
+        super().__init__(parent)
+        self._password = None
+        title = "Zmień hasło admina" if is_change else "Ustaw hasło admina"
+        self.setWindowTitle(title)
+        self.setFixedSize(400, 200 if is_change else 170)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        if is_change:
+            self._old_pass = QLineEdit()
+            self._old_pass.setEchoMode(QLineEdit.EchoMode.Password)
+            form.addRow("Biezace haslo admina:", self._old_pass)
+        else:
+            self._old_pass = None
+
+        self._new_pass = QLineEdit()
+        self._new_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self._new_pass.setPlaceholderText("Minimum 4 znaki")
+        form.addRow("Nowe haslo admina:", self._new_pass)
+
+        self._confirm = QLineEdit()
+        self._confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        self._confirm.setPlaceholderText("Powtorz haslo")
+        form.addRow("Potwierdz:", self._confirm)
+
+        layout.addLayout(form)
+        layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_cancel = QPushButton("Anuluj")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        btn_ok = QPushButton("Zapisz")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._accept)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+    def _accept(self):
+        new = self._new_pass.text()
+        if len(new) < 4:
+            QMessageBox.warning(self, "Blad", "Haslo admina musi miec minimum 4 znaki.")
+            return
+        if new != self._confirm.text():
+            QMessageBox.warning(self, "Blad", "Hasla nie sa identyczne.")
+            return
+        self._password = new
+        self.accept()
+
+    def get_old_password(self) -> str | None:
+        return self._old_pass.text() if self._old_pass else None
+
+    def get_password(self) -> str:
+        return self._password
+
+
+class AdminUnlockDialog(QDialog):
+    """Dialog to enter admin password to unlock hidden items."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._password = None
+        self.setWindowTitle("Odblokuj tryb admina")
+        self.setFixedSize(360, 120)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Haslo admina:"))
+        self._pass_edit = QLineEdit()
+        self._pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pass_edit.returnPressed.connect(self._accept)
+        row.addWidget(self._pass_edit)
+        layout.addLayout(row)
+
+        btn_row = QHBoxLayout()
+        btn_cancel = QPushButton("Anuluj")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        btn_ok = QPushButton("Odblokuj")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._accept)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+    def _accept(self):
+        pw = self._pass_edit.text()
+        if not pw:
+            return
+        self._password = pw
+        self.accept()
+
+    def get_password(self) -> str:
+        return self._password

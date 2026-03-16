@@ -7,24 +7,38 @@ from PyQt6.QtWidgets import (
     QListWidget, QLineEdit, QPushButton, QLabel,
     QSplitter, QMessageBox, QFileDialog, QMenu,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from crypto import encrypt
+from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
 from config import save_last_vault
 from ui.detail_panel import DetailPanel
-from ui.dialogs import HospitalDialog, ChangePasswordDialog
+from ui.dialogs import (
+    HospitalDialog, ChangePasswordDialog,
+    AdminSetupDialog, AdminUnlockDialog,
+)
+
+_ADMIN_LOCK_TIMEOUT_MS = 5 * 60 * 1000  # auto-lock after 5 minutes
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, vault_path: str, password: str, hospitals: list):
+    def __init__(self, vault_path: str, password: str, hospitals: list,
+                 admin_hash: str = "", admin_salt: str = ""):
         super().__init__()
         self._vault_path = vault_path
         self._password = password
         self._hospitals = hospitals
+        self._admin_hash = admin_hash
+        self._admin_salt = admin_salt
+        self._admin_unlocked = False
         self._unsaved = False
+
+        self._admin_lock_timer = QTimer(self)
+        self._admin_lock_timer.setSingleShot(True)
+        self._admin_lock_timer.setInterval(_ADMIN_LOCK_TIMEOUT_MS)
+        self._admin_lock_timer.timeout.connect(self._lock_admin)
 
         self._setup_ui()
         self._setup_menu()
@@ -36,7 +50,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _setup_ui(self):
-        self.setMinimumSize(1050, 680)
+        self.setMinimumSize(700, 450)
+        self.resize(1050, 680)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -99,6 +114,16 @@ class MainWindow(QMainWindow):
         btn_add.clicked.connect(self._add_hospital)
         left_layout.addWidget(btn_add)
 
+        # ---- Admin lock/unlock button ----
+        self._admin_btn = QPushButton("🔒  Admin")
+        self._admin_btn.setStyleSheet(
+            "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
+            " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
+            "QPushButton:hover { background: #3d2550; color: #d4a0ff; }"
+        )
+        self._admin_btn.clicked.connect(self._toggle_admin)
+        left_layout.addWidget(self._admin_btn)
+
         splitter.addWidget(left)
 
         # ---- Right panel ----
@@ -127,6 +152,9 @@ class MainWindow(QMainWindow):
 
         act_change_pass = file_menu.addAction("Zmień hasło główne...")
         act_change_pass.triggered.connect(self._change_password)
+
+        act_admin_pass = file_menu.addAction("Ustaw / zmień hasło admina...")
+        act_admin_pass.triggered.connect(self._setup_admin_password)
 
         file_menu.addSeparator()
 
@@ -266,6 +294,9 @@ class MainWindow(QMainWindow):
     def _do_save(self, path: str) -> bool:
         try:
             data = models.to_dict(self._hospitals)
+            if self._admin_hash:
+                data["admin_hash"] = self._admin_hash
+                data["admin_salt"] = self._admin_salt
             content = encrypt(data, self._password)
             # Atomic write: encrypt to temp file in same dir, then rename.
             # If the process crashes mid-write, the original vault is untouched.
@@ -318,6 +349,67 @@ class MainWindow(QMainWindow):
                 "Sukces",
                 "Hasło zostało zmienione. Pamiętaj o zapisaniu vault (Ctrl+S).",
             )
+
+    # ------------------------------------------------------------------ #
+    # Admin mode                                                           #
+    # ------------------------------------------------------------------ #
+
+    def _toggle_admin(self):
+        if self._admin_unlocked:
+            self._lock_admin()
+        else:
+            self._unlock_admin()
+
+    def _unlock_admin(self):
+        if not self._admin_hash:
+            QMessageBox.information(
+                self, "Brak hasła admina",
+                "Hasło admina nie zostało ustawione.\n"
+                "Ustaw je w menu: Plik → Ustaw / zmień hasło admina."
+            )
+            return
+        dlg = AdminUnlockDialog(self)
+        if not dlg.exec():
+            return
+        if not verify_admin_password(dlg.get_password(), self._admin_hash, self._admin_salt):
+            QMessageBox.critical(self, "Błąd", "Nieprawidłowe hasło admina.")
+            return
+        self._admin_unlocked = True
+        self._admin_btn.setText("🔓  Admin")
+        self._admin_btn.setStyleSheet(
+            "QPushButton { background: #1a3a1a; color: #8ae234; border: 1px solid #2d5a1a;"
+            " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
+            "QPushButton:hover { background: #2a4d2a; color: #a0de4a; }"
+        )
+        self._detail_panel.set_admin_mode(True)
+        self._admin_lock_timer.start()
+
+    def _lock_admin(self):
+        self._admin_unlocked = False
+        self._admin_lock_timer.stop()
+        self._admin_btn.setText("🔒  Admin")
+        self._admin_btn.setStyleSheet(
+            "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
+            " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
+            "QPushButton:hover { background: #3d2550; color: #d4a0ff; }"
+        )
+        self._detail_panel.set_admin_mode(False)
+
+    def _setup_admin_password(self):
+        has_existing = bool(self._admin_hash)
+        dlg = AdminSetupDialog(self, is_change=has_existing)
+        if not dlg.exec():
+            return
+        if has_existing:
+            old = dlg.get_old_password()
+            if not verify_admin_password(old, self._admin_hash, self._admin_salt):
+                QMessageBox.critical(self, "Błąd", "Nieprawidłowe bieżące hasło admina.")
+                return
+        new_pass = dlg.get_password()
+        self._admin_hash, self._admin_salt = hash_admin_password(new_pass)
+        self._unsaved = True
+        self._update_title()
+        QMessageBox.information(self, "Sukces", "Hasło admina zostało ustawione.")
 
     # ------------------------------------------------------------------ #
     # Close                                                                #

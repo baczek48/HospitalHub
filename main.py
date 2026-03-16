@@ -1,10 +1,24 @@
 # Copyright © 2026 Sebastian Bąk. All rights reserved.
 
+import atexit
+import shutil
 import sys
 import os
+import tempfile
 
 # Ensure vault_app directory is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _cleanup_sftp_temp():
+    """Remove SFTP temp directory on exit (best-effort)."""
+    tmp_dir = os.path.join(tempfile.gettempdir(),
+                           f'HospitalHub_{os.getpid()}')
+    if os.path.isdir(tmp_dir):
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+atexit.register(_cleanup_sftp_temp)
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QPalette, QColor, QIcon, QPixmap, QPainter, QPainterPath, QPen
@@ -96,8 +110,8 @@ def main():
 
     login = LoginDialog()
     if login.exec():
-        vault_path, password, hospitals = login.get_result()
-        window = MainWindow(vault_path, password, hospitals)
+        vault_path, password, hospitals, admin_hash, admin_salt = login.get_result()
+        window = MainWindow(vault_path, password, hospitals, admin_hash, admin_salt)
         window.show()
         sys.exit(app.exec())
     else:

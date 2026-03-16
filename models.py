@@ -9,6 +9,7 @@ class Credential:
     login: str = ""
     password: str = ""
     note: str = ""
+    admin_only: bool = False
 
 
 @dataclass
@@ -20,6 +21,8 @@ class Machine:
     credentials: List[Credential] = field(default_factory=list)
     connection_type: str = "SSH"   # "SSH" | "RDP"
     rdp_port: str = "3389"
+    rdp_drives: List[str] = field(default_factory=list)  # e.g. ["C:", "D:"]
+    admin_only: bool = False
 
 
 @dataclass
@@ -31,6 +34,7 @@ class Database:
     db_type: str = "MSSQL"
     credentials: List[Credential] = field(default_factory=list)
     note: str = ""
+    admin_only: bool = False
 
 
 @dataclass
@@ -68,8 +72,11 @@ def _machine_to_dict(m: Machine) -> dict:
         "description": m.description,
         "connection_type": m.connection_type,
         "rdp_port": m.rdp_port,
+        "rdp_drives": m.rdp_drives,
+        "admin_only": m.admin_only,
         "credentials": [
-            {"id": c.id, "login": c.login, "password": c.password, "note": c.note}
+            {"id": c.id, "login": c.login, "password": c.password,
+             "note": c.note, "admin_only": c.admin_only}
             for c in m.credentials
         ],
     }
@@ -83,10 +90,12 @@ def _database_to_dict(d: Database) -> dict:
         "name": d.name,
         "db_type": d.db_type,
         "credentials": [
-            {"id": c.id, "login": c.login, "password": c.password, "note": c.note}
+            {"id": c.id, "login": c.login, "password": c.password,
+             "note": c.note, "admin_only": c.admin_only}
             for c in d.credentials
         ],
         "note": d.note,
+        "admin_only": d.admin_only,
     }
 
 
@@ -108,12 +117,15 @@ def _machine_from_dict(d: dict) -> Machine:
         description=d.get("description", ""),
         connection_type=d.get("connection_type", "SSH"),
         rdp_port=d.get("rdp_port", "3389"),
+        rdp_drives=d.get("rdp_drives", []),
+        admin_only=d.get("admin_only", False),
         credentials=[
             Credential(
                 id=c.get("id", str(uuid.uuid4())),
                 login=c.get("login", ""),
                 password=c.get("password", ""),
                 note=c.get("note", ""),
+                admin_only=c.get("admin_only", False),
             )
             for c in d.get("credentials", [])
         ],
@@ -130,6 +142,7 @@ def _database_from_dict(d: dict) -> Database:
                 login=c.get("login", ""),
                 password=c.get("password", ""),
                 note=c.get("note", ""),
+                admin_only=c.get("admin_only", False),
             )
             for c in raw_creds
         ]
@@ -147,4 +160,5 @@ def _database_from_dict(d: dict) -> Database:
         db_type=d.get("db_type", "MSSQL"),
         credentials=credentials,
         note=d.get("note", ""),
+        admin_only=d.get("admin_only", False),
     )

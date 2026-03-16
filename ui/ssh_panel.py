@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import queue as _queue
 import re
@@ -14,6 +15,12 @@ from datetime import datetime
 
 _ANSI_PRESENT   = re.compile(r'\x1b\[')
 _STACK_TRACE_RE = re.compile(r'^\s+at\s+[\w$.]+\(')   # Java: "    at pkg.Class.method("
+# Shell prompt patterns — used to colorize user-typed commands
+_SHELL_PROMPT_RE = re.compile(
+    r'^(\s*(?:\[[\w@.\-]+ [^\]]*\][#$%>]'  # [user@host dir]# or $
+    r'|[\w@.\-]+:[~\w/\-]*[#$%>]'          # user@host:dir$ or #
+    r'|\$|#|>>>|\.\.\.)\s+)'                # bare $ / # / >>> / ...
+)
 
 _LOG_RULES = [
     # Errors — red bold
@@ -22,6 +29,11 @@ _LOG_RULES = [
     # "Caused by:" (Java stack trace header) — red bold, matched case-sensitively
     (re.compile(r'(Caused by:)'),
      '\x1b[1;31m'),
+    # Denial / negative — red (lookbehind (?<!=) avoids =false in Java args)
+    (re.compile(r'(?<!=)\b(no|NO|denied|DENIED|disabled|DISABLED|rejected|REJECTED'
+                r'|refused|REFUSED|unreachable|UNREACHABLE|inactive|INACTIVE'
+                r'|stopped|STOPPED|down|DOWN|dead|DEAD|false|FALSE|off|OFF)\b'),
+     '\x1b[0;31m'),
     # Warnings — yellow
     (re.compile(r'\b(WARN(?:ING)?)\b'),
      '\x1b[1;33m'),
@@ -37,6 +49,10 @@ _LOG_RULES = [
         r'|DONE|PASS(?:ED)?|STARTED|RUNNING|UP'
         r'|DEPLOYED|REDEPLOYED|REGISTERED)\b'),
      '\x1b[1;32m'),
+    # Affirmative — green (lookbehind (?<!=) avoids =true in Java args)
+    (re.compile(r'(?<!=)\b(yes|YES|enabled|ENABLED|active|ACTIVE|true|TRUE'
+                r'|online|ONLINE|alive|ALIVE|loaded|LOADED)\b'),
+     '\x1b[0;32m'),
     # Maven/Gradle build result — override with specific color per word
     (re.compile(r'\b(BUILD SUCCESS(?:FUL)?)\b'),
      '\x1b[1;32m'),
@@ -45,16 +61,52 @@ _LOG_RULES = [
     # Docker image/container lifecycle
     (re.compile(r'\b(Pulling|Pulled|Pushing|Pushed|Building|Built|Created|Removed)\b'),
      '\x1b[0;36m'),
-    # IPv4 addresses — bright cyan
-    (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'),
+    # IPv4 with optional port — bright cyan IP, bright magenta port
+    # (uses special callback in _colorize_log via _IPV4_PORT_TAG marker)
+    (re.compile(r'\b((?:\d{1,3}\.){3}\d{1,3})(?::(\d{1,5}))?\b'),
+     '_IPV4_PORT'),
+    # IPv6 addresses (4+ groups to avoid matching HH:MM:SS timestamps) — bright cyan
+    (re.compile(r'(?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}(?::(?:\d{1,3}\.){3}\d{1,3})?'),
      '\x1b[0;96m'),
-    # CLI flags: -x  --long-flag  --key=value — bright yellow
-    (re.compile(r'(?:(?<=\s)|(?<=^))(--?[a-zA-Z][\w\-=.]*)'),
-     '\x1b[0;93m'),
+    # MAC addresses — dim cyan
+    (re.compile(r'\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b'),
+     '\x1b[0;36m'),
+    # Dates: 2024-01-15, 15/01/2024 — dim white
+    (re.compile(r'\b\d{4}[-/]\d{2}[-/]\d{2}\b|\b\d{2}[-/]\d{2}[-/]\d{4}\b'),
+     '\x1b[0;37m'),
+    # Email-like addresses (require dot in domain) — bright green
+    # Avoids shell prompts like [root@Jboss0 ~]# where there's no dot
+    (re.compile(r'\b[\w.-]+@[\w-]+\.[\w.-]+\b'),
+     '\x1b[0;92m'),
+    # HTTP methods — bright yellow
+    (re.compile(r'\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b'),
+     '\x1b[1;93m'),
+    # HTTP status codes: 2xx green, 4xx yellow, 5xx red
+    # (?<![.,:\d]) prevents matching inside IPs (dots), timestamps (commas/colons),
+    # and longer numbers; (?![.\d]) prevents matching IP-leading octets.
+    (re.compile(r'(?<![.,:\d])\b(2\d{2})\b(?![.\d])'), '\x1b[0;32m'),
+    (re.compile(r'(?<![.,:\d])\b(4\d{2})\b(?![.\d])'), '\x1b[0;33m'),
+    (re.compile(r'(?<![.,:\d])\b(5\d{2})\b(?![.\d])'), '\x1b[0;31m'),
 ]
 
+def _ipv4_port_sub(m):
+    """Color IPv4 in cyan and optional :port in magenta."""
+    ip = m.group(1)
+    port = m.group(2)
+    result = f'\x1b[0;96m{ip}\x1b[0m'
+    if port:
+        result += f'\x1b[0;95m:{port}\x1b[0m'
+    return result
+
+_PLACEHOLDER_RE = re.compile(r'\x00(\d+)\x00')
+
 def _colorize_log(text: str) -> str:
-    """Add ANSI keyword highlighting to plain-text log lines."""
+    """Add ANSI keyword highlighting to plain-text log lines.
+
+    Uses placeholder markers (\x00idx\x00) so that text already colored by an
+    earlier rule is invisible to later regexes — prevents e.g. HTTP-status
+    rules from re-coloring octets inside an already-highlighted IPv4 address.
+    """
     lines = text.split('\n')
     for i, line in enumerate(lines):
         if _ANSI_PRESENT.search(line):
@@ -63,10 +115,37 @@ def _colorize_log(text: str) -> str:
         if _STACK_TRACE_RE.match(line):
             lines[i] = f'\x1b[2;37m{line}\x1b[0m'
             continue
+        # Shell prompt line — color the command part bright white
+        prompt_m = _SHELL_PROMPT_RE.match(line)
+        if prompt_m:
+            prompt_part = prompt_m.group(1)
+            cmd_part = line[prompt_m.end():]
+            if cmd_part.strip():
+                lines[i] = f'{prompt_part}\x1b[1;97m{cmd_part}\x1b[0m'
+                continue
+        # Stash: list of colored fragments; replaced by \x00idx\x00 in `line`
+        stash: list[str] = []
+        def _stash(fragment: str) -> str:
+            idx = len(stash)
+            stash.append(fragment)
+            return f'\x00{idx}\x00'
         for pat, color in _LOG_RULES:
-            line = pat.sub(lambda m, c=color: f'{c}{m.group()}\x1b[0m', line)
+            if color == '_IPV4_PORT':
+                line = pat.sub(lambda m: _stash(_ipv4_port_sub(m)), line)
+            else:
+                line = pat.sub(
+                    lambda m, c=color: _stash(f'{c}{m.group()}\x1b[0m'), line)
+        # Restore stashed fragments
+        if stash:
+            line = _PLACEHOLDER_RE.sub(lambda m: stash[int(m.group(1))], line)
+        # Always append reset on plain-text lines so pyte never carries
+        # a stale foreground color across visual line-wrap boundaries.
+        line += '\x1b[0m'
         lines[i] = line
     return '\n'.join(lines)
+
+
+
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QSplitter, QWidget,
@@ -75,10 +154,13 @@ from PyQt6.QtWidgets import (
     QFileDialog, QProgressBar, QMenu, QInputDialog, QMessageBox,
     QLineEdit, QTabWidget, QStackedWidget, QScrollArea,
     QCheckBox, QGroupBox, QGridLayout, QFrame, QFormLayout, QSizePolicy,
-    QScrollBar,
+    QScrollBar, QToolButton,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, QSize, QEvent, pyqtSignal, QMimeData, QUrl
-from PyQt6.QtGui import QFont, QFontInfo, QFontMetricsF, QColor, QPainter, QKeySequence, QDesktopServices
+from PyQt6.QtGui import (
+    QFont, QFontInfo, QFontMetricsF, QColor, QPainter, QKeySequence,
+    QDesktopServices, QIcon, QPixmap, QPen, QBrush, QPainterPath,
+)
 
 from ui.rdp import connect_rdp as _connect_rdp
 
@@ -93,7 +175,43 @@ try:
         their pre-run content accessible via scrollback, even if no lines had
         naturally scrolled off the top yet.
         """
-        _ALT_SCREEN = 1049  # DECSET 1049: alternate screen buffer
+        _ALT_SCREEN = 1049          # DECSET 1049: alternate screen buffer
+        _ALT_SCREEN_FLAG = 1049 << 5  # pyte stores private modes shifted by 5
+
+        # Track which rows are continuations of the previous row (soft-wrap).
+        # A row number in this set means it continues the line from the row above.
+        _soft_wrapped: set = set()
+        _in_draw: bool = False
+
+        def reset(self):
+            super().reset()
+            self._soft_wrapped = set()
+            self._in_draw = False
+
+        def draw(self, *args, **kwargs):
+            self._in_draw = True
+            try:
+                super().draw(*args, **kwargs)
+            finally:
+                self._in_draw = False
+
+        def index(self):
+            top, bottom = self.margins or (0, self.lines - 1)
+            will_scroll = self.cursor.y == bottom
+            super().index()
+            if will_scroll:
+                # Content in scroll region shifted up by 1 row.
+                new_set = set()
+                for r in self._soft_wrapped:
+                    if r > top and r <= bottom:
+                        new_set.add(r - 1)
+                    elif r < top or r > bottom:
+                        new_set.add(r)
+                self._soft_wrapped = new_set
+            if self._in_draw:
+                self._soft_wrapped.add(self.cursor.y)
+            else:
+                self._soft_wrapped.discard(self.cursor.y)
 
         def _push_visible_to_history(self):
             """Append each non-empty visible row to history.top (oldest→newest order)."""
@@ -107,70 +225,181 @@ try:
                     pass
 
         def resize(self, lines=None, columns=None):
-            """xterm/PuTTY cursor-relative resize — no row is ever lost or
-            unnecessarily pushed to scrollback.
-
-            Previous attempts failed because they called Screen.resize() which
-            always runs delete_lines(N) from row 0 — destroying content
-            unconditionally — or saved the top-N rows blindly (causing content
-            to accumulate in history on every expand/shrink cycle even when
-            the cursor never moved).
-
-            Correct algorithm (verified by automated tests):
-              SHRINK — only scroll rows to history if the cursor would fall
-                       outside the new viewport.
-                       n_scroll = max(0, cursor.y − (new_lines − 1))
-                       If cursor fits (typical: cursor near top, lots of empty
-                       space below) → zero rows pushed, buffer untouched, only
-                       self.lines decremented.  No phantom history accumulation.
-              EXPAND — just increase self.lines; existing rows stay in place,
-                       new empty rows appear at the bottom.  Shell repaints
-                       via SIGWINCH.  History is never touched on expand.
-            """
+            """Resize with text reflow — narrowing wraps long lines,
+            widening unwraps them back."""
+            import collections as _c
             lines   = lines   or self.lines
             columns = columns or self.columns
             if lines == self.lines and columns == self.columns:
                 return
 
-            if lines < self.lines:
-                # How many top rows must scroll off to keep cursor in view?
-                n_scroll = max(0, self.cursor.y - (lines - 1))
-                if n_scroll > 0:
-                    # Save to scrollback, then shift buffer up.
-                    for y in range(n_scroll):
-                        self.history.top.append(self.buffer[y])
-                    for y in range(self.lines - n_scroll):
-                        self.buffer[y] = self.buffer[y + n_scroll]
-                    for y in range(self.lines - n_scroll, self.lines):
-                        self.buffer.pop(y, None)
-                    self.cursor.y -= n_scroll
-                # Clamp cursor to new bounds.
-                self.cursor.y = min(self.cursor.y, lines - 1)
-                self.cursor.x = min(self.cursor.x, columns - 1)
-            # else: expanding — buffer unchanged, new empty rows appear at bottom.
+            old_cols = self.columns
 
-            # Trim columns if narrowing.
-            if columns < self.columns:
-                for line in self.buffer.values():
-                    for x in range(columns, self.columns):
-                        line.pop(x, None)
+            # Reflow when column count changes (skip alternate screen —
+            # full-screen apps handle their own resize via SIGWINCH).
+            if columns != old_cols and self._ALT_SCREEN_FLAG not in self.mode:
+                self._reflow(old_cols, columns, lines)
+            else:
+                # Row-only change (or alternate screen).
+                if lines < self.lines:
+                    n_scroll = max(0, self.cursor.y - (lines - 1))
+                    if n_scroll > 0:
+                        for y in range(n_scroll):
+                            self.history.top.append(self.buffer[y])
+                        for y in range(self.lines - n_scroll):
+                            self.buffer[y] = self.buffer[y + n_scroll]
+                        for y in range(self.lines - n_scroll, self.lines):
+                            self.buffer.pop(y, None)
+                        self.cursor.y -= n_scroll
+                    self.cursor.y = min(self.cursor.y, lines - 1)
+                    self.cursor.x = min(self.cursor.x, columns - 1)
+                self.lines   = lines
+                self.columns = columns
 
-            self.lines   = lines
-            self.columns = columns
-            self.dirty.update(range(lines))
+            self.dirty.update(range(self.lines))
             self.set_margins()
 
+        def _reflow(self, old_cols, new_cols, new_lines):
+            """Reflow buffer content when column width changes."""
+            import collections as _c
+            dc = self.default_char
+
+            # ── Step 1: extract logical lines ─────────────────────────
+            logical_lines = []   # list[list[Char]]
+            cur_chars     = []
+            cursor_ll     = 0    # which logical line the cursor is on
+            cursor_co     = 0    # char offset within that logical line
+
+            for y in range(self.lines):
+                row = self.buffer[y]
+
+                # Track cursor
+                if y == self.cursor.y:
+                    cursor_ll = len(logical_lines)
+                    cursor_co = len(cur_chars) + self.cursor.x
+
+                # Rightmost non-space column (may exceed old_cols if chars
+                # were preserved from a previous wider layout).
+                content_max = -1
+                for x in row.keys():
+                    if isinstance(x, int) and row[x].data not in (' ', ''):
+                        if x > content_max:
+                            content_max = x
+
+                # Collect characters
+                for x in range(content_max + 1):
+                    cur_chars.append(row.get(x, dc))
+
+                # Check if the NEXT row is a continuation (soft-wrapped
+                # from this row).  _soft_wrapped tracks actual wraps set by
+                # draw(), so we no longer rely on the "row fills to edge"
+                # heuristic which wrongly joins long log lines.
+                if y < self.lines - 1 and (y + 1) in self._soft_wrapped:
+                    continue   # continuation of same logical line
+
+                logical_lines.append(cur_chars)
+                cur_chars = []
+
+            if cur_chars:
+                logical_lines.append(cur_chars)
+
+            # Trim trailing empty logical lines (keep up to cursor row)
+            last_nonempty = cursor_ll
+            for i in range(len(logical_lines) - 1, -1, -1):
+                if logical_lines[i]:
+                    last_nonempty = max(last_nonempty, i)
+                    break
+            logical_lines = logical_lines[:last_nonempty + 1]
+
+            # ── Step 2: re-wrap at new width ──────────────────────────
+            new_rows = []        # list[dict[int, Char]]
+            new_sw   = set()     # soft-wrap flags for new layout
+            nc_y = nc_x = 0
+            cursor_placed = False
+
+            for li, chars in enumerate(logical_lines):
+                if not chars:
+                    new_rows.append({})
+                    if li == cursor_ll:
+                        nc_y = len(new_rows) - 1
+                        nc_x = min(cursor_co, new_cols - 1)
+                        cursor_placed = True
+                    continue
+
+                first_chunk = True
+                for i in range(0, len(chars), new_cols):
+                    row = {}
+                    for j, ch in enumerate(chars[i:i + new_cols]):
+                        row[j] = ch
+                    if not first_chunk:
+                        new_sw.add(len(new_rows))
+                    new_rows.append(row)
+                    first_chunk = False
+
+                    if li == cursor_ll and i <= cursor_co < i + new_cols:
+                        nc_y = len(new_rows) - 1
+                        nc_x = cursor_co - i
+                        cursor_placed = True
+
+                # Cursor at end of logical line (e.g. after typing exactly
+                # N chars that filled a row — cursor wrapped to next row).
+                if li == cursor_ll and cursor_co >= len(chars) and not cursor_placed:
+                    nc_y = len(new_rows)
+                    nc_x = 0
+
+            # ── Step 3: push overflow to history ──────────────────────
+            overflow = max(0, len(new_rows) - new_lines)
+            if overflow:
+                for y in range(overflow):
+                    self.history.top.append(new_rows[y])
+                new_rows = new_rows[overflow:]
+                nc_y = max(0, nc_y - overflow)
+                new_sw = {r - overflow for r in new_sw if r >= overflow}
+
+            # ── Step 4: rebuild buffer ────────────────────────────────
+            new_buf = _c.defaultdict(
+                lambda: _c.defaultdict(lambda: dc))
+            for y, row in enumerate(new_rows):
+                for x, ch in row.items():
+                    new_buf[y][x] = ch
+            self.buffer = new_buf
+            self._soft_wrapped = new_sw
+
+            self.lines   = new_lines
+            self.columns = new_cols
+            self.cursor.y = min(nc_y, new_lines - 1)
+            self.cursor.x = min(nc_x, new_cols - 1)
+
         def erase_in_display(self, how=0, **kwargs):
-            # Full-screen clear (e.g. \x1b[2J from `clear` or first `top` frame)
-            # while NOT already inside the alternate screen → save to history first.
-            if how in (2, 3) and self._ALT_SCREEN not in self.mode:
-                self._push_visible_to_history()
+            if how == 3:
+                # CSI 3 J — erase scrollback buffer.
+                self.history.top.clear()
+                self.history.bottom.clear()
+                self._soft_wrapped.clear()
+                return
+            if how == 2:
+                if self._ALT_SCREEN_FLAG not in self.mode:
+                    # CSI 2 J on main screen (clear / Ctrl+L) — wipe
+                    # scrollback so the user cannot scroll back to old
+                    # content.  Older servers (CentOS 7) never send CSI 3 J,
+                    # so relying on it alone leaves stale history.
+                    # Full-screen apps use the alternate screen and are
+                    # unaffected by this.
+                    if not getattr(self, '_suppress_history_push', False):
+                        self._push_visible_to_history()
+                    self._suppress_history_push = False
+                    self.history.top.clear()
+                    self.history.bottom.clear()
+                super().erase_in_display(how, **kwargs)
+                if self._ALT_SCREEN_FLAG not in self.mode:
+                    self._soft_wrapped.clear()
+                return
             super().erase_in_display(how, **kwargs)
 
         def set_mode(self, *modes, **kwargs):
             # Entering alternate screen (\x1b[?1049h) → save main screen to history.
             if kwargs.get("private") and self._ALT_SCREEN in modes:
-                if self._ALT_SCREEN not in self.mode:
+                if self._ALT_SCREEN_FLAG not in self.mode:
                     self._push_visible_to_history()
             super().set_mode(*modes, **kwargs)
 
@@ -201,6 +430,11 @@ _PYTE_COLORS = {
     'bright green':   _PALETTE_16[10], 'bright brown':   _PALETTE_16[11],
     'bright blue':    _PALETTE_16[12], 'bright magenta': _PALETTE_16[13],
     'bright cyan':    _PALETTE_16[14], 'bright white':   _PALETTE_16[15],
+    # pyte >=0.8 uses no-space names
+    'brightblack':    _PALETTE_16[8],  'brightred':      _PALETTE_16[9],
+    'brightgreen':    _PALETTE_16[10], 'brightbrown':    _PALETTE_16[11],
+    'brightblue':     _PALETTE_16[12], 'brightmagenta':  _PALETTE_16[13],
+    'brightcyan':     _PALETTE_16[14], 'brightwhite':    _PALETTE_16[15],
 }
 _DEFAULT_FG = '#c9d1d9'
 _DEFAULT_BG = '#0d1117'
@@ -342,7 +576,13 @@ class TerminalWidget(QWidget):
     def clear(self):
         if self._screen:
             self._screen.reset()
+            self._screen.history.top.clear()
+            self._screen.history.bottom.clear()
+            # Suppress the next erase_in_display from re-pushing content
+            # to history (server responds to Ctrl+L with \x1b[2J).
+            self._screen._suppress_history_push = True
         self._scroll_offset = 0
+        self._hist_cache    = None
         self._sel_start = self._sel_end = None
         self.update()
         self._emit_scroll()
@@ -717,15 +957,66 @@ class _TofuHostKeyPolicy(paramiko.MissingHostKeyPolicy):
             self._save()
 
 
-def _make_client(host: str, user: str, password: str) -> 'paramiko.SSHClient':
+def _make_client(host: str, user: str, password: str, port: int = 22) -> 'paramiko.SSHClient':
+    """Connect via SSH, tolerating legacy algorithms and keyboard-interactive auth.
+
+    Paramiko 4.0 disables ssh-rsa (SHA-1) and older key-exchange by default.
+    Many hospital Linux boxes still rely on these.  We re-enable them via
+    disabled_algorithms={} so the behaviour matches MobaXterm / PuTTY.
+
+    Auth order when password is provided:
+      1. Normal password auth
+      2. If rejected → keyboard-interactive (some servers only allow this)
+    """
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(_TofuHostKeyPolicy())
-    c.connect(
-        host, port=22,
-        username=user, password=password,
+
+    # Common transport/connection kwargs
+    base = dict(
+        hostname=host, port=port, username=user,
         timeout=12, banner_timeout=20,
-        look_for_keys=False, allow_agent=False,
+        disabled_algorithms={},
     )
+
+    if not password:
+        c.connect(**base, look_for_keys=True, allow_agent=True)
+        return c
+
+    # --- Has password ---
+    try:
+        c.connect(**base, password=password,
+                  look_for_keys=False, allow_agent=False)
+        return c
+    except paramiko.ssh_exception.AuthenticationException:
+        pass   # password method rejected — try keyboard-interactive below
+    except Exception:
+        raise  # network error, host-key error, etc. — don't retry
+
+    # Keyboard-interactive fallback: open a raw Transport, verify the
+    # host key through TOFU, then auth via keyboard-interactive.
+    c.close()
+    import socket as _sock
+    sock = _sock.create_connection((host, port), timeout=12)
+    transport = paramiko.Transport(sock)
+    transport.start_client()
+    # Host-key verification
+    host_key = transport.get_remote_server_key()
+    _TofuHostKeyPolicy().missing_host_key(None, host, host_key)
+    def _kbd_interactive_handler(title, instructions, prompts):
+        answers = []
+        for prompt_text, _echo in prompts:
+            pt = prompt_text.lower()
+            # Only respond to password/passcode prompts; refuse others
+            if any(kw in pt for kw in ('password', 'passcode', 'hasło')):
+                answers.append(password)
+            else:
+                answers.append('')
+        return answers
+
+    transport.auth_interactive(user, _kbd_interactive_handler)
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(_TofuHostKeyPolicy())
+    c._transport = transport
     return c
 
 
@@ -735,9 +1026,10 @@ class _SshWorker(QThread):
     error     = pyqtSignal(str)
     done      = pyqtSignal()
 
-    def __init__(self, host, user, password, cols=220, rows=50):
+    def __init__(self, host, user, password, cols=220, rows=50, port=22):
         super().__init__()
         self._host, self._user, self._pw = host, user, password
+        self._port    = port
         self._cols    = cols
         self._rows    = rows
         self._channel = None
@@ -748,16 +1040,80 @@ class _SshWorker(QThread):
         # SSH channel within one iteration regardless of Qt event-queue depth.
         self._send_q: _queue.SimpleQueue[bytes] = _queue.SimpleQueue()
 
+    # ── Interactive password input ─────────────────────────────────────
+
+    def _read_interactive_line(self, echo: bool = True) -> str:
+        """Read a line from the terminal send queue (blocks until Enter).
+
+        Used during keyboard-interactive auth so the user can type a
+        password directly in the terminal instead of a separate dialog.
+        """
+        buf = bytearray()
+        while True:
+            try:
+                data = self._send_q.get(timeout=120)
+            except _queue.Empty:
+                return ''
+            for b in data:
+                if b in (0x0d, 0x0a):           # Enter
+                    self.output.emit('\r\n')
+                    return buf.decode('utf-8', errors='replace')
+                if b == 0x7f or b == 0x08:      # Backspace
+                    if buf:
+                        buf.pop()
+                        self.output.emit('\b \b')
+                    continue
+                if b == 0x03:                    # Ctrl+C → cancel
+                    self.output.emit('\r\n')
+                    return ''
+                if b >= 0x20:                    # Printable
+                    buf.append(b)
+                    self.output.emit('*' if not echo else chr(b))
+        return buf.decode('utf-8', errors='replace')
+
+    # ── Main loop ──────────────────────────────────────────────────────
+
     def run(self):
         import time
         try:
-            self._client  = _make_client(self._host, self._user, self._pw)
-            # Open session manually so we can request X11 forwarding before
+            # ── Authentication ─────────────────────────────────────────
+            if self._pw:
+                self._client = _make_client(
+                    self._host, self._user, self._pw, self._port)
+            else:
+                # Try key-based / agent auth first
+                key_ok = False
+                try:
+                    self._client = _make_client(
+                        self._host, self._user, '', self._port)
+                    key_ok = True
+                except OSError:
+                    raise   # network error — let outer handler deal with it
+                except Exception:
+                    pass    # auth failed (any reason) — fall through
+
+                if not key_ok:
+                    # No keys worked → ask for password in terminal
+                    self.output.emit("Password: ")
+                    pw = self._read_interactive_line(echo=False)
+                    if not pw:
+                        self.error.emit("Anulowano logowanie.")
+                        return
+                    self._pw = pw
+                    self._client = _make_client(
+                        self._host, self._user, pw, self._port)
+
+            # Open session manually so we can attempt X11 forwarding before
             # invoking the shell (invoke_shell() doesn't expose this).
             transport     = self._client.get_transport()
             self._channel = transport.open_session()
-            self._channel.request_x11(screen_number=0, single_connection=False,
-                                      handler=_x11_handler)
+            try:
+                self._channel.request_x11(screen_number=0, single_connection=False,
+                                          handler=_x11_handler)
+            except Exception:
+                # X11 rejected (older servers close the channel on failure).
+                # Re-open a fresh session and continue without X11.
+                self._channel = transport.open_session()
             self._channel.get_pty(term='xterm-256color',
                                   width=self._cols, height=self._rows)
             self._channel.invoke_shell()
@@ -767,10 +1123,6 @@ class _SshWorker(QThread):
                 # ── Drain outgoing queue FIRST ────────────────────────────────
                 # send() puts bytes here so Ctrl+C reaches the SSH channel
                 # within one loop iteration regardless of Qt event-queue depth.
-                # After b'\x03' we also fast-drain any recv backlog so the
-                # display stops flooding immediately instead of up to seconds
-                # later (tail -f / docker logs can buffer megabytes of output
-                # that would otherwise keep flooding the screen).
                 got_ctrl_c = False
                 while not self._send_q.empty():
                     try:
@@ -782,18 +1134,10 @@ class _SshWorker(QThread):
                         break
 
                 if got_ctrl_c:
-                    # Drain recv backlog instantly (no sleep) so the loop
-                    # finishes in < 1 ms — before the server's SIGINT response
-                    # (^C echo + prompt) has time to arrive over the network.
-                    # With sleep(0.002) inside, local-server RTT (~1 ms) meant
-                    # the prompt arrived during drain and was discarded.
                     deadline = time.monotonic() + 0.5
                     while (time.monotonic() < deadline
                            and self._channel.recv_ready()):
-                        self._channel.recv(65536)   # no sleep — drain fast
-                    # Shell sends ^C echo + new prompt after processing SIGINT.
-                    # Poll up to 500 ms (covers slow VPN servers) and emit
-                    # everything that arrives so the prompt is shown immediately.
+                        self._channel.recv(65536)
                     for _ in range(50):
                         time.sleep(0.01)
                         if self._channel.recv_ready():
@@ -889,13 +1233,14 @@ class _SftpConnectWorker(QThread):
     ready = pyqtSignal(object, object)
     error = pyqtSignal(str)
 
-    def __init__(self, host, user, password):
+    def __init__(self, host, user, password, port=22):
         super().__init__()
         self._host, self._user, self._pw = host, user, password
+        self._port = port
 
     def run(self):
         try:
-            c = _make_client(self._host, self._user, self._pw)
+            c = _make_client(self._host, self._user, self._pw, self._port)
             self.ready.emit(c.open_sftp(), c)
         except paramiko.AuthenticationException:
             self.error.emit("Błąd autentykacji — sprawdź login i hasło.")
@@ -988,6 +1333,286 @@ class _NumItem(QTableWidgetItem):
             return super().__lt__(other)
 
 
+class _DirFirstItem(QTableWidgetItem):
+    """Name item that always sorts directories before files."""
+    def __lt__(self, other):
+        try:
+            _, my_dir, _ = self.data(Qt.ItemDataRole.UserRole)
+            _, ot_dir, _ = other.data(Qt.ItemDataRole.UserRole)
+            # ".." always first
+            my_name = self.text()
+            ot_name = other.text()
+            if my_name == '..':
+                return True
+            if ot_name == '..':
+                return False
+            # Dirs before files
+            if my_dir != ot_dir:
+                return my_dir  # True (dir) < False (file) → dir first
+            # Same type: alphabetical (case-insensitive)
+            return my_name.lower() < ot_name.lower()
+        except Exception:
+            return super().__lt__(other)
+
+
+# ──────────────────────────────────────── SFTP file icons ─────────────────────
+
+_SFTP_ICON_CACHE: dict[str, QIcon] = {}
+
+def _sftp_icon(key: str) -> QIcon:
+    """Return a cached QPainter-drawn icon for SFTP file types."""
+    if key in _SFTP_ICON_CACHE:
+        return _SFTP_ICON_CACHE[key]
+    sz = 16
+    pix = QPixmap(sz, sz)
+    pix.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    _SFTP_ICON_DRAW[key](p, sz)
+    p.end()
+    icon = QIcon(pix)
+    _SFTP_ICON_CACHE[key] = icon
+    return icon
+
+
+def _draw_folder(p: QPainter, s: int):
+    """Yellow folder icon."""
+    c = QColor("#e2b340")
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(c))
+    # Tab
+    path = QPainterPath()
+    path.moveTo(1, 4)
+    path.lineTo(1, 2.5)
+    path.quadTo(1, 1.5, 2, 1.5)
+    path.lineTo(5.5, 1.5)
+    path.lineTo(7, 3.5)
+    path.lineTo(13, 3.5)
+    path.quadTo(14.5, 3.5, 14.5, 5)
+    path.lineTo(14.5, 12.5)
+    path.quadTo(14.5, 14, 13, 14)
+    path.lineTo(3, 14)
+    path.quadTo(1, 14, 1, 12.5)
+    path.closeSubpath()
+    p.drawPath(path)
+    # Lighter front face
+    p.setBrush(QBrush(QColor("#f0c850")))
+    front = QPainterPath()
+    front.moveTo(1, 6)
+    front.lineTo(14.5, 6)
+    front.lineTo(14.5, 12.5)
+    front.quadTo(14.5, 14, 13, 14)
+    front.lineTo(3, 14)
+    front.quadTo(1, 14, 1, 12.5)
+    front.closeSubpath()
+    p.drawPath(front)
+
+
+def _draw_file_generic(p: QPainter, s: int):
+    """White/gray generic file icon."""
+    p.setPen(QPen(QColor("#8b949e"), 1.2))
+    p.setBrush(QBrush(QColor("#21262d")))
+    path = QPainterPath()
+    path.moveTo(3, 1)
+    path.lineTo(10, 1)
+    path.lineTo(13, 4)
+    path.lineTo(13, 14)
+    path.quadTo(13, 15, 12, 15)
+    path.lineTo(4, 15)
+    path.quadTo(3, 15, 3, 14)
+    path.closeSubpath()
+    p.drawPath(path)
+    # Dog ear
+    p.setPen(QPen(QColor("#8b949e"), 0.8))
+    p.drawLine(10, 1, 10, 4)
+    p.drawLine(10, 4, 13, 4)
+
+
+def _draw_file_text(p: QPainter, s: int):
+    """Text file — lines inside a doc."""
+    _draw_file_generic(p, s)
+    p.setPen(QPen(QColor("#7d8590"), 1.0))
+    for y in (7, 9.5, 12):
+        p.drawLine(5, int(y), 11, int(y))
+
+
+def _draw_file_script(p: QPainter, s: int):
+    """Shell/script file — terminal prompt icon."""
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor("#1a1e24")))
+    p.drawRoundedRect(1, 1, 14, 14, 2.5, 2.5)
+    # Title bar
+    p.setBrush(QBrush(QColor("#30363d")))
+    p.drawRoundedRect(1, 1, 14, 4, 2.5, 2.5)
+    p.drawRect(1, 3, 14, 2)
+    # Prompt >_
+    p.setPen(QPen(QColor("#3fb950"), 1.5))
+    p.drawLine(4, 9, 7, 11)
+    p.drawLine(4, 13, 7, 11)
+    p.setPen(QPen(QColor("#8b949e"), 1.3))
+    p.drawLine(9, 13, 12, 13)
+
+
+def _draw_file_code(p: QPainter, s: int):
+    """Code file — angle brackets < />."""
+    _draw_file_generic(p, s)
+    p.setPen(QPen(QColor("#58a6ff"), 1.3))
+    # <
+    p.drawLine(5, 8, 3, 10)
+    p.drawLine(3, 10, 5, 12)
+    # />
+    p.drawLine(8, 12, 10, 8)
+    p.drawLine(11, 8, 13, 10)
+    p.drawLine(13, 10, 11, 12)
+
+
+def _draw_file_config(p: QPainter, s: int):
+    """Config file — gear/cog."""
+    _draw_file_generic(p, s)
+    cx, cy, r = 8, 10.5, 2.2
+    p.setPen(QPen(QColor("#e2b340"), 1.2))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(int(cx - r), int(cy - r), int(2 * r), int(2 * r))
+    p.setPen(QPen(QColor("#e2b340"), 1.0))
+    for i in range(6):
+        a = math.radians(i * 60)
+        x1, y1 = cx + r * math.cos(a), cy + r * math.sin(a)
+        x2, y2 = cx + (r + 1.3) * math.cos(a), cy + (r + 1.3) * math.sin(a)
+        p.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+
+def _draw_file_archive(p: QPainter, s: int):
+    """Archive file — zip icon."""
+    _draw_file_generic(p, s)
+    p.setPen(QPen(QColor("#da8b45"), 1.2))
+    # Zigzag
+    p.drawLine(7, 6, 9, 8)
+    p.drawLine(9, 8, 7, 10)
+    p.drawLine(7, 10, 9, 12)
+
+
+def _draw_file_image(p: QPainter, s: int):
+    """Image file — landscape icon."""
+    _draw_file_generic(p, s)
+    # Mountain
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor("#3fb950")))
+    path = QPainterPath()
+    path.moveTo(5, 13)
+    path.lineTo(8, 8)
+    path.lineTo(11, 13)
+    path.closeSubpath()
+    p.drawPath(path)
+    # Sun
+    p.setBrush(QBrush(QColor("#e2b340")))
+    p.drawEllipse(10, 6, 3, 3)
+
+
+def _draw_file_log(p: QPainter, s: int):
+    """Log file — scroll icon."""
+    _draw_file_generic(p, s)
+    p.setPen(QPen(QColor("#da8b45"), 1.0))
+    for y in (7, 9, 11, 13):
+        w = 6 if y < 13 else 4
+        p.drawLine(5, y, 5 + w, y)
+
+
+def _draw_file_data(p: QPainter, s: int):
+    """Data/DB file — cylinder."""
+    p.setPen(QPen(QColor("#8b949e"), 1.0))
+    p.setBrush(QBrush(QColor("#1f3a5f")))
+    p.drawEllipse(3, 1, 10, 4)
+    p.drawRect(3, 3, 10, 10)
+    p.setBrush(QBrush(QColor("#1f3a5f")))
+    p.drawEllipse(3, 11, 10, 4)
+    p.setPen(QPen(QColor("#58a6ff"), 1.0))
+    p.drawEllipse(3, 1, 10, 4)
+
+
+def _draw_file_pdf(p: QPainter, s: int):
+    """PDF file — red document."""
+    p.setPen(QPen(QColor("#f85149"), 1.2))
+    p.setBrush(QBrush(QColor("#2d1117")))
+    path = QPainterPath()
+    path.moveTo(3, 1)
+    path.lineTo(10, 1)
+    path.lineTo(13, 4)
+    path.lineTo(13, 14)
+    path.quadTo(13, 15, 12, 15)
+    path.lineTo(4, 15)
+    path.quadTo(3, 15, 3, 14)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.setPen(QPen(QColor("#f85149"), 0.8))
+    p.drawLine(10, 1, 10, 4)
+    p.drawLine(10, 4, 13, 4)
+    # "P" letter
+    p.setPen(QPen(QColor("#f85149"), 1.5))
+    p.drawLine(6, 7, 6, 13)
+    p.drawLine(6, 7, 9, 7)
+    p.drawLine(9, 7, 9, 10)
+    p.drawLine(6, 10, 9, 10)
+
+
+def _draw_parent_dir(p: QPainter, s: int):
+    """Parent dir (..) — folder with up arrow."""
+    _draw_folder(p, s)
+    p.setPen(QPen(QColor("#0d1117"), 2.0))
+    p.drawLine(8, 12, 8, 8)
+    p.drawLine(6, 10, 8, 8)
+    p.drawLine(10, 10, 8, 8)
+
+
+# Extension → icon key mapping
+_EXT_ICON_MAP: dict[str, str] = {}
+_exts_script = ('.sh', '.bash', '.zsh', '.ksh', '.csh', '.fish', '.bat', '.cmd', '.ps1')
+_exts_code = ('.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
+              '.rb', '.php', '.cs', '.swift', '.kt', '.scala', '.lua', '.pl', '.r')
+_exts_text = ('.txt', '.md', '.rst', '.csv', '.tsv', '.rtf', '.tex')
+_exts_config = ('.conf', '.cfg', '.ini', '.yaml', '.yml', '.toml', '.json', '.xml',
+                '.properties', '.env', '.service', '.desktop')
+_exts_archive = ('.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar', '.tgz', '.war',
+                 '.jar', '.ear', '.rpm', '.deb')
+_exts_image = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.ico', '.webp', '.tiff')
+_exts_log = ('.log', '.out', '.err')
+_exts_data = ('.sql', '.db', '.sqlite', '.mdb', '.ora', '.dump')
+_exts_pdf = ('.pdf',)
+
+for _ext in _exts_script:  _EXT_ICON_MAP[_ext] = 'script'
+for _ext in _exts_code:    _EXT_ICON_MAP[_ext] = 'code'
+for _ext in _exts_text:    _EXT_ICON_MAP[_ext] = 'text'
+for _ext in _exts_config:  _EXT_ICON_MAP[_ext] = 'config'
+for _ext in _exts_archive: _EXT_ICON_MAP[_ext] = 'archive'
+for _ext in _exts_image:   _EXT_ICON_MAP[_ext] = 'image'
+for _ext in _exts_log:     _EXT_ICON_MAP[_ext] = 'log'
+for _ext in _exts_data:    _EXT_ICON_MAP[_ext] = 'data'
+for _ext in _exts_pdf:     _EXT_ICON_MAP[_ext] = 'pdf'
+
+_SFTP_ICON_DRAW = {
+    'folder':  _draw_folder,
+    'parent':  _draw_parent_dir,
+    'file':    _draw_file_generic,
+    'text':    _draw_file_text,
+    'script':  _draw_file_script,
+    'code':    _draw_file_code,
+    'config':  _draw_file_config,
+    'archive': _draw_file_archive,
+    'image':   _draw_file_image,
+    'log':     _draw_file_log,
+    'data':    _draw_file_data,
+    'pdf':     _draw_file_pdf,
+}
+
+
+def _icon_for_entry(name: str, is_dir: bool) -> QIcon:
+    """Pick the right icon for a file/directory entry."""
+    if is_dir:
+        return _sftp_icon('parent' if name == '..' else 'folder')
+    ext = os.path.splitext(name)[1].lower()
+    key = _EXT_ICON_MAP.get(ext, 'file')
+    return _sftp_icon(key)
+
+
 # ──────────────────────────────────────── SFTP panel ─────────────────────────
 
 class SftpPanel(QWidget):
@@ -1005,6 +1630,8 @@ class SftpPanel(QWidget):
         self._path   = '/'
         self._history: list[str] = []
         self._workers: list[QThread] = []
+        self._rename_editor: QLineEdit | None = None
+        self._rename_editor_data: dict | None = None
         self._setup_ui()
 
         # Slow-double-click rename (click on already-selected row after a pause)
@@ -1014,8 +1641,6 @@ class SftpPanel(QWidget):
         self._rename_timer.timeout.connect(self._do_pending_rename)
         self._pending_rename_item = None
         self._click_was_selected  = False
-        self._rename_editor: QLineEdit | None = None
-        self._rename_editor_data: dict | None = None
         self._table.viewport().installEventFilter(self)
         self._table.itemClicked.connect(self._on_item_clicked)
 
@@ -1047,11 +1672,52 @@ class SftpPanel(QWidget):
             b.setEnabled(False)
             nav.addWidget(b)
 
+        # Path bar: label (click to edit) / line-edit (copy, Enter to navigate)
+        self._path_stack = QStackedWidget()
+        self._path_stack.setFixedHeight(28)
+
         self._path_lbl = QLabel("Nie połączono")
         self._path_lbl.setFont(QFont("Consolas", 9))
         self._path_lbl.setStyleSheet("color: #58a6ff; padding-left: 4px;")
-        self._path_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        nav.addWidget(self._path_lbl, 1)
+        self._path_lbl.setCursor(Qt.CursorShape.IBeamCursor)
+        self._path_lbl.mousePressEvent = lambda e: self._start_path_edit()
+        self._path_stack.addWidget(self._path_lbl)   # index 0
+
+        self._path_edit = QLineEdit()
+        self._path_edit.setFont(QFont("Consolas", 9))
+        self._path_edit.setStyleSheet(
+            "QLineEdit{background:#0d1117;color:#58a6ff;border:1px solid #1f6feb;"
+            "border-radius:4px;padding:0 4px;}"
+        )
+        self._path_edit.returnPressed.connect(self._navigate_from_edit)
+        self._path_stack.addWidget(self._path_edit)   # index 1
+        self._path_edit.installEventFilter(self)
+
+        self._path_stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        nav.addWidget(self._path_stack, 1)
+
+        # History dropdown button
+        self._btn_history = QToolButton()
+        self._btn_history.setText("▾")
+        self._btn_history.setFixedSize(22, 28)
+        self._btn_history.setToolTip("Historia folderów")
+        self._btn_history.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._btn_history.setStyleSheet(
+            "QToolButton{background:#151b23;color:#8b949e;"
+            "border:1px solid #21262d;border-radius:4px;font-size:12px;}"
+            "QToolButton:hover{background:#1c2433;color:#c9d1d9;border-color:#30363d;}"
+            "QToolButton::menu-indicator{image:none;}"
+        )
+        self._history_menu = QMenu(self)
+        self._history_menu.setStyleSheet(
+            "QMenu{background:#161b22;color:#e6edf3;border:1px solid #30363d;"
+            "border-radius:6px;padding:4px;}"
+            "QMenu::item{padding:4px 16px;border-radius:3px;}"
+            "QMenu::item:selected{background:#1f6feb;}"
+        )
+        self._btn_history.setMenu(self._history_menu)
+        nav.addWidget(self._btn_history)
+
         root.addLayout(nav)
 
         # File table
@@ -1077,6 +1743,7 @@ class SftpPanel(QWidget):
         self._table.setShowGrid(False)
         sftp_font = QFont("Consolas", 10)
         self._table.setFont(sftp_font)
+        self._table.setIconSize(QSize(16, 16))
         self._table.setSortingEnabled(True)
         self._table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1085,33 +1752,57 @@ class SftpPanel(QWidget):
         self._table.itemSelectionChanged.connect(self._on_sel_change)
         self._table.setStyleSheet("""
             QTableWidget {
-                background: #161b22;
-                alternate-background-color: #1c2128;
+                background: #0d1117;
+                alternate-background-color: #111820;
                 color: #e6edf3;
-                border: 1px solid #30363d;
-                border-radius: 4px;
+                border: 1px solid #21262d;
+                border-radius: 6px;
                 gridline-color: transparent;
+                selection-background-color: #1f6feb;
+                selection-color: #ffffff;
             }
-            QTableWidget::item { padding: 3px 6px; }
+            QTableWidget::item {
+                padding: 4px 4px;
+                border-bottom: 1px solid #161b22;
+            }
             QTableWidget::item:selected {
                 background: #1f6feb;
                 color: #ffffff;
+                border-radius: 3px;
+            }
+            QTableWidget::item:hover:!selected {
+                background: #161b22;
             }
             QHeaderView::section {
-                background: #21262d;
-                color: #8b949e;
+                background: #0d1117;
+                color: #7d8590;
                 border: none;
-                border-bottom: 1px solid #30363d;
-                padding: 4px 6px;
-                font-weight: bold;
+                border-bottom: 2px solid #21262d;
+                padding: 5px 8px;
+                font-size: 10px;
+                font-weight: 600;
+                text-transform: uppercase;
             }
+            QScrollBar:vertical {
+                background: #0d1117;
+                width: 8px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #30363d;
+                border-radius: 4px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover { background: #484f58; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
         """)
         root.addWidget(self._table, 1)
 
         # Drag & drop hint
         hint = QLabel("Upuść pliki tutaj aby wgrać  ⬆")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet("color: #444; font-size: 10px; padding: 2px;")
+        hint.setStyleSheet("color:#30363d; font-size:10px; padding:2px;")
         root.addWidget(hint)
 
         # Transfer buttons + progress
@@ -1119,16 +1810,21 @@ class SftpPanel(QWidget):
         self._btn_dl = QPushButton("⬇  Pobierz")
         self._btn_dl.setEnabled(False)
         self._btn_dl.setStyleSheet(
-            "QPushButton{background:#1a3a1a;color:#8ae234;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#2a4a2a;}"
-            "QPushButton:disabled{color:#333;background:#111;}")
+            "QPushButton{background:#0d1f0d;color:#3fb950;"
+            "border:1px solid #1b3d1b;border-radius:6px;padding:4px 10px;"
+            "font-size:11px;}"
+            "QPushButton:hover{background:#152b15;border-color:#2d5a2d;}"
+            "QPushButton:disabled{color:#30363d;background:#0d1117;"
+            "border-color:#1c2128;}")
         self._btn_dl.clicked.connect(self._download)
 
         self._btn_ul = QPushButton("⬆  Wgraj")
         self._btn_ul.setEnabled(False)
         self._btn_ul.setStyleSheet(
-            "QPushButton{background:#1a2a3a;color:#58a6ff;border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#2a3a4a;}"
+            "QPushButton{background:#0d1525;color:#58a6ff;"
+            "border:1px solid #1a3050;border-radius:6px;padding:4px 10px;"
+            "font-size:11px;}"
+            "QPushButton:hover{background:#152540;border-color:#2a4a6a;}"
             "QPushButton:disabled{color:#333;background:#111;}")
         self._btn_ul.clicked.connect(self._upload_browse)
 
@@ -1149,8 +1845,56 @@ class SftpPanel(QWidget):
         b = QPushButton(text)
         b.setFixedSize(28, 28)
         b.setToolTip(tip)
+        b.setStyleSheet(
+            "QPushButton{background:#151b23;color:#8b949e;"
+            "border:1px solid #21262d;border-radius:6px;font-size:13px;}"
+            "QPushButton:hover{background:#1c2433;color:#c9d1d9;"
+            "border-color:#30363d;}"
+            "QPushButton:disabled{color:#30363d;border-color:#1c2128;}")
         b.clicked.connect(slot)
         return b
+
+    # ── Path bar helpers ─────────────────────────────────────────────────
+
+    def _start_path_edit(self):
+        """Switch path bar to editable line-edit for copy / manual navigation."""
+        self._path_edit.setText(self._path)
+        self._path_stack.setCurrentIndex(1)
+        self._path_edit.setFocus()
+        self._path_edit.selectAll()
+
+    def _end_path_edit(self):
+        """Switch back to label display."""
+        self._path_stack.setCurrentIndex(0)
+
+    def _navigate_from_edit(self):
+        """Navigate to path typed in the edit field."""
+        target = self._path_edit.text().strip()
+        self._end_path_edit()
+        if target and self._sftp:
+            self._list(target)
+
+    def _update_history_menu(self):
+        """Rebuild the history dropdown menu from self._history."""
+        self._history_menu.clear()
+        if not self._history:
+            a = self._history_menu.addAction("(brak historii)")
+            a.setEnabled(False)
+            return
+        # Show most recent first, deduplicated, max 20
+        seen = set()
+        for path in reversed(self._history):
+            if path in seen:
+                continue
+            seen.add(path)
+            self._history_menu.addAction(path, lambda p=path: self._jump_history(p))
+            if len(seen) >= 20:
+                break
+
+    def _jump_history(self, path: str):
+        """Navigate directly to a path from the history dropdown."""
+        if self._sftp:
+            self._list(path)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -1177,16 +1921,19 @@ class SftpPanel(QWidget):
     def _on_listing(self, path: str, entries: list):
         self._path = path
         self._path_lbl.setText(path)
+        self._end_path_edit()
+        self._update_history_menu()
         self._table.setRowCount(0)
 
         for i, (name, is_dir, size, mtime, perms) in enumerate(entries):
             self._table.insertRow(i)
 
-            # Col 0: name
-            ni = QTableWidgetItem(("📁  " if is_dir else "📄  ") + name)
+            # Col 0: name with file-type icon (dirs-first sort)
+            ni = _DirFirstItem(name)
+            ni.setIcon(_icon_for_entry(name, is_dir))
             ni.setData(Qt.ItemDataRole.UserRole, (name, is_dir, size))
             if is_dir:
-                ni.setForeground(QColor("#58a6ff"))
+                ni.setForeground(QColor("#e6edf3"))
             self._table.setItem(i, 0, ni)
 
             # Col 1: size (numeric sort)
@@ -1204,6 +1951,13 @@ class SftpPanel(QWidget):
         self._btn_dl.setEnabled(False)
 
     def eventFilter(self, obj, event):
+        # Path edit: Escape cancels, FocusOut returns to label
+        if obj is self._path_edit:
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._end_path_edit()
+                return True
+            if event.type() == QEvent.Type.FocusOut:
+                self._end_path_edit()
         if obj == self._table.viewport() and event.type() == QEvent.Type.MouseButtonPress:
             idx = self._table.indexAt(event.pos())
             self._click_was_selected = (
@@ -1274,9 +2028,9 @@ class SftpPanel(QWidget):
         size     = data['size']
         if not new_name or new_name == original:
             return
-        icon = "📁  " if is_dir else "📄  "
         self._table.blockSignals(True)
-        item.setText(icon + new_name)
+        item.setText(new_name)
+        item.setIcon(_icon_for_entry(new_name, is_dir))
         item.setData(Qt.ItemDataRole.UserRole, (new_name, is_dir, size))
         self._table.blockSignals(False)
         old_remote = self._path.rstrip('/') + '/' + original
@@ -1321,6 +2075,7 @@ class SftpPanel(QWidget):
             parts = self._path.rstrip('/').split('/')
             parent = '/'.join(parts[:-1]) or '/'
             if parent != self._path:
+                self._history.append(self._path)
                 self._list(parent)
 
     def _on_sel_change(self):
@@ -1401,10 +2156,29 @@ class SftpPanel(QWidget):
         self._btn_ul.setEnabled(True)
         self.status_msg.emit(msg, False)
 
+    _DANGEROUS_EXT = frozenset({
+        '.exe', '.bat', '.cmd', '.com', '.msi', '.scr', '.pif',
+        '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.ps1',
+        '.jar', '.iso', '.img', '.hta', '.cpl', '.inf', '.reg',
+    })
+
     def _open_remote(self, remote: str, name: str):
         """Download to temp file, open with default app, watch for changes → auto-upload."""
         if not self._ssh_client:
             return
+        # Warn about potentially dangerous file types
+        ext = os.path.splitext(name)[1].lower()
+        if ext in self._DANGEROUS_EXT:
+            from PyQt6.QtWidgets import QMessageBox
+            r = QMessageBox.warning(
+                self, "Ostrzeżenie",
+                f"Plik \"{name}\" ma potencjalnie niebezpieczne rozszerzenie "
+                f"({ext}).\n\nCzy na pewno chcesz go otworzyć?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if r != QMessageBox.StandardButton.Yes:
+                return
         # Use a dedicated subdir so the file keeps its original name (like WinSCP)
         tmp_dir  = os.path.join(tempfile.gettempdir(),
                                 f'HospitalHub_{os.getpid()}')
@@ -1542,13 +2316,15 @@ class SftpPanel(QWidget):
 
     # ── Cleanup ───────────────────────────────────────────────────────────
 
-    def switch_sftp(self, sftp, ssh_client, restore_path: str = '/'):
+    def switch_sftp(self, sftp, ssh_client, restore_path: str = '/',
+                    restore_history: list[str] | None = None):
         """Swap active SFTP connection and restore the previous browsed path."""
         self._watch_poll.stop()
         self._watched_files.clear()
         self._upload_active.clear()
         self._sftp        = sftp
         self._ssh_client  = ssh_client
+        self._history     = restore_history if restore_history is not None else []
         connected = bool(sftp and ssh_client)
         for b in (self._btn_up, self._btn_home, self._btn_ref, self._btn_ul):
             b.setEnabled(connected)
@@ -1557,6 +2333,7 @@ class SftpPanel(QWidget):
         else:
             self._path_lbl.setText("Nie połączono")
             self._table.setRowCount(0)
+            self._update_history_menu()
 
     def stop(self):
         self._close_rename_editor()
@@ -1572,8 +2349,9 @@ class SftpPanel(QWidget):
 # ──────────────────────────────────────── Environment panel ──────────────────
 
 class _EnvironmentPanel(QWidget):
-    """Minimalist machine list with dynamic highlight based on active terminal tab."""
-    open_machine = pyqtSignal(object)
+    """Machine list with hospital dropdown, double-click connect, credential context menu."""
+    open_machine = pyqtSignal(object)            # machine (uses first cred)
+    open_machine_cred = pyqtSignal(object, object)  # machine, credential
 
     _STYLE_IDLE = (
         "QFrame { background:#161b22; border:1px solid #30363d; border-radius:6px; }"
@@ -1584,107 +2362,212 @@ class _EnvironmentPanel(QWidget):
         "QLabel { border:none; background:transparent; }"
     )
 
-    def __init__(self, hospital=None, initial_ip: str = '', parent=None):
+    def __init__(self, hospital=None, all_hospitals=None,
+                 initial_ip: str = '', admin_unlocked: bool = False,
+                 parent=None):
         super().__init__(parent)
         self._cards: dict[str, QFrame] = {}   # ip → card widget
         self._active_ip: str = ''
+        self._all_hospitals = all_hospitals or []
+        self._current_hospital = hospital
+        self._admin_unlocked = admin_unlocked
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        # Hospital badge
-        badge = QLabel(f"🏥  <b>{hospital.name if hospital else '—'}</b>")
-        badge.setTextFormat(Qt.TextFormat.RichText)
-        badge.setStyleSheet(
-            "color:#58a6ff; font-size:13px; padding:6px 4px 8px 4px;"
-            "border-bottom:1px solid #30363d;"
+        # Hospital dropdown
+        from PyQt6.QtWidgets import QComboBox
+        self._hospital_combo = QComboBox()
+        self._hospital_combo.setStyleSheet(
+            "QComboBox{background:#161b22;color:#58a6ff;border:1px solid #30363d;"
+            "border-radius:6px;padding:5px 8px;font-size:12px;font-weight:bold;}"
+            "QComboBox:hover{border-color:#1f6feb;}"
+            "QComboBox::drop-down{border:none;width:20px;}"
+            "QComboBox::down-arrow{image:none;border-left:4px solid transparent;"
+            "border-right:4px solid transparent;border-top:5px solid #58a6ff;"
+            "margin-right:6px;}"
+            "QComboBox QAbstractItemView{background:#161b22;color:#e6edf3;"
+            "border:1px solid #30363d;selection-background-color:#1f6feb;"
+            "selection-color:#fff;padding:4px;}"
         )
-        root.addWidget(badge)
+        current_idx = 0
+        for i, h in enumerate(self._all_hospitals):
+            self._hospital_combo.addItem(f"🏥  {h.name}" if h.name else f"🏥  (bez nazwy)", h)
+            if hospital and h.id == hospital.id:
+                current_idx = i
+        if not self._all_hospitals and hospital:
+            self._hospital_combo.addItem(f"🏥  {hospital.name}" if hospital.name else "🏥  —", hospital)
+        self._hospital_combo.setCurrentIndex(current_idx)
+        self._hospital_combo.currentIndexChanged.connect(self._on_hospital_changed)
+        root.addWidget(self._hospital_combo)
 
-        if hospital and hospital.machines:
-            section_lbl = QLabel("MASZYNY")
-            section_lbl.setStyleSheet(
-                "color:#6e7681; font-size:9px; letter-spacing:1px; padding:2px 2px 4px 2px;"
-            )
-            root.addWidget(section_lbl)
+        # Machine list area
+        self._machine_area = QWidget()
+        self._machine_layout = QVBoxLayout(self._machine_area)
+        self._machine_layout.setContentsMargins(0, 0, 0, 0)
+        self._machine_layout.setSpacing(0)
+        root.addWidget(self._machine_area, 1)
 
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            scroll.setStyleSheet("background:transparent; border:none;")
-
-            container = QWidget()
-            container.setStyleSheet("background:transparent;")
-            cl = QVBoxLayout(container)
-            cl.setContentsMargins(0, 0, 4, 0)
-            cl.setSpacing(2)
-
-            for m in hospital.machines:
-                card = QFrame()
-                card.setFrameShape(QFrame.Shape.NoFrame)
-                card.setStyleSheet(self._STYLE_IDLE)
-                self._cards[m.ip] = card
-
-                rl = QHBoxLayout(card)
-                rl.setContentsMargins(8, 3, 6, 3)
-                rl.setSpacing(6)
-
-                # IP + name on one line
-                if m.name:
-                    line = (f"<span style='color:#58a6ff; font-size:10px;'>"
-                            f"<b>{m.ip}</b></span>"
-                            f"<span style='color:#c9d1d9; font-size:9px;'>"
-                            f"  {m.name}</span>")
-                else:
-                    line = (f"<span style='color:#58a6ff; font-size:10px;'>"
-                            f"<b>{m.ip}</b></span>")
-                lbl = QLabel(line)
-                lbl.setTextFormat(Qt.TextFormat.RichText)
-                rl.addWidget(lbl, 1)
-
-                if getattr(m, 'connection_type', 'SSH') == 'RDP':
-                    btn = QPushButton("RDP")
-                    btn.setFixedSize(34, 18)
-                    btn.setToolTip(
-                        f"Połącz przez Remote Desktop ({m.ip}:"
-                        f"{getattr(m, 'rdp_port', '3389') or '3389'})"
-                    )
-                    btn.setStyleSheet(
-                        "QPushButton { background:#2a1a35; color:#c084fc;"
-                        " border:1px solid #6b3fa0; border-radius:3px;"
-                        " font-size:9px; font-weight:bold; padding:0; }"
-                        "QPushButton:hover { background:#7c3aed; color:#fff; }"
-                    )
-                    btn.clicked.connect(lambda _=False, _m=m: _connect_rdp(_m))
-                else:
-                    btn = QPushButton("⇆")
-                    btn.setFixedSize(24, 18)
-                    btn.setToolTip(f"Połącz z {m.ip}")
-                    btn.setStyleSheet(
-                        "QPushButton { background:#0f2535; color:#58a6ff;"
-                        " border:1px solid #1f4a70; border-radius:3px;"
-                        " font-size:11px; padding:0; }"
-                        "QPushButton:hover { background:#1f6feb; color:#fff; }"
-                    )
-                    btn.clicked.connect(lambda _=False, _m=m: self.open_machine.emit(_m))
-                rl.addWidget(btn)
-
-                cl.addWidget(card)
-
-            cl.addStretch()
-            scroll.setWidget(container)
-            root.addWidget(scroll, 1)
-        else:
-            root.addStretch()
+        self._build_machine_list(hospital)
 
         if initial_ip:
             self.set_active(initial_ip)
 
+    def _on_hospital_changed(self, idx):
+        h = self._hospital_combo.itemData(idx)
+        if h and h is not self._current_hospital:
+            self._current_hospital = h
+            old_active = self._active_ip
+            self._cards.clear()
+            self._build_machine_list(h)
+            if old_active and old_active in self._cards:
+                self.set_active(old_active)
+
+    def _build_machine_list(self, hospital):
+        # Clear old content
+        layout = self._machine_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not hospital or not hospital.machines:
+            empty = QLabel("Brak maszyn")
+            empty.setStyleSheet("color:#6e7681;font-size:11px;padding:12px;")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(empty)
+            layout.addStretch()
+            return
+
+        section_lbl = QLabel("MASZYNY")
+        section_lbl.setStyleSheet(
+            "color:#6e7681; font-size:9px; letter-spacing:1px; padding:2px 2px 4px 2px;"
+        )
+        layout.addWidget(section_lbl)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background:transparent; border:none;")
+
+        container = QWidget()
+        container.setStyleSheet("background:transparent;")
+        cl = QVBoxLayout(container)
+        cl.setContentsMargins(0, 0, 4, 0)
+        cl.setSpacing(2)
+
+        machines = hospital.machines if self._admin_unlocked else [
+            m for m in hospital.machines if not m.admin_only]
+        for m in machines:
+            card = self._make_machine_card(m)
+            cl.addWidget(card)
+
+        cl.addStretch()
+        scroll.setWidget(container)
+        layout.addWidget(scroll, 1)
+
+    def _make_machine_card(self, m) -> QFrame:
+        card = QFrame()
+        card.setFrameShape(QFrame.Shape.NoFrame)
+        card.setStyleSheet(self._STYLE_IDLE)
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._cards[m.ip] = card
+
+        # Store machine ref on card for event handling
+        card.setProperty('_machine', m)
+
+        rl = QHBoxLayout(card)
+        rl.setContentsMargins(8, 3, 6, 3)
+        rl.setSpacing(6)
+
+        # IP + name on one line
+        if m.name:
+            line = (f"<span style='color:#58a6ff; font-size:10px;'>"
+                    f"<b>{m.ip}</b></span>"
+                    f"<span style='color:#c9d1d9; font-size:9px;'>"
+                    f"  {m.name}</span>")
+        else:
+            line = (f"<span style='color:#58a6ff; font-size:10px;'>"
+                    f"<b>{m.ip}</b></span>")
+        lbl = QLabel(line)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        rl.addWidget(lbl, 1)
+
+        if getattr(m, 'connection_type', 'SSH') == 'RDP':
+            btn = QPushButton("RDP")
+            btn.setFixedSize(34, 18)
+            btn.setToolTip(
+                f"Połącz przez Remote Desktop ({m.ip}:"
+                f"{getattr(m, 'rdp_port', '3389') or '3389'})"
+            )
+            btn.setStyleSheet(
+                "QPushButton { background:#2a1a35; color:#c084fc;"
+                " border:1px solid #6b3fa0; border-radius:3px;"
+                " font-size:9px; font-weight:bold; padding:0; }"
+                "QPushButton:hover { background:#7c3aed; color:#fff; }"
+            )
+            btn.clicked.connect(lambda _=False, _m=m: _connect_rdp(
+                _m, self, self._admin_unlocked))
+        else:
+            btn = QPushButton("⇆")
+            btn.setFixedSize(24, 18)
+            btn.setToolTip(f"Połącz z {m.ip}")
+            btn.setStyleSheet(
+                "QPushButton { background:#0f2535; color:#58a6ff;"
+                " border:1px solid #1f4a70; border-radius:3px;"
+                " font-size:11px; padding:0; }"
+                "QPushButton:hover { background:#1f6feb; color:#fff; }"
+            )
+            btn.clicked.connect(lambda _=False, _m=m: self.open_machine.emit(_m))
+        rl.addWidget(btn)
+
+        # Double-click to connect
+        card.mouseDoubleClickEvent = lambda e, _m=m: self._dblclick_connect(_m)
+
+        # Right-click context menu with credentials
+        card.customContextMenuRequested.connect(
+            lambda pos, _m=m, _c=card: self._show_cred_menu(_m, _c, pos))
+
+        return card
+
+    def _dblclick_connect(self, machine):
+        if getattr(machine, 'connection_type', 'SSH') == 'RDP':
+            _connect_rdp(machine, self, self._admin_unlocked)
+        else:
+            self.open_machine.emit(machine)
+
+    def _show_cred_menu(self, machine, card, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:#161b22;color:#e6edf3;border:1px solid #30363d;"
+            "border-radius:6px;padding:4px;}"
+            "QMenu::item{padding:5px 16px;border-radius:3px;}"
+            "QMenu::item:selected{background:#1f6feb;}"
+            "QMenu::separator{height:1px;background:#30363d;margin:4px 8px;}"
+        )
+        vis_creds = machine.credentials if self._admin_unlocked else [
+            c for c in machine.credentials if not c.admin_only]
+        if vis_creds:
+            header = menu.addAction("Połącz jako:")
+            header.setEnabled(False)
+            menu.addSeparator()
+            for cred in vis_creds:
+                label = cred.login
+                if cred.note:
+                    label += f"  ({cred.note})"
+                menu.addAction(label,
+                    lambda _c=cred, _m=machine: self.open_machine_cred.emit(_m, _c))
+        else:
+            a = menu.addAction("Brak poświadczeń — połącz ręcznie")
+            a.triggered.connect(lambda: self.open_machine.emit(machine))
+        menu.exec(card.mapToGlobal(pos))
+
     def set_active(self, ip: str):
-        """Highlight the card for ip, de-highlight the previous one.
-        Pass empty string to clear all highlights."""
+        """Highlight the card for ip, de-highlight the previous one."""
         if ip == self._active_ip:
             return
         if self._active_ip and self._active_ip in self._cards:
@@ -1706,9 +2589,9 @@ class _TerminalPane(QWidget):
         lay.setSpacing(0)
 
         self._hdr = QWidget()
-        self._hdr.setFixedHeight(22)
+        self._hdr.setFixedHeight(26)
         self._hdr.setStyleSheet(
-            "background:#161b22;border-bottom:1px solid #30363d;")
+            "background:#0d1117;border-bottom:1px solid #21262d;")
         hl = QHBoxLayout(self._hdr)
         hl.setContentsMargins(6, 0, 6, 0)
         name_lbl = QLabel(f"<b>{label}</b>")
@@ -1807,7 +2690,7 @@ class _TerminalPane(QWidget):
 class _Session:
     """One SSH session: terminal pane + worker + optional SFTP connection."""
     __slots__ = ('pane', 'worker', 'label', 'sftp', 'sftp_client', 'sftp_path',
-                 'stats_worker', 'last_stats')
+                 'sftp_history', 'stats_worker', 'last_stats')
 
     def __init__(self, pane: _TerminalPane, worker: '_SshWorker', label: str):
         self.pane         = pane
@@ -1816,6 +2699,7 @@ class _Session:
         self.sftp         = None
         self.sftp_client  = None
         self.sftp_path    = '/'
+        self.sftp_history: list[str] = []
         self.stats_worker = None
         self.last_stats: tuple | None = None   # (load, mem, uptime, disk) — last known values
 
@@ -1836,20 +2720,42 @@ class _AddSessionDialog(QDialog):
     def __init__(self, default_ip: str = '', default_user: str = '', parent=None):
         super().__init__(parent)
         self.setWindowTitle("Nowa sesja SSH")
-        self.setFixedSize(400, 210)
+        self.setFixedSize(420, 260)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.setStyleSheet("""
+            _AddSessionDialog {background: #0d1117;}
+            QLabel {color: #c9d1d9; font-size: 12px;}
+            QLineEdit {
+                background: #161b22; color: #e6edf3;
+                border: 1px solid #30363d; border-radius: 6px;
+                padding: 6px 10px; font-size: 12px;
+            }
+            QLineEdit:focus {border-color: #1f6feb;}
+            QLineEdit::placeholder {color: #484f58;}
+            QPushButton {
+                background: #21262d; color: #c9d1d9;
+                border: 1px solid #30363d; border-radius: 6px;
+                padding: 6px 18px; font-size: 12px;
+            }
+            QPushButton:hover {background: #30363d; color: #e6edf3;}
+        """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(24, 20, 24, 18)
+        layout.setSpacing(12)
 
         form = QFormLayout()
-        form.setSpacing(8)
+        form.setSpacing(10)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self._ip_edit = QLineEdit(default_ip)
         self._ip_edit.setPlaceholderText("np. 192.168.1.100")
         form.addRow("Host / IP:", self._ip_edit)
+
+        self._port_edit = QLineEdit()
+        self._port_edit.setPlaceholderText("22 (domyślnie)")
+        self._port_edit.setMaximumWidth(80)
+        form.addRow("Port:", self._port_edit)
 
         self._user_edit = QLineEdit(default_user)
         self._user_edit.setPlaceholderText("np. root, admin")
@@ -1865,15 +2771,15 @@ class _AddSessionDialog(QDialog):
         layout.addStretch()
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
         btn_cancel = QPushButton("Anuluj")
         btn_cancel.clicked.connect(self.reject)
         btn_ok = QPushButton("Połącz")
         btn_ok.setDefault(True)
         btn_ok.setStyleSheet(
-            "QPushButton { background:#1a3a1a; color:#8ae234;"
-            " border:1px solid #2d5a1a; border-radius:4px; padding:4px 16px; }"
-            "QPushButton:hover { background:#253d1a; color:#a0de4a; }"
-        )
+            "QPushButton{background:#0d1f0d;color:#3fb950;"
+            "border:1px solid #1b3d1b;border-radius:6px;padding:6px 20px;}"
+            "QPushButton:hover{background:#152b15;border-color:#2d5a2d;}")
         btn_ok.clicked.connect(self._accept)
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_ok)
@@ -1891,45 +2797,194 @@ class _AddSessionDialog(QDialog):
         self.accept()
 
     def get_values(self) -> tuple:
+        port_text = self._port_edit.text().strip()
+        port = int(port_text) if port_text.isdigit() else 22
         return (
             self._ip_edit.text().strip(),
             self._user_edit.text().strip(),
             self._pass_edit.text(),
+            port,
         )
 
 
 # ──────────────────────────────────────── Main dialog ────────────────────────
 
 _TAB_STYLE = """
-    QTabWidget::pane  { border:1px solid #30363d; }
-    QTabBar::tab      { background:#0d1117; color:#8b949e; padding:4px 12px;
-                        border:1px solid #30363d; border-bottom:none;
-                        font-size:11px; }
-    QTabBar::tab:selected { background:#161b22; color:#c9d1d9; }
-    QTabBar::tab:hover    { background:#161b22; }
-    QTabBar::close-button { subcontrol-position: right; margin: 2px; }
-    QTabBar::close-button:hover { background: rgba(220,60,60,80);
-                                   border-radius: 2px; }
+    QTabWidget::pane {
+        border: none;
+        background: #0d1117;
+        border-top: 1px solid #30363d;
+    }
+    QTabBar {
+        background: #010409;
+        qproperty-drawBase: 0;
+    }
+    QTabBar::tab {
+        background: #010409;
+        color: #7d8590;
+        padding: 6px 16px 5px 16px;
+        margin-right: 1px;
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+        font-size: 11px;
+        min-width: 80px;
+    }
+    QTabBar::tab:selected {
+        background: #0d1117;
+        color: #e6edf3;
+        border-color: #30363d;
+        border-bottom: 1px solid #0d1117;
+    }
+    QTabBar::tab:!selected:hover {
+        background: #161b22;
+        color: #c9d1d9;
+    }
+    QTabBar::close-button {
+        subcontrol-position: right;
+        margin: 2px 4px 0 0;
+        padding: 2px;
+        border-radius: 4px;
+    }
+    QTabBar::close-button:hover {
+        background: rgba(220, 60, 60, 100);
+    }
 """
+
+def _ensure_close_icons():
+    """Create close-button PNG icons (normal + hover) in temp dir, return paths."""
+    d = os.path.join(os.path.realpath(tempfile.gettempdir()), 'hhub_icons')
+    os.makedirs(d, exist_ok=True)
+    normal = os.path.join(d, 'tab_close.png')
+    hover  = os.path.join(d, 'tab_close_h.png')
+    if not os.path.exists(normal) or not os.path.exists(hover):
+        from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor
+        from PyQt6.QtCore import Qt as _Qt
+        for path, color in [(normal, '#8b949e'), (hover, '#e6edf3')]:
+            px = QPixmap(16, 16)
+            px.fill(_Qt.GlobalColor.transparent)
+            p = QPainter(px)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(QColor(color), 1.8))
+            p.drawLine(4, 4, 12, 12)
+            p.drawLine(12, 4, 4, 12)
+            p.end()
+            px.save(path)
+    return normal.replace('\\', '/'), hover.replace('\\', '/')
+
+def _session_tab_style():
+    n, h = _ensure_close_icons()
+    return f"""
+    QTabWidget::pane {{
+        border: none;
+        background: #0d1117;
+    }}
+    QTabBar {{
+        background: #010409;
+        qproperty-drawBase: 0;
+        padding-left: 4px;
+    }}
+    QTabBar::tab {{
+        background: #0c1018;
+        color: #7d8590;
+        padding: 5px 14px 4px 10px;
+        margin-right: 2px;
+        margin-top: 2px;
+        border: 1px solid #21262d;
+        border-bottom: none;
+        border-top-left-radius: 10px;
+        border-top-right-radius: 10px;
+        font-size: 11px;
+        min-width: 100px;
+    }}
+    QTabBar::tab:selected {{
+        background: #0d1117;
+        color: #e6edf3;
+        border-color: #30363d;
+        border-bottom: 1px solid #0d1117;
+        margin-top: 0px;
+        padding-bottom: 6px;
+    }}
+    QTabBar::tab:!selected:hover {{
+        background: #161b22;
+        color: #c9d1d9;
+        border-color: #30363d;
+    }}
+    QTabBar::close-button {{
+        image: url({n});
+        subcontrol-position: right;
+        margin: 2px 4px 0 0;
+        padding: 2px;
+        border-radius: 4px;
+        width: 12px;
+        height: 12px;
+    }}
+    QTabBar::close-button:hover {{
+        image: url({h});
+        background: rgba(220, 60, 60, 0.65);
+    }}
+    """
+
+
+def _make_ssh_window_icon() -> QIcon:
+    """QPainter-drawn terminal icon for SSH window taskbar."""
+    sz = 32
+    pix = QPixmap(sz, sz)
+    pix.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Terminal background
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor("#0d1117")))
+    p.drawRoundedRect(1, 1, 30, 30, 5, 5)
+    # Title bar
+    p.setBrush(QBrush(QColor("#30363d")))
+    p.drawRoundedRect(1, 1, 30, 8, 5, 5)
+    p.drawRect(1, 6, 30, 3)
+    # Prompt >_
+    p.setPen(QPen(QColor("#3fb950"), 2.5))
+    p.drawLine(7, 16, 13, 20)
+    p.drawLine(7, 24, 13, 20)
+    # Cursor
+    p.setPen(QPen(QColor("#58a6ff"), 2.0))
+    p.drawLine(16, 24, 24, 24)
+    p.end()
+    return QIcon(pix)
 
 
 class SshDialog(QDialog):
-    def __init__(self, machine, hospital=None, parent=None):
-        super().__init__(parent)
+    # Class-level list to prevent garbage collection of detached windows
+    _alive: list['SshDialog'] = []
+
+    def __init__(self, machine, hospital=None, all_hospitals=None,
+                 admin_unlocked=False, parent=None):
+        # Pass parent=None so this is a true top-level window with own taskbar icon
+        super().__init__(None)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowFlag(Qt.WindowType.Window)
+        SshDialog._alive.append(self)
         self._machine  = machine
         self._hospital = hospital
-        self._cred     = machine.credentials[0] if machine.credentials else None
+        self._all_hospitals = all_hospitals or []
+        self._admin_unlocked = admin_unlocked
+        vis_creds = machine.credentials if admin_unlocked else [
+            c for c in machine.credentials if not c.admin_only]
+        self._cred     = vis_creds[0] if vis_creds else None
         self._sessions: list[_Session] = []
         self._multiexec = False
         self._workers: list[QThread] = []
 
-        title = f"Połączenie — {machine.ip}"
-        if machine.name:
-            title += f"  ({machine.name})"
-        self.setWindowTitle(title)
+        self.setWindowTitle("Terminal SSH - HospitalHub")
+        self.setWindowIcon(_make_ssh_window_icon())
         self.resize(1200, 700)
-        self.setMinimumSize(1150, 640)
-
+        self.setMinimumSize(700, 450)
+        self.setStyleSheet("""
+            SshDialog { background: #010409; }
+        """)
+        # Track maximized state for restore-from-minimize on Windows
+        self._was_maximized  = False
+        self._is_minimized   = False
         self._setup_ui()
 
         if not _PARAMIKO_OK:
@@ -1949,8 +3004,11 @@ class SshDialog(QDialog):
         root.setSpacing(4)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(4)
-        splitter.setStyleSheet("QSplitter::handle { background: #30363d; }")
+        splitter.setHandleWidth(6)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background: #21262d; border-radius: 2px; }"
+            "QSplitter { background: #010409; }"
+        )
 
         # ── Left: SFTP + Environment tabs ──
         left_tabs = QTabWidget()
@@ -1961,11 +3019,18 @@ class SshDialog(QDialog):
         left_tabs.addTab(self._sftp_panel, "📁  Pliki")
 
         self._env_panel = _EnvironmentPanel(
-            self._hospital, initial_ip=self._machine.ip)
+            self._hospital, all_hospitals=self._all_hospitals,
+            initial_ip=self._machine.ip,
+            admin_unlocked=self._admin_unlocked)
         self._env_panel.open_machine.connect(self._open_extra_machine)
+        self._env_panel.open_machine_cred.connect(self._open_machine_with_cred)
         left_tabs.addTab(self._env_panel, "🖥  Środowisko")
 
+        self._left_tabs = left_tabs
+        from PyQt6.QtWidgets import QSizePolicy
+        left_tabs.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         splitter.addWidget(left_tabs)
+        splitter.setCollapsible(0, True)
 
         # ── Right: Terminal area ──
         term_area = QWidget()
@@ -1980,17 +3045,20 @@ class SshDialog(QDialog):
         self._btn_multiexec = QPushButton("⊞  Multi-exec")
         self._btn_multiexec.setCheckable(True)
         self._btn_multiexec.setStyleSheet(
-            "QPushButton{background:#1a2a3a;color:#58a6ff;"
-            "border-radius:3px;padding:3px 8px;}"
-            "QPushButton:checked{background:#1f6feb;color:#fff;}"
-            "QPushButton:hover{background:#2a3a4a;}")
+            "QPushButton{background:#151b23;color:#58a6ff;"
+            "border:1px solid #21262d;border-radius:6px;padding:4px 12px;"
+            "font-size:11px;}"
+            "QPushButton:checked{background:#1f6feb;color:#fff;"
+            "border-color:#1f6feb;}"
+            "QPushButton:hover{background:#1c2433;border-color:#30363d;}")
         self._btn_multiexec.toggled.connect(self._toggle_multiexec)
 
         btn_new = QPushButton("＋  Nowa sesja")
         btn_new.setStyleSheet(
-            "QPushButton{background:#1a2a1a;color:#8ae234;"
-            "border-radius:3px;padding:3px 8px;}"
-            "QPushButton:hover{background:#2a3a2a;}")
+            "QPushButton{background:#0d1f0d;color:#3fb950;"
+            "border:1px solid #1b3d1b;border-radius:6px;padding:4px 12px;"
+            "font-size:11px;}"
+            "QPushButton:hover{background:#152b15;border-color:#2d5a2d;}")
         btn_new.clicked.connect(self._prompt_new_session)
 
         tb.addWidget(self._btn_multiexec)
@@ -2002,10 +3070,12 @@ class SshDialog(QDialog):
         self._mode_stack = QStackedWidget()
 
         self._tab_widget = QTabWidget()
-        self._tab_widget.setStyleSheet(_TAB_STYLE)
+        self._tab_widget.setStyleSheet(_session_tab_style())
+        self._tab_widget.setMovable(True)
         self._tab_widget.setTabsClosable(True)
         self._tab_widget.tabCloseRequested.connect(self._close_session)
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
+        self._tab_widget.tabBar().tabMoved.connect(self._on_tab_moved)
         self._mode_stack.addWidget(self._tab_widget)
 
         self._grid_container = QWidget()
@@ -2017,14 +3087,38 @@ class SshDialog(QDialog):
 
         tlay.addWidget(self._mode_stack, 1)
         splitter.addWidget(term_area)
-        splitter.setSizes([320, 880])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([250, 950])
+        self._main_splitter = splitter
+        self._left_collapsed = False
+
+        # Custom grip handle with three dots
+        handle = splitter.handle(1)
+        handle.setCursor(Qt.CursorShape.SplitHCursor)
+        handle_layout = QVBoxLayout(handle)
+        handle_layout.setContentsMargins(0, 0, 0, 0)
+        handle_layout.addStretch()
+        dots = QLabel("⋮")
+        dots.setStyleSheet(
+            "color: #6e7681; font-size: 14px; background: transparent;"
+        )
+        dots.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        handle_layout.addWidget(dots)
+        handle_layout.addStretch()
+
+        # Double-click handle to toggle collapse
+        handle.mouseDoubleClickEvent = lambda e: self._toggle_left_panel()
+
+        splitter.splitterMoved.connect(self._on_splitter_moved)
+
         root.addWidget(splitter, 1)
 
         # Live stats bar
         stats_bar = QWidget()
-        stats_bar.setFixedHeight(34)
+        stats_bar.setFixedHeight(28)
         stats_bar.setStyleSheet(
-            "background:#0d1117; border-top:1px solid #21262d;")
+            "background:#010409; border-top:1px solid #21262d;")
         sbl = QHBoxLayout(stats_bar)
         sbl.setContentsMargins(10, 0, 12, 0)
         sbl.setSpacing(0)
@@ -2075,19 +3169,81 @@ class SshDialog(QDialog):
         self._last_tab_idx: int = -1
         root.addWidget(stats_bar)
 
+    # ── Window geometry persistence ────────────────────────────────────────
+
+    _SFTP_PANEL_WIDTH = 250
+
+    def _on_splitter_moved(self, pos, index):
+        self._left_collapsed = (self._main_splitter.sizes()[0] == 0)
+
+    def _toggle_left_panel(self):
+        sizes = self._main_splitter.sizes()
+        total = sum(sizes)
+        if sizes[0] > 0:
+            self._left_collapsed = True
+            self._main_splitter.setSizes([0, total])
+        else:
+            self._left_collapsed = False
+            self._main_splitter.setSizes(
+                [self._SFTP_PANEL_WIDTH, total - self._SFTP_PANEL_WIDTH])
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._left_collapsed:
+            total = sum(self._main_splitter.sizes())
+            if total > 0:
+                self._main_splitter.setSizes(
+                    [self._SFTP_PANEL_WIDTH, total - self._SFTP_PANEL_WIDTH])
+        state = self.windowState()
+        # Save normal geometry only when not minimized/maximized
+        if not (state & (Qt.WindowState.WindowMinimized
+                         | Qt.WindowState.WindowMaximized)):
+            if not self._is_minimized:
+                self._saved_geometry = self.saveGeometry()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        state = self.windowState()
+        if not (state & (Qt.WindowState.WindowMinimized
+                         | Qt.WindowState.WindowMaximized)):
+            if not self._is_minimized:
+                self._saved_geometry = self.saveGeometry()
+
+    def changeEvent(self, event):
+        if event.type() == event.Type.WindowStateChange:
+            old_state = event.oldState()
+            new_state = self.windowState()
+            now_minimized = bool(new_state & Qt.WindowState.WindowMinimized)
+
+            if now_minimized and not self._is_minimized:
+                # Entering minimized — remember if we WERE maximized
+                self._was_maximized = bool(
+                    old_state & Qt.WindowState.WindowMaximized)
+                self._is_minimized = True
+            elif self._is_minimized and not now_minimized:
+                # Leaving minimized — restore previous window state
+                self._is_minimized = False
+                if self._was_maximized:
+                    QTimer.singleShot(0, self.showMaximized)
+                elif self._saved_geometry is not None:
+                    QTimer.singleShot(0,
+                        lambda g=self._saved_geometry: self.restoreGeometry(g))
+        super().changeEvent(event)
+
     # ── Session management ─────────────────────────────────────────────────
 
     def _add_first_session(self):
         label = self._machine.ip
         if self._machine.name:
             label += f"  ({self._machine.name})"
+        port = getattr(self._machine, '_ssh_port', 22)
         self._add_session(label=label, ip=self._machine.ip,
                           user=self._cred.login, password=self._cred.password,
-                          is_first=True)
+                          is_first=True, port=port)
 
     def _add_session(self, label: str = '', ip: str = '',
                      user: str = '', password: str = '',
-                     is_first: bool = False):
+                     is_first: bool = False, port: int = 22):
         if not ip:
             if not self._cred:
                 return
@@ -2101,7 +3257,7 @@ class SshDialog(QDialog):
         pane.set_multiexec_header(self._multiexec)
 
         cols, rows = term.terminal_size()
-        worker = _SshWorker(ip, user, password, cols, rows)
+        worker = _SshWorker(ip, user, password, cols, rows, port=port)
 
         # Session created before signal connections so lambdas can capture it.
         # resize_pty uses session.worker so it stays correct after retry.
@@ -2143,14 +3299,23 @@ class SshDialog(QDialog):
                 return
         self._status("Sesja SSH zakończona.")
 
+    def _on_tab_moved(self, from_idx: int, to_idx: int):
+        """Keep _sessions list in sync when user drags tabs."""
+        if 0 <= from_idx < len(self._sessions) and 0 <= to_idx < len(self._sessions):
+            s = self._sessions.pop(from_idx)
+            self._sessions.insert(to_idx, s)
+            # Update last_tab_idx to follow the moved tab
+            self._last_tab_idx = self._tab_widget.currentIndex()
+
     def _on_tab_changed(self, idx: int):
         """Update environment panel + SFTP panel when active terminal tab changes."""
         if self._multiexec:
             return
-        # Save SFTP path of the tab we're leaving
+        # Save SFTP state of the tab we're leaving
         prev = self._last_tab_idx
         if 0 <= prev < len(self._sessions):
             self._sessions[prev].sftp_path = self._sftp_panel._path
+            self._sessions[prev].sftp_history = list(self._sftp_panel._history)
         self._last_tab_idx = idx
 
         if idx < 0 or idx >= len(self._sessions):
@@ -2159,7 +3324,8 @@ class SshDialog(QDialog):
             return
         s = self._sessions[idx]
         self._env_panel.set_active(s.worker._host)
-        self._sftp_panel.switch_sftp(s.sftp, s.sftp_client, s.sftp_path)
+        self._sftp_panel.switch_sftp(s.sftp, s.sftp_client, s.sftp_path,
+                                     s.sftp_history)
         # Immediately show cached stats for this session (no wait for next poll)
         if s.last_stats:
             self._update_stats_display(*s.last_stats)
@@ -2170,14 +3336,16 @@ class SshDialog(QDialog):
         """Show dialog to create a new SSH session with custom credentials."""
         dlg = _AddSessionDialog(parent=self)
         if dlg.exec():
-            ip, user, password = dlg.get_values()
+            ip, user, password, port = dlg.get_values()
             label = f"{user}@{ip}"
-            self._add_session(label=label, ip=ip, user=user, password=password)
+            self._add_session(label=label, ip=ip, user=user, password=password, port=port)
 
     def _open_extra_machine(self, machine):
         """Connect button in Environment tab → new session tab."""
-        if machine.credentials:
-            cred  = machine.credentials[0]
+        vis_creds = machine.credentials if self._admin_unlocked else [
+            c for c in machine.credentials if not c.admin_only]
+        if vis_creds:
+            cred  = vis_creds[0]
             label = machine.ip + (f"  ({machine.name})" if machine.name else "")
             self._add_session(label=label, ip=machine.ip,
                               user=cred.login, password=cred.password)
@@ -2185,9 +3353,16 @@ class SshDialog(QDialog):
             # No stored credentials — ask user
             dlg = _AddSessionDialog(default_ip=machine.ip, parent=self)
             if dlg.exec():
-                ip, user, password = dlg.get_values()
+                ip, user, password, port = dlg.get_values()
                 label = ip + (f"  ({machine.name})" if machine.name else "")
-                self._add_session(label=label, ip=ip, user=user, password=password)
+                self._add_session(label=label, ip=ip, user=user, password=password, port=port)
+
+    def _open_machine_with_cred(self, machine, cred):
+        """Connect to a machine with a specific credential (from context menu)."""
+        label = machine.ip + (f"  ({machine.name})" if machine.name else "")
+        label += f"  [{cred.login}]"
+        self._add_session(label=label, ip=machine.ip,
+                          user=cred.login, password=cred.password)
 
     def _close_session(self, idx: int):
         """Stop and remove one terminal session tab."""
@@ -2293,7 +3468,19 @@ class SshDialog(QDialog):
     def _clear_current(self):
         idx = self._tab_widget.currentIndex()
         if 0 <= idx < len(self._sessions):
-            self._sessions[idx].term.clear()
+            s = self._sessions[idx]
+            s.term.clear()
+            # Re-display connection banner
+            ip   = s.worker._host
+            user = s.worker._user
+            banner = self._make_connect_banner(ip, user)
+            # Replace the "Łączenie…" placeholder with "Połączono"
+            banner = banner.replace(
+                '\x1b[90mŁączenie…\x1b[0m\r\n',
+                f'\x1b[32mPołączono z {ip}\x1b[0m\r\n')
+            s.term.feed(banner)
+            # Send Ctrl+L so the server redraws the prompt
+            s.worker.send(b'\x0c')
 
     # ── SSH / PTY ─────────────────────────────────────────────────────────
 
@@ -2346,7 +3533,7 @@ class SshDialog(QDialog):
     def _retry_session(self, session: '_Session'):
         """Stop the failed worker, create a fresh one, reconnect all signals."""
         old_worker = session.worker
-        ip, user, pw = old_worker._host, old_worker._user, old_worker._pw
+        ip, user, pw, port = old_worker._host, old_worker._user, old_worker._pw, old_worker._port
 
         old_worker.stop()
         try:
@@ -2369,7 +3556,7 @@ class SshDialog(QDialog):
         pane.show_terminal()
 
         cols, rows = term.terminal_size()
-        new_worker = _SshWorker(ip, user, pw, cols, rows)
+        new_worker = _SshWorker(ip, user, pw, cols, rows, port=port)
         session.worker = new_worker   # resize_pty lambda reads session.worker → stays correct
 
         is_first = bool(self._sessions) and self._sessions[0] is session
@@ -2399,7 +3586,8 @@ class SshDialog(QDialog):
     def _connect_sftp_for_session(self, session: '_Session'):
         """Start an SFTP connection for a session; called when SSH connects."""
         w = _SftpConnectWorker(
-            session.worker._host, session.worker._user, session.worker._pw)
+            session.worker._host, session.worker._user, session.worker._pw,
+            session.worker._port)
         w.ready.connect(lambda sftp, client, s=session: self._on_sftp_ready(s, sftp, client))
         w.error.connect(lambda e: self._status(f"Błąd SFTP: {e}", err=True))
         w.start()
@@ -2411,7 +3599,8 @@ class SshDialog(QDialog):
         # Show in panel only if this session is currently active
         active = self._active_session()
         if active is session:
-            self._sftp_panel.switch_sftp(sftp, client, session.sftp_path)
+            self._sftp_panel.switch_sftp(sftp, client, session.sftp_path,
+                                             session.sftp_history)
 
     def _active_session(self) -> '_Session | None':
         if self._multiexec:
@@ -2534,4 +3723,18 @@ class SshDialog(QDialog):
         for w in self._workers:
             if w.isRunning():
                 w.wait(800)
+        # Clean up temp SFTP files
+        import shutil
+        tmp_dir = os.path.join(tempfile.gettempdir(),
+                               f'HospitalHub_{os.getpid()}')
+        if os.path.isdir(tmp_dir):
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        # Remove from alive list so GC can collect
+        try:
+            SshDialog._alive.remove(self)
+        except ValueError:
+            pass
         super().closeEvent(event)

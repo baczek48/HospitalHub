@@ -88,3 +88,34 @@ def reencrypt(content: bytes, old_password: str, new_password: str) -> bytes:
     """Decrypt with old password and re-encrypt with new password."""
     data = decrypt(content, old_password)
     return encrypt(data, new_password)
+
+
+def hash_admin_password(password: str) -> tuple[str, str]:
+    """Hash admin password with Argon2id. Returns (hash_b64, salt_b64)."""
+    salt = os.urandom(SALT_SIZE)
+    raw = hash_secret_raw(
+        secret=password.encode("utf-8"),
+        salt=salt,
+        time_cost=ARGON2_TIME_COST,
+        memory_cost=ARGON2_MEMORY_COST,
+        parallelism=ARGON2_PARALLELISM,
+        hash_len=32,
+        type=Type.ID,
+    )
+    return base64.b64encode(raw).decode(), base64.b64encode(salt).decode()
+
+
+def verify_admin_password(password: str, hash_b64: str, salt_b64: str) -> bool:
+    """Verify admin password against stored hash."""
+    salt = base64.b64decode(salt_b64)
+    raw = hash_secret_raw(
+        secret=password.encode("utf-8"),
+        salt=salt,
+        time_cost=ARGON2_TIME_COST,
+        memory_cost=ARGON2_MEMORY_COST,
+        parallelism=ARGON2_PARALLELISM,
+        hash_len=32,
+        type=Type.ID,
+    )
+    import hmac
+    return hmac.compare_digest(raw, base64.b64decode(hash_b64))

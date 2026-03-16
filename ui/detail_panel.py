@@ -131,11 +131,14 @@ from config import load_column_widths, save_column_widths
 # akcje_col: always ResizeToContents, not saved
 _MACHINES_STRETCH_COL = 2   # Opis
 _MACHINES_AKCJE_COL = 3
+_MACHINES_LOCK_COL = 4
 _MACHINES_DEFAULTS = [120, 140, 180]   # widths for cols 0,1 (col 2 stretches)
 _MACHINES_AKCJE_WIDTH = 290
+_LOCK_COL_WIDTH = 24
 
 _DB_STRETCH_COL = 4         # Notatka (ostatnia kolumna danych, jak Opis w maszynach)
 _DB_AKCJE_COL = 5
+_DB_LOCK_COL = 6
 _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
 _DB_AKCJE_WIDTH = 220
 
@@ -147,14 +150,19 @@ def _setup_table_columns(
     stretch_col: int,
     akcje_col: int,
     akcje_width: int = 220,
+    lock_col: int = -1,
 ):
     """Configure column resize modes and restore saved widths."""
     hh = table.horizontalHeader()
     saved = load_column_widths(key)
 
-    # Build list of interactive column indices (all except stretch and akcje)
+    skip = {stretch_col, akcje_col}
+    if lock_col >= 0:
+        skip.add(lock_col)
+
+    # Build list of interactive column indices (all except stretch, akcje, lock)
     interactive_cols = [
-        i for i in range(table.columnCount()) if i != stretch_col and i != akcje_col
+        i for i in range(table.columnCount()) if i not in skip
     ]
     widths = saved if (saved and len(saved) == len(interactive_cols)) else defaults
 
@@ -165,6 +173,10 @@ def _setup_table_columns(
     hh.setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Stretch)
     hh.setSectionResizeMode(akcje_col, QHeaderView.ResizeMode.Fixed)
     table.setColumnWidth(akcje_col, akcje_width)
+
+    if lock_col >= 0:
+        hh.setSectionResizeMode(lock_col, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(lock_col, _LOCK_COL_WIDTH)
 
     # Install an event filter that intercepts ContextMenu events on the header.
     # IMPORTANT: horizontalHeader() returns ephemeral Python wrappers — storing on
@@ -183,6 +195,7 @@ class DetailPanel(QWidget):
         super().__init__()
         self.current_hospital: models.Hospital = None
         self._all_hospitals: list = None
+        self._admin_unlocked: bool = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -210,6 +223,16 @@ class DetailPanel(QWidget):
         header.addWidget(self._name_label)
         header.addStretch()
 
+        # Admin mode badge — visible only when unlocked
+        self._admin_badge = QLabel("🔓 TRYB ADMINA")
+        self._admin_badge.setStyleSheet(
+            "color: #8ae234; font-size: 10px; font-weight: bold;"
+            " background: #1a3a1a; border: 1px solid #2d5a1a; border-radius: 10px;"
+            " padding: 3px 12px; letter-spacing: 0.5px;"
+        )
+        self._admin_badge.setVisible(False)
+        header.addWidget(self._admin_badge)
+
         # Decorative stats badge — shows machine + DB count at a glance
         self._stats_badge = QLabel()
         self._stats_badge.setStyleSheet(
@@ -218,6 +241,19 @@ class DetailPanel(QWidget):
             " padding: 3px 12px; letter-spacing: 0.5px;"
         )
         header.addWidget(self._stats_badge)
+
+        btn_quick_ssh = QToolButton()
+        btn_quick_ssh.setText("⇆")
+        btn_quick_ssh.setFixedSize(26, 26)
+        btn_quick_ssh.setToolTip("Szybkie połączenie SSH (dowolny host)")
+        btn_quick_ssh.setStyleSheet(
+            "QToolButton { background: transparent; border: 1px solid #1f4a70;"
+            " border-radius: 5px; color: #58a6ff; font-size: 15px; font-weight: bold; }"
+            "QToolButton:hover { background: #0f2535; border-color: #58a6ff; color: #79c0ff; }"
+            "QToolButton:pressed { background: #1f6feb; color: #fff; }"
+        )
+        btn_quick_ssh.clicked.connect(self._quick_ssh)
+        header.addWidget(btn_quick_ssh)
 
         btn_sqld = QToolButton()
         btn_sqld.setIcon(_make_db_connect_icon(26))
@@ -257,10 +293,9 @@ class DetailPanel(QWidget):
         machines_layout.setContentsMargins(8, 8, 8, 8)
         machines_layout.setSpacing(6)
 
-        self._machines_table = _DraggableTable(0, 4)
-        self._machines_table.setHorizontalHeaderLabels(["Adres IP", "Nazwa", "Opis", "Akcje"])
+        self._machines_table = _DraggableTable(0, 5)
+        self._machines_table.setHorizontalHeaderLabels(["Adres IP", "Nazwa", "Opis", "Akcje", ""])
         self._machines_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._machines_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._machines_table.verticalHeader().setVisible(False)
         self._machines_table.setAlternatingRowColors(True)
         self._machines_table.setStyleSheet("""
@@ -284,7 +319,7 @@ class DetailPanel(QWidget):
         _setup_table_columns(
             self._machines_table, "machines", _MACHINES_DEFAULTS,
             stretch_col=_MACHINES_STRETCH_COL, akcje_col=_MACHINES_AKCJE_COL,
-            akcje_width=_MACHINES_AKCJE_WIDTH,
+            akcje_width=_MACHINES_AKCJE_WIDTH, lock_col=_MACHINES_LOCK_COL,
         )
         machines_layout.addWidget(self._machines_table)
 
@@ -322,12 +357,11 @@ class DetailPanel(QWidget):
         db_layout.setContentsMargins(8, 8, 8, 8)
         db_layout.setSpacing(6)
 
-        self._db_table = _DraggableTable(0, 6)
+        self._db_table = _DraggableTable(0, 7)
         self._db_table.setHorizontalHeaderLabels(
-            ["Host", "Port", "Nazwa bazy", "Typ", "Notatka", "Akcje"]
+            ["Host", "Port", "Nazwa bazy", "Typ", "Notatka", "Akcje", ""]
         )
         self._db_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._db_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._db_table.verticalHeader().setVisible(False)
         self._db_table.setAlternatingRowColors(True)
         self._db_table.setStyleSheet("""
@@ -352,7 +386,7 @@ class DetailPanel(QWidget):
         _setup_table_columns(
             self._db_table, "databases", _DB_DEFAULTS,
             stretch_col=_DB_STRETCH_COL, akcje_col=_DB_AKCJE_COL,
-            akcje_width=_DB_AKCJE_WIDTH,
+            akcje_width=_DB_AKCJE_WIDTH, lock_col=_DB_LOCK_COL,
         )
         db_layout.addWidget(self._db_table)
 
@@ -400,17 +434,19 @@ class DetailPanel(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._fit_columns(self._machines_table, [0, 1], _MACHINES_AKCJE_COL)
-        self._fit_columns(self._db_table, [0, 1, 2, 3], _DB_AKCJE_COL)
+        self._fit_columns(self._machines_table, [0, 1], _MACHINES_AKCJE_COL, _MACHINES_LOCK_COL)
+        self._fit_columns(self._db_table, [0, 1, 2, 3], _DB_AKCJE_COL, _DB_LOCK_COL)
 
-    def _fit_columns(self, table: QTableWidget, interactive_cols: list, akcje_col: int):
+    def _fit_columns(self, table: QTableWidget, interactive_cols: list,
+                     akcje_col: int, lock_col: int = -1):
         """Scale interactive columns proportionally so they never overflow the viewport."""
         vp_width = table.viewport().width()
         if vp_width <= 0:
             return
         akcje_w = table.columnWidth(akcje_col)
+        lock_w = table.columnWidth(lock_col) if lock_col >= 0 else 0
         min_stretch = 30  # keep at least a sliver for the stretch column
-        available = vp_width - akcje_w - min_stretch
+        available = vp_width - akcje_w - lock_w - min_stretch
         if available <= 0:
             return
         total = sum(table.columnWidth(c) for c in interactive_cols)
@@ -421,6 +457,11 @@ class DetailPanel(QWidget):
                 table.setColumnWidth(col, new_w)
 
     # ------------------------------------------------------------------ #
+
+    def set_admin_mode(self, unlocked: bool):
+        self._admin_unlocked = unlocked
+        self._admin_badge.setVisible(unlocked)
+        self._refresh()
 
     def show_hospital(self, hospital: models.Hospital, all_hospitals: list):
         self.current_hospital = hospital
@@ -461,7 +502,7 @@ class DetailPanel(QWidget):
         self._machines_table.clearSelection()
         self._machines_table.setCurrentIndex(
             self._machines_table.model().index(-1, -1))
-        if col == 3:
+        if col in (_MACHINES_AKCJE_COL, _MACHINES_LOCK_COL):
             return
         item = self._machines_table.item(row, col)
         if item and item.text():
@@ -482,16 +523,26 @@ class DetailPanel(QWidget):
     def _on_machines_reordered(self, from_row: int, to_row: int):
         if not self.current_hospital:
             return
+        visible = self._visible_machines()
+        if from_row >= len(visible) or to_row >= len(visible):
+            return
         lst = self.current_hospital.machines
-        lst.insert(to_row, lst.pop(from_row))
+        real_from = lst.index(visible[from_row])
+        real_to = lst.index(visible[to_row])
+        lst.insert(real_to, lst.pop(real_from))
         self._refresh_machines()
         self.data_changed.emit()
 
     def _on_db_reordered(self, from_row: int, to_row: int):
         if not self.current_hospital:
             return
+        visible = self._visible_databases()
+        if from_row >= len(visible) or to_row >= len(visible):
+            return
         lst = self.current_hospital.databases
-        lst.insert(to_row, lst.pop(from_row))
+        real_from = lst.index(visible[from_row])
+        real_to = lst.index(visible[to_row])
+        lst.insert(real_to, lst.pop(real_from))
         self._refresh_databases()
         self.data_changed.emit()
 
@@ -502,16 +553,36 @@ class DetailPanel(QWidget):
     def _update_badge(self):
         if not self.current_hospital:
             return
-        h = self.current_hospital
-        m  = len(h.machines)
-        db = len(h.databases)
+        m  = len(self._visible_machines())
+        db = len(self._visible_databases())
         ms  = 'maszyna' if m  == 1 else 'maszyny' if 2 <= m  <= 4 else 'maszyn'
         dbs = 'baza'    if db == 1 else 'bazy'    if 2 <= db <= 4 else 'baz'
-        self._stats_badge.setText(f"🖥  {m} {ms}   ·   🗄  {db} {dbs}")
+        hidden_m = sum(1 for x in self.current_hospital.machines if x.admin_only)
+        hidden_d = sum(1 for x in self.current_hospital.databases if x.admin_only)
+        hidden = hidden_m + hidden_d
+        suffix = ""
+        if hidden and not self._admin_unlocked:
+            suffix = f"   ·   🔒 {hidden} ukrytych"
+        self._stats_badge.setText(f"🖥  {m} {ms}   ·   🗄  {db} {dbs}{suffix}")
+
+    def _visible_machines(self) -> list[models.Machine]:
+        if not self.current_hospital:
+            return []
+        if self._admin_unlocked:
+            return self.current_hospital.machines
+        return [m for m in self.current_hospital.machines if not m.admin_only]
+
+    def _visible_databases(self) -> list[models.Database]:
+        if not self.current_hospital:
+            return []
+        if self._admin_unlocked:
+            return self.current_hospital.databases
+        return [d for d in self.current_hospital.databases if not d.admin_only]
 
     def _refresh_machines(self):
         self._machines_table.setRowCount(0)
-        for i, machine in enumerate(self.current_hospital.machines):
+        visible = self._visible_machines()
+        for i, machine in enumerate(visible):
             self._machines_table.insertRow(i)
 
             ip_item = QTableWidgetItem(machine.ip)
@@ -522,11 +593,24 @@ class DetailPanel(QWidget):
             for col, text in [(1, machine.name), (2, machine.description)]:
                 item = QTableWidgetItem(text)
                 item.setToolTip("Kliknij aby skopiować")
+                if machine.admin_only:
+                    item.setForeground(QBrush(QColor("#c084fc")))
                 self._machines_table.setItem(i, col, item)
 
-            self._machines_table.setCellWidget(i, 3, self._machine_actions(machine))
+            self._machines_table.setCellWidget(i, _MACHINES_AKCJE_COL, self._machine_actions(machine))
+
+            # Lock column
+            lock_item = QTableWidgetItem("🔒" if machine.admin_only else "")
+            lock_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._machines_table.setItem(i, _MACHINES_LOCK_COL, lock_item)
+
             self._machines_table.setRowHeight(i, 36)
         self._update_badge()
+
+    def _visible_credentials(self, creds: list) -> list:
+        if self._admin_unlocked:
+            return creds
+        return [c for c in creds if not c.admin_only]
 
     def _machine_actions(self, machine: models.Machine) -> QWidget:
         w = QWidget()
@@ -534,7 +618,8 @@ class DetailPanel(QWidget):
         row.setContentsMargins(4, 2, 4, 2)
         row.setSpacing(3)
 
-        first_cred = machine.credentials[0] if machine.credentials else None
+        vis_creds = self._visible_credentials(machine.credentials)
+        first_cred = vis_creds[0] if vis_creds else None
         login_text = (first_cred.login[:10] + "…" if first_cred and len(first_cred.login) > 10
                       else (first_cred.login if first_cred else "—"))
         btn_copy = QPushButton(login_text)
@@ -568,7 +653,8 @@ class DetailPanel(QWidget):
                 " border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0; }"
                 "QPushButton:hover { background: #7c3aed; color: #fff; border-color: #c084fc; }"
             )
-            btn_connect.clicked.connect(lambda _, m=machine: connect_rdp(m, self))
+            btn_connect.clicked.connect(
+                lambda _, m=machine: connect_rdp(m, self, self._admin_unlocked))
         else:
             btn_connect = QPushButton("⇆")
             btn_connect.setFixedSize(34, 28)
@@ -611,13 +697,23 @@ class DetailPanel(QWidget):
 
     def _refresh_databases(self):
         self._db_table.setRowCount(0)
-        for i, db in enumerate(self.current_hospital.databases):
+        visible = self._visible_databases()
+        for i, db in enumerate(visible):
             self._db_table.insertRow(i)
-            for col, text in enumerate([db.host, db.port, db.name, db.db_type, db.note]):
+            texts = [db.host, db.port, db.name, db.db_type, db.note]
+            for col, text in enumerate(texts):
                 item = QTableWidgetItem(text)
                 item.setToolTip("Kliknij aby skopiować")
+                if db.admin_only:
+                    item.setForeground(QBrush(QColor("#c084fc")))
                 self._db_table.setItem(i, col, item)
             self._db_table.setCellWidget(i, _DB_AKCJE_COL, self._db_actions(db))
+
+            # Lock column
+            lock_item = QTableWidgetItem("🔒" if db.admin_only else "")
+            lock_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._db_table.setItem(i, _DB_LOCK_COL, lock_item)
+
             self._db_table.setRowHeight(i, 36)
         self._update_badge()
 
@@ -627,7 +723,8 @@ class DetailPanel(QWidget):
         row.setContentsMargins(4, 2, 4, 2)
         row.setSpacing(3)
 
-        first_db_cred = db.credentials[0] if db.credentials else None
+        vis_creds = self._visible_credentials(db.credentials)
+        first_db_cred = vis_creds[0] if vis_creds else None
         db_login_text = (first_db_cred.login[:10] + "…"
                          if first_db_cred and len(first_db_cred.login) > 10
                          else (first_db_cred.login if first_db_cred else "—"))
@@ -713,21 +810,37 @@ class DetailPanel(QWidget):
     # Machine actions                                                      #
     # ------------------------------------------------------------------ #
 
+    def _quick_ssh(self):
+        from ui.ssh_panel import _AddSessionDialog
+        dlg = _AddSessionDialog(parent=self)
+        if not dlg.exec():
+            return
+        ip, login, password, port = dlg.get_values()
+        cred = models.Credential(login=login, password=password)
+        machine = models.Machine(ip=ip, name="", description="", credentials=[cred])
+        machine._ssh_port = port
+        ssh_dlg = SshDialog(machine, hospital=self.current_hospital,
+                            all_hospitals=self._all_hospitals,
+                            admin_unlocked=self._admin_unlocked, parent=self)
+        ssh_dlg.show()
+
     def _open_ssh(self, machine: models.Machine):
-        dlg = SshDialog(machine, hospital=self.current_hospital, parent=self)
+        dlg = SshDialog(machine, hospital=self.current_hospital,
+                        all_hospitals=self._all_hospitals,
+                        admin_unlocked=self._admin_unlocked, parent=self)
         dlg.show()
 
     def _add_machine(self):
         if not self.current_hospital:
             return
-        dlg = MachineDialog(self)
+        dlg = MachineDialog(self, admin_mode=self._admin_unlocked)
         if dlg.exec():
             self.current_hospital.machines.append(dlg.get_machine())
             self.data_changed.emit()
             self._refresh_machines()
 
     def _edit_machine(self, machine: models.Machine):
-        dlg = MachineDialog(self, machine)
+        dlg = MachineDialog(self, machine, admin_mode=self._admin_unlocked)
         if dlg.exec():
             updated = dlg.get_machine()
             machine.ip = updated.ip
@@ -736,6 +849,8 @@ class DetailPanel(QWidget):
             machine.credentials = updated.credentials
             machine.connection_type = updated.connection_type
             machine.rdp_port = updated.rdp_port
+            machine.rdp_drives = updated.rdp_drives
+            machine.admin_only = updated.admin_only
             self.data_changed.emit()
             self._refresh_machines()
 
@@ -757,14 +872,14 @@ class DetailPanel(QWidget):
     def _add_database(self):
         if not self.current_hospital:
             return
-        dlg = DatabaseDialog(self)
+        dlg = DatabaseDialog(self, admin_mode=self._admin_unlocked)
         if dlg.exec():
             self.current_hospital.databases.append(dlg.get_database())
             self.data_changed.emit()
             self._refresh_databases()
 
     def _edit_database(self, db: models.Database):
-        dlg = DatabaseDialog(self, db)
+        dlg = DatabaseDialog(self, db, admin_mode=self._admin_unlocked)
         if dlg.exec():
             updated = dlg.get_database()
             db.host = updated.host
@@ -773,6 +888,7 @@ class DetailPanel(QWidget):
             db.db_type = updated.db_type
             db.credentials = updated.credentials
             db.note = updated.note
+            db.admin_only = updated.admin_only
             self.data_changed.emit()
             self._refresh_databases()
 

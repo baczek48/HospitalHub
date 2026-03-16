@@ -121,7 +121,8 @@ class LoginDialog(QDialog):
                 content = f.read()
             data = decrypt(content, password)
             save_last_vault(vault_path)
-            self._result = (vault_path, password, models.from_dict(data))
+            self._result = (vault_path, password, models.from_dict(data),
+                            data.get("admin_hash", ""), data.get("admin_salt", ""))
             self.accept()
         except FileNotFoundError:
             QMessageBox.critical(self, "Błąd", "Plik vault nie istnieje.\nWybierz inny vault.")
@@ -205,17 +206,17 @@ class LoginDialog(QDialog):
     def _create_new(self):
         dlg = _CreateVaultDialog(self)
         if dlg.exec():
-            path, password, hospitals = dlg.get_result()
-            save_last_vault(path)
-            self._result = (path, password, hospitals)
+            result = dlg.get_result()
+            save_last_vault(result[0])
+            self._result = result
             self.accept()
 
     def _open_existing(self):
         dlg = _OpenVaultDialog(self)
         if dlg.exec():
-            path, password, hospitals = dlg.get_result()
-            save_last_vault(path)
-            self._result = (path, password, hospitals)
+            result = dlg.get_result()
+            save_last_vault(result[0])
+            self._result = result
             self.accept()
 
     def get_result(self):
@@ -304,7 +305,7 @@ class _CreateVaultDialog(QDialog):
             content = encrypt(data, password)
             with open(path, "wb") as f:
                 f.write(content)
-            self._result = (path, password, models.from_dict(data))
+            self._result = (path, password, models.from_dict(data), "", "")
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Błąd", f"Nie można utworzyć vault:\n{e}")
@@ -378,7 +379,8 @@ class _OpenVaultDialog(QDialog):
             with open(path, "rb") as f:
                 content = f.read()
             data = decrypt(content, password)
-            self._result = (path, password, models.from_dict(data))
+            self._result = (path, password, models.from_dict(data),
+                            data.get("admin_hash", ""), data.get("admin_salt", ""))
             self.accept()
         except FileNotFoundError:
             QMessageBox.critical(self, "Błąd", "Plik nie istnieje.")
