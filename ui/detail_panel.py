@@ -1,8 +1,10 @@
+import copy
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QTextEdit, QGroupBox, QFrame, QScrollArea, QMessageBox, QApplication,
-    QSplitter, QMenu,
+    QSplitter, QMenu, QDialog, QDialogButtonBox, QFileDialog, QLineEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent, QSize
 from PyQt6.QtGui import QFont, QBrush, QColor, QIcon, QPixmap, QPainter, QPainterPath, QPen
@@ -120,27 +122,30 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import models
+import vpn_connect
+from crypto import decrypt
 from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard_copy
 from ui.utils import confirm
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
 from ui.db_connect import launch_sqldeveloper
-from config import load_column_widths, save_column_widths
+from config import load_column_widths, save_column_widths, load_personal_vpn_vault, save_personal_vpn_vault
+
+# Session-level VPN profile cache (loaded once per app session)
+_vpn_session_profiles: list = []
+_vpn_session_loaded: bool = False
 
 # stretch_col: fills remaining space, pins Akcje to right edge
 # akcje_col: always ResizeToContents, not saved
 _MACHINES_STRETCH_COL = 2   # Opis
 _MACHINES_AKCJE_COL = 3
-_MACHINES_LOCK_COL = 4
 _MACHINES_DEFAULTS = [120, 140, 180]   # widths for cols 0,1 (col 2 stretches)
-_MACHINES_AKCJE_WIDTH = 290
-_LOCK_COL_WIDTH = 24
+_MACHINES_AKCJE_WIDTH = 322
 
 _DB_STRETCH_COL = 4         # Notatka (ostatnia kolumna danych, jak Opis w maszynach)
 _DB_AKCJE_COL = 5
-_DB_LOCK_COL = 6
 _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
-_DB_AKCJE_WIDTH = 220
+_DB_AKCJE_WIDTH = 252
 
 
 def _setup_table_columns(
@@ -150,22 +155,20 @@ def _setup_table_columns(
     stretch_col: int,
     akcje_col: int,
     akcje_width: int = 220,
-    lock_col: int = -1,
 ):
     """Configure column resize modes and restore saved widths."""
     hh = table.horizontalHeader()
     saved = load_column_widths(key)
 
     skip = {stretch_col, akcje_col}
-    if lock_col >= 0:
-        skip.add(lock_col)
 
-    # Build list of interactive column indices (all except stretch, akcje, lock)
+    # Build list of interactive column indices (all except stretch, akcje)
     interactive_cols = [
         i for i in range(table.columnCount()) if i not in skip
     ]
     widths = saved if (saved and len(saved) == len(interactive_cols)) else defaults
 
+    hh.setMinimumSectionSize(80)
     for idx, col in enumerate(interactive_cols):
         hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         table.setColumnWidth(col, widths[idx])
@@ -173,10 +176,6 @@ def _setup_table_columns(
     hh.setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Stretch)
     hh.setSectionResizeMode(akcje_col, QHeaderView.ResizeMode.Fixed)
     table.setColumnWidth(akcje_col, akcje_width)
-
-    if lock_col >= 0:
-        hh.setSectionResizeMode(lock_col, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(lock_col, _LOCK_COL_WIDTH)
 
     # Install an event filter that intercepts ContextMenu events on the header.
     # IMPORTANT: horizontalHeader() returns ephemeral Python wrappers — storing on
@@ -186,6 +185,99 @@ def _setup_table_columns(
         hh,
         lambda: save_column_widths(key, [table.columnWidth(c) for c in interactive_cols]),
     )
+
+
+class _VpnUnlockDialog(QDialog):
+    """Dialog to pick a personal VPN vault file and enter its password."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Twój VPN vault")
+        self.setModal(True)
+        self.setFixedWidth(380)
+        self.setStyleSheet("background: #0d1117; color: #c9d1d9;")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(10)
+
+        title = QLabel("Wskaż osobisty VPN vault")
+        title.setStyleSheet("color: #c9d1d9; font-size: 13px; font-weight: bold; background: transparent;")
+        lay.addWidget(title)
+
+        desc = QLabel("Plik zostanie zapamiętany — hasło tylko na czas sesji.")
+        desc.setStyleSheet("color: #8b949e; font-size: 10px; background: transparent;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        # File path row
+        path_row = QHBoxLayout()
+        self._path_edit = QLineEdit()
+        saved = load_personal_vpn_vault()
+        if saved:
+            self._path_edit.setText(saved)
+        self._path_edit.setPlaceholderText("Ścieżka do pliku .vault...")
+        self._path_edit.setStyleSheet(
+            "QLineEdit { background: #21262d; border: 1px solid #30363d; border-radius: 4px;"
+            " padding: 5px 8px; color: #c9d1d9; font-size: 11px; }"
+            "QLineEdit:focus { border-color: #1f6feb; }"
+        )
+        path_row.addWidget(self._path_edit, 1)
+        btn_browse = QPushButton("...")
+        btn_browse.setFixedSize(28, 28)
+        btn_browse.setStyleSheet(
+            "QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;"
+            " border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background: #30363d; }"
+        )
+        btn_browse.clicked.connect(self._browse)
+        path_row.addWidget(btn_browse)
+        lay.addLayout(path_row)
+
+        # Password
+        lbl_pass = QLabel("Hasło do VPN vaulta")
+        lbl_pass.setStyleSheet("color: #8b949e; font-size: 10px; background: transparent;")
+        lay.addWidget(lbl_pass)
+        self._pass_edit = QLineEdit()
+        self._pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pass_edit.setPlaceholderText("Hasło...")
+        self._pass_edit.setStyleSheet(
+            "QLineEdit { background: #21262d; border: 1px solid #30363d; border-radius: 4px;"
+            " padding: 5px 8px; color: #c9d1d9; font-size: 11px; }"
+            "QLineEdit:focus { border-color: #1f6feb; }"
+        )
+        self._pass_edit.returnPressed.connect(self.accept)
+        lay.addWidget(self._pass_edit)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.setStyleSheet(
+            "QDialogButtonBox QPushButton { background: #21262d; color: #c9d1d9;"
+            " border: 1px solid #30363d; border-radius: 4px; padding: 5px 16px; min-width: 70px; }"
+            "QDialogButtonBox QPushButton:hover { background: #30363d; }"
+            "QDialogButtonBox QPushButton[text='OK'] { background: #1f6feb; color: #fff; border-color: #1f6feb; }"
+            "QDialogButtonBox QPushButton[text='OK']:hover { background: #388bfd; }"
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+        self._pass_edit.setFocus()
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Wybierz VPN vault", "",
+            "Vault files (*.vault);;Wszystkie pliki (*)"
+        )
+        if path:
+            self._path_edit.setText(path)
+
+    def vault_path(self) -> str:
+        return self._path_edit.text().strip()
+
+    def password(self) -> str:
+        return self._pass_edit.text()
 
 
 class DetailPanel(QWidget):
@@ -268,6 +360,26 @@ class DetailPanel(QWidget):
         btn_sqld.clicked.connect(lambda: launch_sqldeveloper(self))
         header.addWidget(btn_sqld)
 
+        self._vpn_btn = QToolButton()
+        self._vpn_btn.setText("VPN")
+        self._vpn_btn.setFixedSize(38, 26)
+        self._vpn_btn.setToolTip("Połącz przez VPN")
+        self._vpn_btn.setStyleSheet(
+            "QToolButton { background: transparent; border: 1px solid #30363d;"
+            " border-radius: 5px; color: #8b949e; font-size: 10px; font-weight: bold; }"
+            "QToolButton:hover { background: #21262d; border-color: #58a6ff; color: #58a6ff; }"
+            "QToolButton:pressed { background: #1a3a5c; }"
+        )
+        self._vpn_btn.clicked.connect(self._on_vpn_btn_clicked)
+        header.addWidget(self._vpn_btn)
+
+        # Poll VPN status every 2s to keep button state in sync
+        self._vpn_last_status = None  # cache last known status to avoid flicker
+        self._vpn_poll_timer = QTimer(self)
+        self._vpn_poll_timer.setInterval(2000)
+        self._vpn_poll_timer.timeout.connect(self._poll_vpn_status)
+        self._vpn_poll_timer.start()
+
         content_layout.addLayout(header)
 
         sep = QFrame()
@@ -293,8 +405,8 @@ class DetailPanel(QWidget):
         machines_layout.setContentsMargins(8, 8, 8, 8)
         machines_layout.setSpacing(6)
 
-        self._machines_table = _DraggableTable(0, 5)
-        self._machines_table.setHorizontalHeaderLabels(["Adres IP", "Nazwa", "Opis", "Akcje", ""])
+        self._machines_table = _DraggableTable(0, 4)
+        self._machines_table.setHorizontalHeaderLabels(["Adres IP", "Nazwa", "Opis", "Akcje"])
         self._machines_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._machines_table.verticalHeader().setVisible(False)
         self._machines_table.setAlternatingRowColors(True)
@@ -314,12 +426,15 @@ class DetailPanel(QWidget):
                 font-weight: bold; font-size: 10px;
             }
         """)
+        self._machines_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._machines_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._machines_table.customContextMenuRequested.connect(self._on_machine_context_menu)
         self._machines_table.cellClicked.connect(self._on_machine_cell_clicked)
         self._machines_table.rows_reordered.connect(self._on_machines_reordered)
         _setup_table_columns(
             self._machines_table, "machines", _MACHINES_DEFAULTS,
             stretch_col=_MACHINES_STRETCH_COL, akcje_col=_MACHINES_AKCJE_COL,
-            akcje_width=_MACHINES_AKCJE_WIDTH, lock_col=_MACHINES_LOCK_COL,
+            akcje_width=_MACHINES_AKCJE_WIDTH,
         )
         machines_layout.addWidget(self._machines_table)
 
@@ -357,9 +472,9 @@ class DetailPanel(QWidget):
         db_layout.setContentsMargins(8, 8, 8, 8)
         db_layout.setSpacing(6)
 
-        self._db_table = _DraggableTable(0, 7)
+        self._db_table = _DraggableTable(0, 6)
         self._db_table.setHorizontalHeaderLabels(
-            ["Host", "Port", "Nazwa bazy", "Typ", "Notatka", "Akcje", ""]
+            ["Host", "Port", "Nazwa bazy", "Typ", "Notatka", "Akcje"]
         )
         self._db_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._db_table.verticalHeader().setVisible(False)
@@ -381,12 +496,13 @@ class DetailPanel(QWidget):
             }
         """)
         self._db_table.setFixedHeight(140)
+        self._db_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._db_table.cellClicked.connect(self._on_db_cell_clicked)
         self._db_table.rows_reordered.connect(self._on_db_reordered)
         _setup_table_columns(
             self._db_table, "databases", _DB_DEFAULTS,
             stretch_col=_DB_STRETCH_COL, akcje_col=_DB_AKCJE_COL,
-            akcje_width=_DB_AKCJE_WIDTH, lock_col=_DB_LOCK_COL,
+            akcje_width=_DB_AKCJE_WIDTH,
         )
         db_layout.addWidget(self._db_table)
 
@@ -434,27 +550,16 @@ class DetailPanel(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._fit_columns(self._machines_table, [0, 1], _MACHINES_AKCJE_COL, _MACHINES_LOCK_COL)
-        self._fit_columns(self._db_table, [0, 1, 2, 3], _DB_AKCJE_COL, _DB_LOCK_COL)
 
-    def _fit_columns(self, table: QTableWidget, interactive_cols: list,
-                     akcje_col: int, lock_col: int = -1):
-        """Scale interactive columns proportionally so they never overflow the viewport."""
-        vp_width = table.viewport().width()
-        if vp_width <= 0:
-            return
-        akcje_w = table.columnWidth(akcje_col)
-        lock_w = table.columnWidth(lock_col) if lock_col >= 0 else 0
-        min_stretch = 30  # keep at least a sliver for the stretch column
-        available = vp_width - akcje_w - lock_w - min_stretch
-        if available <= 0:
-            return
-        total = sum(table.columnWidth(c) for c in interactive_cols)
-        if total > available:
-            scale = available / total
-            for col in interactive_cols:
-                new_w = max(28, int(table.columnWidth(col) * scale))
-                table.setColumnWidth(col, new_w)
+    def cleanup(self):
+        """Stop timers and workers — call before discarding this panel."""
+        if hasattr(self, '_vpn_poll_timer'):
+            self._vpn_poll_timer.stop()
+        for attr in ('_vpn_token_waiter', '_vpn_monitor_worker'):
+            w = getattr(self, attr, None)
+            if w and hasattr(w, 'quit'):
+                w.quit()
+                w.wait(500)
 
     # ------------------------------------------------------------------ #
 
@@ -484,6 +589,7 @@ class DetailPanel(QWidget):
         self._notes_edit.blockSignals(False)
         self._refresh_machines()
         self._refresh_databases()
+        self._update_vpn_btn()
 
     # ------------------------------------------------------------------ #
     # Cell click → copy                                                    #
@@ -502,12 +608,12 @@ class DetailPanel(QWidget):
         self._machines_table.clearSelection()
         self._machines_table.setCurrentIndex(
             self._machines_table.model().index(-1, -1))
-        if col in (_MACHINES_AKCJE_COL, _MACHINES_LOCK_COL):
+        if col == _MACHINES_AKCJE_COL:
             return
         item = self._machines_table.item(row, col)
         if item and item.text():
             self._flash_cell(self._machines_table, row, col)
-            QApplication.clipboard().setText(item.text())
+            _clipboard_copy(item.text())
 
     def _on_db_cell_clicked(self, row: int, col: int):
         self._db_table.clearSelection()
@@ -518,7 +624,7 @@ class DetailPanel(QWidget):
         item = self._db_table.item(row, col)
         if item and item.text():
             self._flash_cell(self._db_table, row, col)
-            QApplication.clipboard().setText(item.text())
+            _clipboard_copy(item.text())
 
     def _on_machines_reordered(self, from_row: int, to_row: int):
         if not self.current_hospital:
@@ -599,11 +705,6 @@ class DetailPanel(QWidget):
 
             self._machines_table.setCellWidget(i, _MACHINES_AKCJE_COL, self._machine_actions(machine))
 
-            # Lock column
-            lock_item = QTableWidgetItem("🔒" if machine.admin_only else "")
-            lock_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._machines_table.setItem(i, _MACHINES_LOCK_COL, lock_item)
-
             self._machines_table.setRowHeight(i, 36)
         self._update_badge()
 
@@ -622,25 +723,28 @@ class DetailPanel(QWidget):
         first_cred = vis_creds[0] if vis_creds else None
         login_text = (first_cred.login[:10] + "…" if first_cred and len(first_cred.login) > 10
                       else (first_cred.login if first_cred else "—"))
-        btn_copy = QPushButton(login_text)
-        btn_copy.setEnabled(first_cred is not None)
-        btn_copy.setFixedHeight(28)
-        btn_copy.setMaximumWidth(90)
-        btn_copy.setToolTip(
-            f"Kopiuj hasło użytkownika: {first_cred.login}" if first_cred
-            else "Brak poświadczeń"
-        )
-        btn_copy.setStyleSheet(
+
+        _cred_btn_style = (
             "QPushButton { background: #1e2733; color: #8b949e; border: 1px solid #30363d;"
             " border-radius: 4px; padding: 2px 4px; font-size: 10px; }"
             "QPushButton:hover { background: #263040; color: #c9d1d9; }"
             "QPushButton:disabled { color: #444; background: #161b22; border-color: #21262d; }"
         )
+
+        btn_login = QPushButton(login_text)
+        btn_login.setEnabled(first_cred is not None)
+        btn_login.setFixedHeight(28)
+        btn_login.setMaximumWidth(90)
+        btn_login.setToolTip(
+            f"Kopiuj hasło: {first_cred.login}" if first_cred
+            else "Brak poświadczeń"
+        )
+        btn_login.setStyleSheet(_cred_btn_style)
         if first_cred:
-            btn_copy.clicked.connect(
+            btn_login.clicked.connect(
                 lambda _, c=first_cred: _clipboard_copy(c.password)
             )
-        row.addWidget(btn_copy)
+        row.addWidget(btn_login)
 
         if machine.connection_type == "RDP":
             btn_connect = QPushButton("RDP")
@@ -655,6 +759,18 @@ class DetailPanel(QWidget):
             )
             btn_connect.clicked.connect(
                 lambda _, m=machine: connect_rdp(m, self, self._admin_unlocked))
+        elif machine.connection_type == "WWW":
+            btn_connect = QPushButton("🌐")
+            btn_connect.setFixedSize(34, 28)
+            btn_connect.setToolTip(
+                f"Otwórz w przeglądarce: {machine.www_url or machine.ip}"
+            )
+            btn_connect.setStyleSheet(
+                "QPushButton { background: #1a2a1a; color: #3fb950; border: 1px solid #2d5a2d;"
+                " border-radius: 4px; font-size: 15px; padding: 0; }"
+                "QPushButton:hover { background: #2d5a2d; color: #7ee787; border-color: #3fb950; }"
+            )
+            btn_connect.clicked.connect(lambda _, m=machine: self._open_www(m))
         else:
             btn_connect = QPushButton("⇆")
             btn_connect.setFixedSize(34, 28)
@@ -709,11 +825,6 @@ class DetailPanel(QWidget):
                 self._db_table.setItem(i, col, item)
             self._db_table.setCellWidget(i, _DB_AKCJE_COL, self._db_actions(db))
 
-            # Lock column
-            lock_item = QTableWidgetItem("🔒" if db.admin_only else "")
-            lock_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._db_table.setItem(i, _DB_LOCK_COL, lock_item)
-
             self._db_table.setRowHeight(i, 36)
         self._update_badge()
 
@@ -728,25 +839,28 @@ class DetailPanel(QWidget):
         db_login_text = (first_db_cred.login[:10] + "…"
                          if first_db_cred and len(first_db_cred.login) > 10
                          else (first_db_cred.login if first_db_cred else "—"))
-        btn_copy = QPushButton(db_login_text)
-        btn_copy.setEnabled(first_db_cred is not None)
-        btn_copy.setFixedHeight(28)
-        btn_copy.setMaximumWidth(90)
-        btn_copy.setToolTip(
-            f"Kopiuj hasło użytkownika: {first_db_cred.login}" if first_db_cred
-            else "Brak poświadczeń"
-        )
-        btn_copy.setStyleSheet(
+
+        _cred_btn_style = (
             "QPushButton { background: #1e2733; color: #8b949e; border: 1px solid #30363d;"
             " border-radius: 4px; padding: 2px 4px; font-size: 10px; }"
             "QPushButton:hover { background: #263040; color: #c9d1d9; }"
             "QPushButton:disabled { color: #444; background: #161b22; border-color: #21262d; }"
         )
+
+        btn_login = QPushButton(db_login_text)
+        btn_login.setEnabled(first_db_cred is not None)
+        btn_login.setFixedHeight(28)
+        btn_login.setMaximumWidth(90)
+        btn_login.setToolTip(
+            f"Kopiuj hasło: {first_db_cred.login}" if first_db_cred
+            else "Brak poświadczeń"
+        )
+        btn_login.setStyleSheet(_cred_btn_style)
         if first_db_cred:
-            btn_copy.clicked.connect(
+            btn_login.clicked.connect(
                 lambda _, c=first_db_cred: _clipboard_copy(c.password)
             )
-        row.addWidget(btn_copy)
+        row.addWidget(btn_login)
 
         btn_edit = QPushButton("⚙")
         btn_edit.setFixedSize(28, 28)
@@ -830,6 +944,14 @@ class DetailPanel(QWidget):
                         admin_unlocked=self._admin_unlocked, parent=self)
         dlg.show()
 
+    def _open_www(self, machine: models.Machine):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        url = machine.www_url or f"https://{machine.ip}"
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        QDesktopServices.openUrl(QUrl(url))
+
     def _add_machine(self):
         if not self.current_hospital:
             return
@@ -864,6 +986,32 @@ class DetailPanel(QWidget):
             self.current_hospital.machines.remove(machine)
             self.data_changed.emit()
             self._refresh_machines()
+
+    def _duplicate_machine(self, machine: models.Machine):
+        dup = copy.deepcopy(machine)
+        dup.id = str(models.uuid.uuid4())
+        for c in dup.credentials:
+            c.id = str(models.uuid.uuid4())
+        dlg = MachineDialog(self, machine=dup, admin_mode=self._admin_unlocked)
+        if dlg.exec():
+            idx = self.current_hospital.machines.index(machine)
+            self.current_hospital.machines.insert(idx + 1, dlg.get_machine())
+            self.data_changed.emit()
+            self._refresh_machines()
+
+    def _on_machine_context_menu(self, pos):
+        item = self._machines_table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        visible = self._visible_machines()
+        if row < 0 or row >= len(visible):
+            return
+        machine = visible[row]
+
+        menu = QMenu(self)
+        menu.addAction("📑  Duplikuj", lambda: self._duplicate_machine(machine))
+        menu.exec(self._machines_table.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------------ #
     # Database actions                                                     #
@@ -901,3 +1049,178 @@ class DetailPanel(QWidget):
             self.current_hospital.databases.remove(db)
             self.data_changed.emit()
             self._refresh_databases()
+
+    # ------------------------------------------------------------------ #
+    # VPN integration                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _vpn_profile_for_current(self):
+        """Return matching VPN profile for current hospital (by name, case-insensitive), or None."""
+        if not self.current_hospital or not _vpn_session_profiles:
+            return None
+        name = self.current_hospital.name.strip().lower()
+        for p in _vpn_session_profiles:
+            if p.name.strip().lower() == name:
+                return p
+        return None
+
+    def _poll_vpn_status(self):
+        """Periodically refresh VPN button to reflect real connection state."""
+        if not _vpn_session_loaded:
+            return
+        profile = self._vpn_profile_for_current()
+        if not profile:
+            return
+        status = vpn_connect.get_status(profile.provider, profile.app_path, profile.profile_name)
+        if status is None:
+            return  # query failed — keep previous state, don't flicker
+        if status != self._vpn_last_status:
+            self._vpn_last_status = status
+            self._update_vpn_btn()
+
+    def _update_vpn_btn(self):
+        """Update VPN button colour based on matching profile connection status."""
+        profile = self._vpn_profile_for_current()
+        if not _vpn_session_loaded:
+            # Not loaded yet — neutral grey
+            self._vpn_btn.setStyleSheet(
+                "QToolButton { background: transparent; border: 1px solid #30363d;"
+                " border-radius: 5px; color: #8b949e; font-size: 10px; font-weight: bold; }"
+                "QToolButton:hover { background: #21262d; border-color: #58a6ff; color: #58a6ff; }"
+            )
+            self._vpn_btn.setToolTip("Połącz przez VPN (wskaż swój VPN vault przy pierwszym kliknięciu)")
+            return
+        if not profile:
+            self._vpn_btn.setStyleSheet(
+                "QToolButton { background: transparent; border: 1px solid #21262d;"
+                " border-radius: 5px; color: #484f58; font-size: 10px; font-weight: bold; }"
+                "QToolButton:hover { background: #161b22; border-color: #30363d; color: #6e7681; }"
+            )
+            self._vpn_btn.setToolTip("Brak profilu VPN dla tego szpitala")
+            return
+        # Profile found — check live status
+        status = vpn_connect.get_status(profile.provider, profile.app_path, profile.profile_name)
+        if status == "Connected":
+            self._vpn_btn.setStyleSheet(
+                "QToolButton { background: rgba(35,134,54,0.15); border: 1px solid #238636;"
+                " border-radius: 5px; color: #3fb950; font-size: 10px; font-weight: bold; }"
+                "QToolButton:hover { background: rgba(35,134,54,0.25); border-color: #2ea043; }"
+            )
+            self._vpn_btn.setToolTip(f"VPN połączono: {profile.name}  ·  kliknij aby rozłączyć")
+        elif status and "Connecting" in status:
+            self._vpn_btn.setStyleSheet(
+                "QToolButton { background: rgba(210,153,34,0.15); border: 1px solid #d29922;"
+                " border-radius: 5px; color: #d29922; font-size: 10px; font-weight: bold; }"
+                "QToolButton:hover { background: rgba(210,153,34,0.25); }"
+            )
+            self._vpn_btn.setToolTip(f"VPN łączy: {profile.name}...")
+        else:
+            self._vpn_btn.setStyleSheet(
+                "QToolButton { background: transparent; border: 1px solid #30363d;"
+                " border-radius: 5px; color: #8b949e; font-size: 10px; font-weight: bold; }"
+                "QToolButton:hover { background: #21262d; border-color: #238636; color: #3fb950; }"
+            )
+            self._vpn_btn.setToolTip(f"Połącz VPN: {profile.name}  ({profile.provider})")
+
+    def _load_vpn_vault(self) -> bool:
+        """Show unlock dialog, load VPN profiles into session cache. Returns True on success."""
+        global _vpn_session_profiles, _vpn_session_loaded
+        dlg = _VpnUnlockDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        vault_path = dlg.vault_path()
+        password = dlg.password()
+        if not vault_path or not os.path.exists(vault_path):
+            QMessageBox.warning(self, "VPN vault", "Nie znaleziono pliku vault.")
+            return False
+        try:
+            with open(vault_path, "rb") as f:
+                raw = f.read()
+            data = decrypt(raw, password)
+            profiles = models.vpn_from_dict(data)
+        except Exception as e:
+            QMessageBox.critical(self, "VPN vault", f"Nie można otworzyć vaulta:\n{e}")
+            return False
+        save_personal_vpn_vault(vault_path)
+        _vpn_session_profiles = profiles
+        _vpn_session_loaded = True
+        return True
+
+    def _on_vpn_btn_clicked(self):
+        global _vpn_session_loaded
+        if not _vpn_session_loaded:
+            if not self._load_vpn_vault():
+                return
+            self._update_vpn_btn()
+            return  # only load vault, don't auto-connect
+
+        profile = self._vpn_profile_for_current()
+        if not profile:
+            QMessageBox.information(
+                self, "VPN",
+                f"Brak profilu VPN o nazwie \"{self.current_hospital.name}\".\n"
+                "Dodaj profil w sekcji VPN z taką samą nazwą jak szpital."
+            )
+            return
+
+        # Toggle: disconnect if connected, connect if not
+        status = vpn_connect.get_status(profile.provider, profile.app_path, profile.profile_name)
+        if status == "Connected":
+            vpn_connect.disconnect(profile.provider, profile.server, profile.app_path, profile.profile_name)
+            self._update_vpn_btn()
+            return
+
+        # Connect first (without token — FortiClient will show Token field in GUI)
+        ok, msg, process = vpn_connect.connect_monitored(
+            profile.provider, profile.server, profile.port,
+            profile.login, profile.password,
+            profile.group, profile.domain,
+            profile.app_path, profile.profile_name, ""
+        )
+        if not ok:
+            QMessageBox.warning(self, "VPN", msg)
+            return
+
+        self._update_vpn_btn()
+
+        # If 2FA required — wait for FortiClient Token window, ask user, fill in
+        if profile.requires_2fa and profile.provider == "FortiClient":
+            from PyQt6.QtCore import QThread
+            from ui.vpn_panel import TwoFactorDialog
+
+            class _TokenWindowWaiter(QThread):
+                """Wait for FortiClient token window in background thread."""
+                from PyQt6.QtCore import pyqtSignal as Signal
+                found = Signal()
+
+                def run(self):
+                    hwnd = vpn_connect._find_forticlient_token_window(timeout=20.0)
+                    if hwnd:
+                        self.found.emit()
+
+            def _on_token_window_found():
+                dlg = TwoFactorDialog(profile.name, self)
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    ok2, msg2 = vpn_connect.fill_forticlient_token(dlg.code())
+                    if not ok2:
+                        QMessageBox.warning(self, "VPN Token", msg2)
+                self._update_vpn_btn()
+
+            waiter = _TokenWindowWaiter(self)
+            waiter.found.connect(_on_token_window_found)
+            waiter.start()
+            self._vpn_token_waiter = waiter  # keep reference
+
+        # Auto-detect 2FA via stdout if process available (non-GUI fallback)
+        elif process is not None and not profile.requires_2fa:
+            from ui.vpn_panel import VpnMonitorWorker, TwoFactorDialog
+            worker = VpnMonitorWorker(0, process, self)
+            worker.twofa_detected.connect(lambda _: self._handle_auto_2fa(worker, profile))
+            worker.start()
+            self._vpn_monitor_worker = worker  # keep reference
+
+    def _handle_auto_2fa(self, worker, profile):
+        from ui.vpn_panel import TwoFactorDialog
+        dlg = TwoFactorDialog(profile.name, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            worker.send_token(dlg.code())

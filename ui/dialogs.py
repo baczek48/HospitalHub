@@ -177,11 +177,16 @@ class MachineDialog(QDialog):
 
         # Connection type
         self._type_combo = QComboBox()
-        self._type_combo.addItems(["SSH", "RDP"])
+        self._type_combo.addItems(["SSH", "RDP", "WWW"])
         idx = self._type_combo.findText(self._machine.connection_type)
         self._type_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._type_combo.currentTextChanged.connect(self._on_type_changed)
         self._form.addRow("Typ połączenia:", self._type_combo)
+
+        # WWW URL — visible only when WWW is selected
+        self._www_url_edit = QLineEdit(self._machine.www_url or "")
+        self._www_url_edit.setPlaceholderText("https://pam.example.com/session/123")
+        self._form.addRow("URL:", self._www_url_edit)
 
         # RDP port — visible only when RDP is selected
         self._rdp_port_edit = QLineEdit(self._machine.rdp_port or "3389")
@@ -312,12 +317,17 @@ class MachineDialog(QDialog):
 
     def _on_type_changed(self, text: str) -> None:
         is_rdp = text == "RDP"
+        is_www = text == "WWW"
         self._rdp_port_edit.setVisible(is_rdp)
         lbl = self._form.labelForField(self._rdp_port_edit)
         if lbl:
             lbl.setVisible(is_rdp)
         self._rdp_drive_widget.setVisible(is_rdp)
         self._rdp_drive_label.setVisible(is_rdp)
+        self._www_url_edit.setVisible(is_www)
+        lbl_www = self._form.labelForField(self._www_url_edit)
+        if lbl_www:
+            lbl_www.setVisible(is_www)
 
     @staticmethod
     def _detect_drives() -> list[str]:
@@ -333,7 +343,11 @@ class MachineDialog(QDialog):
 
     def _accept(self):
         ip = self._ip_edit.text().strip()
-        if not ip:
+        conn_type = self._type_combo.currentText()
+        if not ip and conn_type == "WWW" and not self._www_url_edit.text().strip():
+            QMessageBox.warning(self, "Błąd", "Podaj adres IP lub URL.")
+            return
+        elif not ip and conn_type != "WWW":
             QMessageBox.warning(self, "Błąd", "Podaj adres IP maszyny.")
             return
         self._machine.ip = ip
@@ -342,6 +356,7 @@ class MachineDialog(QDialog):
         self._machine.connection_type = self._type_combo.currentText()
         self._machine.rdp_port = self._rdp_port_edit.text().strip() or "3389"
         self._machine.rdp_drives = [cb.text() for cb in self._drive_checkboxes if cb.isChecked()]
+        self._machine.www_url = self._www_url_edit.text().strip()
         if self._admin_mode:
             self._machine.admin_only = self._admin_cb.isChecked()
         self.accept()

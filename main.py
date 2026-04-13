@@ -20,9 +20,11 @@ def _cleanup_sftp_temp():
 
 atexit.register(_cleanup_sftp_temp)
 
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QPalette, QColor, QIcon, QPixmap, QPainter, QPainterPath, QPen
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PyQt6.QtGui import (QPalette, QColor, QIcon, QPixmap, QPainter,
+                          QPainterPath, QPen, QAction)
 from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 from ui.login_dialog import LoginDialog
 from ui.main_window import MainWindow
@@ -101,21 +103,291 @@ def make_icon() -> QIcon:
     return QIcon(px)
 
 
+def make_vpn_icon() -> QIcon:
+    """Draws a shield with a key symbol — used for VPN vault windows."""
+    size = 256
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Shield shape (same as main icon)
+    shield = QPainterPath()
+    w, h = size, size
+    shield.moveTo(w * 0.5, h * 0.05)
+    shield.lineTo(w * 0.92, h * 0.22)
+    shield.cubicTo(w * 0.92, h * 0.60, w * 0.72, h * 0.85, w * 0.50, h * 0.96)
+    shield.cubicTo(w * 0.28, h * 0.85, w * 0.08, h * 0.60, w * 0.08, h * 0.22)
+    shield.closeSubpath()
+
+    # Fill shield — teal/green for VPN
+    p.fillPath(shield, QColor(12, 60, 52))
+
+    # Shield border — green
+    pen = QPen(QColor(34, 180, 140), size * 0.03)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.drawPath(shield)
+
+    # Lock body
+    cx, cy = w * 0.5, h * 0.52
+    lock_w, lock_h = w * 0.28, h * 0.20
+    lock_body = QPainterPath()
+    lock_body.addRoundedRect(QRectF(cx - lock_w / 2, cy, lock_w, lock_h), 6, 6)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.fillPath(lock_body, QColor(220, 240, 235))
+
+    # Lock shackle (arc)
+    shackle_pen = QPen(QColor(220, 240, 235), size * 0.04)
+    shackle_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(shackle_pen)
+    shackle_r = w * 0.10
+    p.drawArc(QRectF(cx - shackle_r, cy - shackle_r * 1.4, shackle_r * 2, shackle_r * 2),
+              0 * 16, 180 * 16)
+
+    # Keyhole
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(12, 60, 52))
+    kh_r = size * 0.03
+    p.drawEllipse(QRectF(cx - kh_r, cy + lock_h * 0.3 - kh_r, kh_r * 2, kh_r * 2))
+    p.drawRect(QRectF(cx - kh_r * 0.5, cy + lock_h * 0.3, kh_r, lock_h * 0.35))
+
+    p.end()
+    return QIcon(px)
+
+
+# ------------------------------------------------------------------ #
+# Application Manager — manages tray icon and multiple windows        #
+# ------------------------------------------------------------------ #
+
+_TRAY_MENU_STYLE = (
+    "QMenu { background:#1e1e23; border:1px solid #30363d; color:#c9d1d9; }"
+    "QMenu::item { padding:5px 20px 5px 12px; }"
+    "QMenu::item:selected { background:#1f6feb; color:#fff; }"
+    "QMenu::separator { height:1px; background:#30363d; margin:2px 0; }"
+)
+
+
+class AppManager:
+    """Singleton managing per-window tray icons and all open MainWindow instances."""
+
+    def __init__(self, app: QApplication):
+        self._app = app
+        self._windows: list[MainWindow] = []
+        self._trays: dict[MainWindow, QSystemTrayIcon] = {}
+        self._default_icon = make_icon()
+        self._vpn_icon = make_vpn_icon()
+
+        # Don't quit when all windows are hidden
+        app.setQuitOnLastWindowClosed(False)
+
+        # IPC server — listens for "activate" from second instances
+        self._ipc_server = QLocalServer()
+        self._ipc_server.removeServer(_IPC_CHANNEL)
+        self._ipc_server.listen(_IPC_CHANNEL)
+        self._ipc_server.newConnection.connect(self._on_ipc_connection)
+
+    def icon_for_type(self, vault_type: str) -> QIcon:
+        return self._vpn_icon if vault_type == "vpn" else self._default_icon
+
+    def add_window(self, window: MainWindow):
+        self._windows.append(window)
+        window.open_vault_requested.connect(self._on_open_vault_requested)
+        window.force_close_requested.connect(lambda w=window: self._force_close_window(w))
+
+        # Create dedicated tray icon for this window
+        icon = self.icon_for_type(window._vault_type)
+        tray = QSystemTrayIcon(icon)
+        tray.setToolTip(window.windowTitle())
+        tray.activated.connect(lambda reason, w=window: self._on_tray_activated(reason, w))
+        self._trays[window] = tray
+        self._rebuild_tray_menu(window)
+        tray.show()
+
+        window.title_changed.connect(lambda w=window: self._on_title_changed(w))
+
+    def remove_window(self, window: MainWindow):
+        tray = self._trays.pop(window, None)
+        if tray:
+            tray.hide()
+        if window in self._windows:
+            self._windows.remove(window)
+        if not self._windows:
+            self._app.quit()
+
+    def _on_title_changed(self, window: MainWindow):
+        tray = self._trays.get(window)
+        if tray:
+            tray.setToolTip(window.windowTitle())
+            self._rebuild_tray_menu(window)
+
+    def _rebuild_tray_menu(self, window: MainWindow):
+        tray = self._trays.get(window)
+        if not tray:
+            return
+        menu = QMenu()
+        menu.setStyleSheet(_TRAY_MENU_STYLE)
+
+        act_show = menu.addAction(f"Pokaż: {window.windowTitle().split('[')[0].strip()}")
+        act_show.triggered.connect(lambda checked, w=window: self._show_window(w))
+        menu.addSeparator()
+
+        act_open = menu.addAction("Otwórz vault...")
+        act_open.triggered.connect(self._on_open_vault_requested)
+        menu.addSeparator()
+
+        act_close = menu.addAction("Zamknij to okno")
+        act_close.triggered.connect(lambda checked, w=window: self._force_close_window(w))
+
+        act_quit = menu.addAction("Zamknij wszystko")
+        act_quit.triggered.connect(self._quit_all)
+
+        tray.setContextMenu(menu)
+
+    def _show_window(self, window: MainWindow):
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _on_ipc_connection(self):
+        """Another instance asked us to activate — show all windows via Qt."""
+        conn = self._ipc_server.nextPendingConnection()
+        if conn:
+            conn.waitForReadyRead(500)
+            conn.close()
+        for w in self._windows:
+            self._show_window(w)
+
+    def _on_tray_activated(self, reason, window: MainWindow):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if window.isVisible():
+                window.hide()
+            else:
+                self._show_window(window)
+
+    def _force_close_window(self, window: MainWindow):
+        if window._unsaved:
+            window.show()
+            window.raise_()
+            box = QMessageBox(window)
+            box.setWindowTitle("Niezapisane zmiany")
+            box.setText("Masz niezapisane zmiany. Zapisać przed zamknięciem?")
+            box.setIcon(QMessageBox.Icon.Question)
+            btn_yes = box.addButton("Tak", QMessageBox.ButtonRole.YesRole)
+            btn_no = box.addButton("Nie", QMessageBox.ButtonRole.NoRole)
+            box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_yes:
+                window._save()
+            elif clicked is btn_no:
+                pass
+            else:
+                return  # Cancel
+        self.remove_window(window)
+        window.destroy_cleanup()
+        window.deleteLater()
+
+    def _quit_all(self):
+        for w in list(self._windows):
+            if w._unsaved:
+                w.show()
+                w.raise_()
+                box = QMessageBox(w)
+                box.setWindowTitle("Niezapisane zmiany")
+                box.setText(f"'{w.windowTitle().split('[')[0].strip()}' ma niezapisane zmiany.\nZapisać?")
+                box.setIcon(QMessageBox.Icon.Question)
+                btn_yes = box.addButton("Tak", QMessageBox.ButtonRole.YesRole)
+                btn_no = box.addButton("Nie", QMessageBox.ButtonRole.NoRole)
+                box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                clicked = box.clickedButton()
+                if clicked is btn_yes:
+                    w._save()
+                elif clicked is btn_no:
+                    pass
+                else:
+                    return  # Cancel — abort quit
+        for w in self._windows:
+            w.destroy_cleanup()
+        for tray in self._trays.values():
+            tray.hide()
+        self._trays.clear()
+        self._windows.clear()
+        self._app.quit()
+
+    def _on_open_vault_requested(self):
+        login = LoginDialog()
+        if not login.exec():
+            return
+        result = login.get_result()
+        if not result:
+            return
+        vault_path, password, items, admin_hash, admin_salt = result[:5]
+        vault_type = result[5] if len(result) > 5 else "global"
+
+        # Check if this vault is already open
+        normed = os.path.normpath(vault_path)
+        for w in self._windows:
+            if os.path.normpath(w._vault_path) == normed:
+                self._show_window(w)
+                return
+
+        self._create_window(vault_path, password, items, admin_hash, admin_salt, vault_type)
+
+    def _create_window(self, vault_path, password, items, admin_hash, admin_salt, vault_type):
+        window = MainWindow(vault_path, password, items, admin_hash, admin_salt,
+                            vault_type=vault_type)
+        window.setWindowIcon(self.icon_for_type(vault_type))
+        self.add_window(window)
+        window.show()
+
+    def run_initial_login(self):
+        """Run the initial login dialog and open the first window."""
+        login = LoginDialog()
+        if not login.exec():
+            sys.exit(0)
+
+        result = login.get_result()
+        vault_path, password, hospitals, admin_hash, admin_salt = result[:5]
+        vault_type = result[5] if len(result) > 5 else "global"
+
+        self._create_window(vault_path, password, hospitals, admin_hash, admin_salt, vault_type)
+
+
+_IPC_CHANNEL = "HospitalHub_SingleInstance"
+
+
+def _try_activate_existing() -> bool:
+    """Send 'activate' message to the running instance via QLocalSocket.
+    Returns True if the message was delivered (caller should exit)."""
+    sock = QLocalSocket()
+    sock.connectToServer(_IPC_CHANNEL)
+    if sock.waitForConnected(1000):
+        sock.write(b"activate")
+        sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
+        return True
+    return False
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("HospitalHub")
-    app.setApplicationDisplayName("HospitalHub")
+
+    # Single-instance: try to activate a running instance via IPC
+    if _try_activate_existing():
+        sys.exit(0)
+
+    app.setApplicationDisplayName("")
     apply_dark_theme(app)
     app.setWindowIcon(make_icon())
 
-    login = LoginDialog()
-    if login.exec():
-        vault_path, password, hospitals, admin_hash, admin_salt = login.get_result()
-        window = MainWindow(vault_path, password, hospitals, admin_hash, admin_salt)
-        window.show()
-        sys.exit(app.exec())
-    else:
-        sys.exit(0)
+    manager = AppManager(app)
+    manager.run_initial_login()
+
+    app.exec()
 
 
 if __name__ == "__main__":

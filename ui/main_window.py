@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QLineEdit, QPushButton, QLabel,
     QSplitter, QMessageBox, QFileDialog, QMenu,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +15,7 @@ from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
 from config import save_last_vault
 from ui.detail_panel import DetailPanel
+from ui.vpn_panel import VpnPanel
 from ui.dialogs import (
     HospitalDialog, ChangePasswordDialog,
     AdminSetupDialog, AdminUnlockDialog,
@@ -24,8 +25,13 @@ _ADMIN_LOCK_TIMEOUT_MS = 5 * 60 * 1000  # auto-lock after 5 minutes
 
 
 class MainWindow(QMainWindow):
+    open_vault_requested = pyqtSignal()
+    force_close_requested = pyqtSignal()
+    title_changed = pyqtSignal()
+
     def __init__(self, vault_path: str, password: str, hospitals: list,
-                 admin_hash: str = "", admin_salt: str = ""):
+                 admin_hash: str = "", admin_salt: str = "",
+                 vault_type: str = "global"):
         super().__init__()
         self._vault_path = vault_path
         self._password = password
@@ -34,6 +40,14 @@ class MainWindow(QMainWindow):
         self._admin_salt = admin_salt
         self._admin_unlocked = False
         self._unsaved = False
+        self._vault_type = vault_type
+        self._relogin = False
+        self._really_close = False
+        self._detail_panel = None
+        self._hospital_list = None
+        self._search_edit = None
+        self._admin_btn = None
+        self._vpn_panel = None
 
         self._admin_lock_timer = QTimer(self)
         self._admin_lock_timer.setSingleShot(True)
@@ -42,7 +56,8 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_menu()
-        self._refresh_hospital_list()
+        if self._vault_type != "vpn":
+            self._refresh_hospital_list()
         self._update_title()
 
     # ------------------------------------------------------------------ #
@@ -58,6 +73,14 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+
+        if self._vault_type == "vpn":
+            self.setMinimumSize(360, 300)
+            self.resize(420, 400)
+            self._vpn_panel = VpnPanel(self._hospitals)
+            self._vpn_panel.data_changed.connect(self._on_data_changed)
+            main_layout.addWidget(self._vpn_panel)
+            return
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(splitter)
@@ -150,17 +173,41 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        act_change_pass = file_menu.addAction("Zmień hasło główne...")
-        act_change_pass.triggered.connect(self._change_password)
-
-        act_admin_pass = file_menu.addAction("Ustaw / zmień hasło admina...")
-        act_admin_pass.triggered.connect(self._setup_admin_password)
+        act_open_vault = file_menu.addAction("Otwórz vault...")
+        act_open_vault.setShortcut(QKeySequence("Ctrl+O"))
+        act_open_vault.triggered.connect(lambda: self.open_vault_requested.emit())
 
         file_menu.addSeparator()
 
-        act_exit = file_menu.addAction("Wyjdź")
-        act_exit.setShortcut(QKeySequence("Alt+F4"))
-        act_exit.triggered.connect(self.close)
+        act_change_pass = file_menu.addAction("Zmień hasło główne...")
+        act_change_pass.triggered.connect(self._change_password)
+
+        if self._vault_type != "vpn":
+            act_admin_pass = file_menu.addAction("Ustaw / zmień hasło admina...")
+            act_admin_pass.triggered.connect(self._setup_admin_password)
+
+        file_menu.addSeparator()
+
+        act_close = file_menu.addAction("Zamknij okno")
+        act_close.triggered.connect(self._close_to_tray)
+
+        act_exit = file_menu.addAction("Zamknij całkowicie")
+        act_exit.triggered.connect(self._force_close)
+
+        if self._vault_type == "vpn" and self._vpn_panel:
+            sort_menu = menu.addMenu("Sortuj")
+            act_sort_name = sort_menu.addAction("Wg nazwy (A-Z)")
+            act_sort_name.triggered.connect(lambda: self._vpn_panel._sort_profiles("name"))
+            act_sort_prov = sort_menu.addAction("Wg providera")
+            act_sort_prov.triggered.connect(lambda: self._vpn_panel._sort_profiles("provider"))
+
+    def _close_to_tray(self):
+        """Hide window to system tray."""
+        self.hide()
+
+    def _force_close(self):
+        """Close this window permanently (AppManager handles save prompt)."""
+        self.force_close_requested.emit()
 
     # ------------------------------------------------------------------ #
     # Title management                                                     #
@@ -168,7 +215,13 @@ class MainWindow(QMainWindow):
 
     def _update_title(self):
         mark = "  [niezapisane]" if self._unsaved else ""
-        self.setWindowTitle(f"HospitalHub{mark}")
+        type_labels = {"private": "PRIVATE", "vpn": "VPN"}
+        type_str = type_labels.get(self._vault_type, "")
+        parts = ["HospitalHub"]
+        if type_str:
+            parts.append(type_str)
+        self.setWindowTitle("  ·  ".join(parts) + mark)
+        self.title_changed.emit()
 
     # ------------------------------------------------------------------ #
     # Hospital list                                                        #
@@ -221,7 +274,8 @@ class MainWindow(QMainWindow):
     def _on_data_changed(self):
         self._unsaved = True
         self._update_title()
-        self._refresh_hospital_list()
+        if self._vault_type != "vpn":
+            self._refresh_hospital_list()
 
     def _on_hospital_context_menu(self, pos):
         idx = self._hospital_list.indexAt(pos).row()
@@ -293,7 +347,10 @@ class MainWindow(QMainWindow):
 
     def _do_save(self, path: str) -> bool:
         try:
-            data = models.to_dict(self._hospitals)
+            if self._vault_type == "vpn":
+                data = models.vpn_to_dict(self._hospitals)
+            else:
+                data = models.to_dict(self._hospitals)
             if self._admin_hash:
                 data["admin_hash"] = self._admin_hash
                 data["admin_salt"] = self._admin_salt
@@ -381,19 +438,22 @@ class MainWindow(QMainWindow):
             " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
             "QPushButton:hover { background: #2a4d2a; color: #a0de4a; }"
         )
-        self._detail_panel.set_admin_mode(True)
+        if self._detail_panel:
+            self._detail_panel.set_admin_mode(True)
         self._admin_lock_timer.start()
 
     def _lock_admin(self):
         self._admin_unlocked = False
         self._admin_lock_timer.stop()
-        self._admin_btn.setText("🔒  Admin")
-        self._admin_btn.setStyleSheet(
-            "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
-            " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
-            "QPushButton:hover { background: #3d2550; color: #d4a0ff; }"
-        )
-        self._detail_panel.set_admin_mode(False)
+        if self._admin_btn:
+            self._admin_btn.setText("🔒  Admin")
+            self._admin_btn.setStyleSheet(
+                "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
+                " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
+                "QPushButton:hover { background: #3d2550; color: #d4a0ff; }"
+            )
+        if self._detail_panel:
+            self._detail_panel.set_admin_mode(False)
 
     def _setup_admin_password(self):
         has_existing = bool(self._admin_hash)
@@ -416,22 +476,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def closeEvent(self, event):
-        if self._unsaved:
-            box = QMessageBox(self)
-            box.setWindowTitle("Niezapisane zmiany")
-            box.setText("Masz niezapisane zmiany. Zapisać przed wyjściem?")
-            box.setIcon(QMessageBox.Icon.Question)
-            btn_yes = box.addButton("Tak", QMessageBox.ButtonRole.YesRole)
-            btn_no = box.addButton("Nie", QMessageBox.ButtonRole.NoRole)
-            box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked is btn_yes:
-                self._save()
-                event.accept()
-            elif clicked is btn_no:
-                event.accept()
-            else:
-                event.ignore()
-        else:
-            event.accept()
+        # X button → hide to tray (not close)
+        event.ignore()
+        self.hide()
+
+    def destroy_cleanup(self):
+        """Stop all background timers/workers before final destruction."""
+        self._admin_lock_timer.stop()
+        if self._vpn_panel and hasattr(self._vpn_panel, 'cleanup'):
+            self._vpn_panel.cleanup()
+        if self._detail_panel and hasattr(self._detail_panel, 'cleanup'):
+            self._detail_panel.cleanup()

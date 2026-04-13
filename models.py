@@ -19,9 +19,10 @@ class Machine:
     name: str = ""
     description: str = ""
     credentials: List[Credential] = field(default_factory=list)
-    connection_type: str = "SSH"   # "SSH" | "RDP"
+    connection_type: str = "SSH"   # "SSH" | "RDP" | "WWW"
     rdp_port: str = "3389"
     rdp_drives: List[str] = field(default_factory=list)  # e.g. ["C:", "D:"]
+    www_url: str = ""              # URL for WWW connections (e.g. PAM portal)
     admin_only: bool = False
 
 
@@ -44,6 +45,77 @@ class Hospital:
     machines: List[Machine] = field(default_factory=list)
     databases: List[Database] = field(default_factory=list)
     notes: str = ""
+
+
+VPN_PROVIDERS_BUILTIN = [
+    "FortiClient",
+    "GlobalProtect",
+    "Stormshield",
+    "Barracuda",
+    "SonicWall NetExtender",
+    "Hillstone Secure Connect",
+]
+
+VPN_PROVIDERS = list(VPN_PROVIDERS_BUILTIN)
+
+
+def refresh_vpn_providers(custom: list[str] | None = None):
+    """Rebuild VPN_PROVIDERS from builtins + custom list."""
+    VPN_PROVIDERS.clear()
+    VPN_PROVIDERS.extend(VPN_PROVIDERS_BUILTIN)
+    if custom:
+        for name in custom:
+            if name and name not in VPN_PROVIDERS:
+                VPN_PROVIDERS.append(name)
+
+
+@dataclass
+class VpnProfile:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ""
+    provider: str = "FortiClient"
+    server: str = ""
+    port: str = ""
+    login: str = ""
+    password: str = ""
+    group: str = ""
+    domain: str = ""
+    notes: str = ""
+    app_path: str = ""          # custom path to VPN client executable
+    profile_name: str = ""      # connection profile name inside VPN client
+    requires_2fa: bool = False  # whether this profile needs OTP/SMS/email code
+
+
+def vpn_to_dict(profiles: List[VpnProfile]) -> dict:
+    return {"vpn_profiles": [
+        {"id": p.id, "name": p.name, "provider": p.provider,
+         "server": p.server, "port": p.port, "login": p.login,
+         "password": p.password, "group": p.group, "domain": p.domain,
+         "notes": p.notes, "app_path": p.app_path,
+         "profile_name": p.profile_name, "requires_2fa": p.requires_2fa}
+        for p in profiles
+    ]}
+
+
+def vpn_from_dict(data: dict) -> List[VpnProfile]:
+    return [
+        VpnProfile(
+            id=d.get("id", str(uuid.uuid4())),
+            name=d.get("name", ""),
+            provider=d.get("provider", "FortiClient"),
+            server=d.get("server", ""),
+            port=d.get("port", ""),
+            login=d.get("login", ""),
+            password=d.get("password", ""),
+            group=d.get("group", ""),
+            domain=d.get("domain", ""),
+            notes=d.get("notes", ""),
+            app_path=d.get("app_path", ""),
+            profile_name=d.get("profile_name", ""),
+            requires_2fa=d.get("requires_2fa", False),
+        )
+        for d in data.get("vpn_profiles", [])
+    ]
 
 
 def to_dict(hospitals: List[Hospital]) -> dict:
@@ -73,6 +145,7 @@ def _machine_to_dict(m: Machine) -> dict:
         "connection_type": m.connection_type,
         "rdp_port": m.rdp_port,
         "rdp_drives": m.rdp_drives,
+        "www_url": m.www_url,
         "admin_only": m.admin_only,
         "credentials": [
             {"id": c.id, "login": c.login, "password": c.password,
@@ -118,6 +191,7 @@ def _machine_from_dict(d: dict) -> Machine:
         connection_type=d.get("connection_type", "SSH"),
         rdp_port=d.get("rdp_port", "3389"),
         rdp_drives=d.get("rdp_drives", []),
+        www_url=d.get("www_url", ""),
         admin_only=d.get("admin_only", False),
         credentials=[
             Credential(
