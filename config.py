@@ -124,6 +124,29 @@ def save_custom_vpn_providers(providers: list) -> None:
     _save_all(data)
 
 
+def load_vpn_autofill_enabled() -> bool:
+    """Returns whether automatic credential filling in VPN client windows is enabled."""
+    return bool(_load_all().get("vpn_autofill_enabled", True))
+
+
+def save_vpn_autofill_enabled(enabled: bool) -> None:
+    data = _load_all()
+    data["vpn_autofill_enabled"] = bool(enabled)
+    _save_all(data)
+
+
+def load_ssh_start_maximized() -> bool:
+    """Returns whether the SSH terminal window should open maximized."""
+    data = _load_all()
+    return bool(data.get("ssh_start_maximized", True))
+
+
+def save_ssh_start_maximized(enabled: bool) -> None:
+    data = _load_all()
+    data["ssh_start_maximized"] = bool(enabled)
+    _save_all(data)
+
+
 def load_personal_vpn_vault() -> str | None:
     """Returns path to user's personal VPN vault, or None if not set."""
     path = _load_all().get("personal_vpn_vault")

@@ -129,7 +129,10 @@ from ui.utils import confirm
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
 from ui.db_connect import launch_sqldeveloper
-from config import load_column_widths, save_column_widths, load_personal_vpn_vault, save_personal_vpn_vault
+from config import (load_column_widths, save_column_widths,
+                    load_personal_vpn_vault, save_personal_vpn_vault,
+                    load_vpn_autofill_enabled,
+                    load_ssh_start_maximized)
 
 # Session-level VPN profile cache (loaded once per app session)
 _vpn_session_profiles: list = []
@@ -936,13 +939,19 @@ class DetailPanel(QWidget):
         ssh_dlg = SshDialog(machine, hospital=self.current_hospital,
                             all_hospitals=self._all_hospitals,
                             admin_unlocked=self._admin_unlocked, parent=self)
-        ssh_dlg.show()
+        if load_ssh_start_maximized():
+            ssh_dlg.showMaximized()
+        else:
+            ssh_dlg.show()
 
     def _open_ssh(self, machine: models.Machine):
         dlg = SshDialog(machine, hospital=self.current_hospital,
                         all_hospitals=self._all_hospitals,
                         admin_unlocked=self._admin_unlocked, parent=self)
-        dlg.show()
+        if load_ssh_start_maximized():
+            dlg.showMaximized()
+        else:
+            dlg.show()
 
     def _open_www(self, machine: models.Machine):
         from PyQt6.QtGui import QDesktopServices
@@ -1171,17 +1180,23 @@ class DetailPanel(QWidget):
             return
 
         # Connect first (without token — FortiClient will show Token field in GUI)
+        autofill = load_vpn_autofill_enabled()
         ok, msg, process = vpn_connect.connect_monitored(
             profile.provider, profile.server, profile.port,
             profile.login, profile.password,
             profile.group, profile.domain,
-            profile.app_path, profile.profile_name, ""
+            profile.app_path, profile.profile_name, "",
+            autofill=autofill,
         )
         if not ok:
             QMessageBox.warning(self, "VPN", msg)
             return
 
         self._update_vpn_btn()
+
+        # 2FA handling is automation — skip entirely when user opted out of autofill.
+        if not autofill:
+            return
 
         # If 2FA required — wait for FortiClient Token window, ask user, fill in
         if profile.requires_2fa and profile.provider == "FortiClient":

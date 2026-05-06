@@ -13,7 +13,8 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
-from config import save_last_vault
+from config import (save_last_vault,
+                    load_ssh_start_maximized, save_ssh_start_maximized)
 from ui.detail_panel import DetailPanel
 from ui.vpn_panel import VpnPanel
 from ui.dialogs import (
@@ -185,6 +186,13 @@ class MainWindow(QMainWindow):
         if self._vault_type != "vpn":
             act_admin_pass = file_menu.addAction("Ustaw / zmień hasło admina...")
             act_admin_pass.triggered.connect(self._setup_admin_password)
+
+        file_menu.addSeparator()
+
+        act_ssh_max = file_menu.addAction("Otwieraj terminal SSH zmaksymalizowany")
+        act_ssh_max.setCheckable(True)
+        act_ssh_max.setChecked(load_ssh_start_maximized())
+        act_ssh_max.toggled.connect(save_ssh_start_maximized)
 
         file_menu.addSeparator()
 

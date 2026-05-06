@@ -7,6 +7,7 @@ import os
 import queue as _queue
 import re
 import stat
+import struct
 import sys
 import tempfile
 import threading
@@ -23,10 +24,25 @@ _SHELL_PROMPT_RE = re.compile(
     r'|\$|#|>>>|\.\.\.)\s+)'                # bare $ / # / >>> / ...
 )
 
+_LEVEL_RULES = [
+    # Log-level keywords — aplikowane ZAWSZE (nawet gdy linia ma już ANSI
+    # z własnego kolorowania aplikacji / Dockera), bo użytkownik chce widzieć
+    # wyróżnione levele również w logach kontenerów.
+    # Errors — soft red (bez bold, case-insensitive dla Docker "level=error").
+    (re.compile(r'\b(ERROR|FATAL|CRITICAL|FAIL(?:ED)?|EXCEPTION|SEVERE)\b', re.IGNORECASE),
+     '\x1b[0;31m'),
+    # Warnings — soft yellow.
+    (re.compile(r'\b(WARN(?:ING)?)\b', re.IGNORECASE),
+     '\x1b[0;33m'),
+    # Info — soft green.
+    (re.compile(r'\b(INFO(?:RMATION)?)\b', re.IGNORECASE),
+     '\x1b[0;32m'),
+    # Debug/trace — dim gray.
+    (re.compile(r'\b(DEBUG|TRACE|VERBOSE|FINE(?:R|ST)?)\b', re.IGNORECASE),
+     '\x1b[2;37m'),
+]
+
 _LOG_RULES = [
-    # Errors — red bold
-    (re.compile(r'\b(ERROR|FATAL|CRITICAL|FAIL(?:ED)?|EXCEPTION|SEVERE)\b'),
-     '\x1b[1;31m'),
     # "Caused by:" (Java stack trace header) — red bold, matched case-sensitively
     (re.compile(r'(Caused by:)'),
      '\x1b[1;31m'),
@@ -35,15 +51,6 @@ _LOG_RULES = [
                 r'|refused|REFUSED|unreachable|UNREACHABLE|inactive|INACTIVE'
                 r'|stopped|STOPPED|down|DOWN|dead|DEAD|false|FALSE|off|OFF)\b'),
      '\x1b[0;31m'),
-    # Warnings — yellow
-    (re.compile(r'\b(WARN(?:ING)?)\b'),
-     '\x1b[1;33m'),
-    # Info — cyan
-    (re.compile(r'\b(INFO(?:RMATION)?)\b'),
-     '\x1b[1;36m'),
-    # Debug/trace — dim gray
-    (re.compile(r'\b(DEBUG|TRACE|VERBOSE|FINE(?:R|ST)?)\b'),
-     '\x1b[2;37m'),
     # Success / positive — green
     (re.compile(
         r'\b(OK|ACCEPT(?:ED)?|SUCCESS(?:FUL(?:LY)?)?|SUKCES(?:FUL(?:NIE)?)?'
@@ -67,7 +74,7 @@ _LOG_RULES = [
     (re.compile(r'\b((?:\d{1,3}\.){3}\d{1,3})(?::(\d{1,5}))?\b'),
      '_IPV4_PORT'),
     # IPv6 addresses (4+ groups to avoid matching HH:MM:SS timestamps) — bright cyan
-    (re.compile(r'(?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}(?::(?:\d{1,3}\.){3}\d{1,3})?'),
+    (re.compile(r'(?:[0-9a-fA-F]{1,4}:){4,7}[0-9a-fA-F]{1,4}(?::(?:\d{1,3}\.){3}\d{1,3})?'),
      '\x1b[0;96m'),
     # MAC addresses — dim cyan
     (re.compile(r'\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b'),
@@ -101,6 +108,11 @@ def _ipv4_port_sub(m):
 
 _PLACEHOLDER_RE = re.compile(r'\x00(\d+)\x00')
 
+_COLORIZE_MAX_LINE = 4096   # skip per-line regex pass on >4 KB lines
+                            # (prevents pathological backtracking on JSON
+                            #  blobs / minified output from `docker logs`)
+
+
 def _colorize_log(text: str) -> str:
     """Add ANSI keyword highlighting to plain-text log lines.
 
@@ -110,8 +122,34 @@ def _colorize_log(text: str) -> str:
     """
     lines = text.split('\n')
     for i, line in enumerate(lines):
-        if _ANSI_PRESENT.search(line):
-            continue   # already colored (e.g. shell prompt sequences)
+        # Long lines (JSON dumps, minified output) get colorize skipped —
+        # the regex passes are O(rules × len) and trigger backtracking on
+        # input with many delimiter chars (`:`, `.`, `=`).
+        if len(line) > _COLORIZE_MAX_LINE:
+            continue
+        has_ansi = bool(_ANSI_PRESENT.search(line))
+
+        # Stash: list of colored fragments; replaced by \x00idx\x00 in `line`
+        stash: list[str] = []
+        def _stash(fragment: str, _s=stash) -> str:
+            idx = len(_s)
+            _s.append(fragment)
+            return f'\x00{idx}\x00'
+
+        # Level keywords (INFO/WARN/ERROR/DEBUG) — ZAWSZE, nawet gdy linia
+        # ma już własne ANSI (np. Docker/framework colored logs).
+        for pat, color in _LEVEL_RULES:
+            line = pat.sub(
+                lambda m, c=color: _stash(f'{c}{m.group()}\x1b[0m'), line)
+
+        if has_ansi:
+            # Linia była pokolorowana przez aplikację — tylko leveli dokładamy,
+            # reszty reguł nie ruszamy, żeby nie psuć własnych kolorów.
+            if stash:
+                line = _PLACEHOLDER_RE.sub(lambda m: stash[int(m.group(1))], line)
+            lines[i] = line
+            continue
+
         # Java stack trace lines get the whole line dimmed
         if _STACK_TRACE_RE.match(line):
             lines[i] = f'\x1b[2;37m{line}\x1b[0m'
@@ -122,14 +160,13 @@ def _colorize_log(text: str) -> str:
             prompt_part = prompt_m.group(1)
             cmd_part = line[prompt_m.end():]
             if cmd_part.strip():
+                # Odtwórz level-highlighty przed dalszym formatowaniem
+                if stash:
+                    cmd_part = _PLACEHOLDER_RE.sub(
+                        lambda m: stash[int(m.group(1))], cmd_part)
                 lines[i] = f'{prompt_part}\x1b[1;97m{cmd_part}\x1b[0m'
                 continue
-        # Stash: list of colored fragments; replaced by \x00idx\x00 in `line`
-        stash: list[str] = []
-        def _stash(fragment: str) -> str:
-            idx = len(stash)
-            stash.append(fragment)
-            return f'\x00{idx}\x00'
+
         for pat, color in _LOG_RULES:
             if color == '_IPV4_PORT':
                 line = pat.sub(lambda m: _stash(_ipv4_port_sub(m)), line)
@@ -169,6 +206,161 @@ try:
     import pyte
     _PYTE_OK = True
 
+    # ── Compact scrollback history ──────────────────────────────────────
+    # Instead of dict[int, pyte.Char] per row (~57 KB worst-case for 220
+    # columns), store rows as (text, runs_bytes) backed by a shared color
+    # pool. Each style run is packed as 6 bytes (start_col, fg_idx, bg_idx,
+    # attrs) instead of a Python tuple-of-tuples (~120 B / run + tuple
+    # headers). For a typical 50k-line scrollback this saves roughly 4-5×
+    # the RAM compared to the previous tuple-based layout, while keeping
+    # the row[x] read interface unchanged.
+    #
+    # Rows in history.top are frozen — never modified after being appended —
+    # so the packed representation is read-only.
+
+    _ATTR_BOLD          = 1
+    _ATTR_REVERSE       = 2
+    _ATTR_ITALIC        = 4
+    _ATTR_UNDERSCORE    = 8
+    _ATTR_STRIKETHROUGH = 16
+    _ATTR_BLINK         = 32
+
+    # Shared color pool: any color string ever seen gets one slot. Lookup is
+    # O(1) by dict; reverse lookup is O(1) by list index. In practice fewer
+    # than ~50 unique colors appear across a session (default + 16 ANSI +
+    # any 256/24-bit shades the app uses), so the pool stays tiny.
+    _COLOR_POOL: list = ['default']
+    _COLOR_INDEX: dict = {'default': 0}
+
+    def _color_id(c) -> int:
+        """Get the pool index for color string `c`, adding it if new."""
+        if c is None:
+            return 0
+        idx = _COLOR_INDEX.get(c)
+        if idx is None:
+            idx = len(_COLOR_POOL)
+            if idx > 65535:
+                # uint16 overflow — extremely unlikely (would need 65k unique
+                # colors). Fall back to default so we never raise.
+                return 0
+            _COLOR_POOL.append(c)
+            _COLOR_INDEX[c] = idx
+        return idx
+
+    # Format per run: start_col (uint16, supports ultrawide windows),
+    # fg_idx (uint16), bg_idx (uint16), attrs (uint8) = 7 bytes.
+    # Little-endian for consistency.
+    _RUN_FMT = '<HHHB'
+    _RUN_SIZE = 7   # struct.calcsize(_RUN_FMT)
+
+    class _HistCell:
+        __slots__ = ('data', 'fg', 'bg', 'bold', 'reverse',
+                     'italic', 'underscore', 'strikethrough', 'blink')
+        def __init__(self, data, fg='default', bg='default', attrs=0):
+            self.data          = data
+            self.fg            = fg
+            self.bg            = bg
+            self.bold          = bool(attrs & _ATTR_BOLD)
+            self.reverse       = bool(attrs & _ATTR_REVERSE)
+            self.italic        = bool(attrs & _ATTR_ITALIC)
+            self.underscore    = bool(attrs & _ATTR_UNDERSCORE)
+            self.strikethrough = bool(attrs & _ATTR_STRIKETHROUGH)
+            self.blink         = bool(attrs & _ATTR_BLINK)
+
+    class _HistRow:
+        """Compact read-only scrollback row. Interface-compatible with the
+        subset of dict[int, pyte.Char] used by the renderer: row[x] returns
+        a _HistCell, out-of-range raises KeyError (caught by caller).
+
+        `runs` is a `bytes` buffer of packed (start_col, fg_idx, bg_idx,
+        attrs) records — 6 bytes each — backed by _COLOR_POOL. Empty `runs`
+        means the entire row uses default fg/bg/attrs (the common case for
+        plain log lines), which lets us skip even the bytes object.
+        """
+        __slots__ = ('text', 'runs')
+
+        def __init__(self, text: str, runs: bytes = b''):
+            self.text = text      # no trailing spaces
+            self.runs = runs      # packed bytes, see _RUN_FMT
+
+        def __bool__(self):
+            return bool(self.text)
+
+        def __len__(self):
+            return len(self.text)
+
+        def __getitem__(self, x: int) -> '_HistCell':
+            if not isinstance(x, int) or x < 0 or x >= len(self.text):
+                raise KeyError(x)
+            ch = self.text[x]
+            r = self.runs
+            if not r:
+                # Plain line — every cell uses defaults.
+                return _HistCell(ch, 'default', 'default', 0)
+            # Linear scan — runs typically have 1-3 entries for log lines.
+            fg_idx = bg_idx = 0
+            attrs = 0
+            n = len(r) // _RUN_SIZE
+            for i in range(n):
+                start, f, b, a = struct.unpack_from(_RUN_FMT, r, i * _RUN_SIZE)
+                if start > x:
+                    break
+                fg_idx, bg_idx, attrs = f, b, a
+            return _HistCell(ch, _COLOR_POOL[fg_idx], _COLOR_POOL[bg_idx], attrs)
+
+    def _row_to_hist(row) -> '_HistRow':
+        """Convert a pyte buffer row (dict[int, Char]) into a compact _HistRow."""
+        if not row:
+            return _HistRow('')
+        # Find last column with meaningful content (non-space or non-default bg).
+        last_col = -1
+        for x, cell in row.items():
+            if not isinstance(x, int):
+                continue
+            d = getattr(cell, 'data', ' ')
+            bg = getattr(cell, 'bg', 'default')
+            if (d not in (' ', '')) or (bg not in ('default', None)):
+                if x > last_col:
+                    last_col = x
+        if last_col < 0:
+            return _HistRow('')
+        chars = []
+        run_records = []   # list of (start, fg_idx, bg_idx, attrs)
+        prev_style = None
+        all_default = True
+        for x in range(last_col + 1):
+            cell = row.get(x) if hasattr(row, 'get') else None
+            if cell is None:
+                chars.append(' ')
+                style = (0, 0, 0)   # default fg, default bg, no attrs
+            else:
+                chars.append(cell.data or ' ')
+                attrs = 0
+                if getattr(cell, 'bold', False):          attrs |= _ATTR_BOLD
+                if getattr(cell, 'reverse', False):       attrs |= _ATTR_REVERSE
+                if getattr(cell, 'italic', False):        attrs |= _ATTR_ITALIC
+                if getattr(cell, 'underscore', False):    attrs |= _ATTR_UNDERSCORE
+                if getattr(cell, 'strikethrough', False): attrs |= _ATTR_STRIKETHROUGH
+                if getattr(cell, 'blink', False):         attrs |= _ATTR_BLINK
+                fg_idx = _color_id(cell.fg or 'default')
+                bg_idx = _color_id(cell.bg or 'default')
+                style = (fg_idx, bg_idx, attrs)
+                if style != (0, 0, 0):
+                    all_default = False
+            if style != prev_style:
+                run_records.append((x,) + style)
+                prev_style = style
+        text = ''.join(chars)
+        if all_default:
+            # Skip the bytes allocation entirely for plain log lines.
+            return _HistRow(text)
+        # Pack runs into a single bytes buffer.
+        packed = b''.join(
+            struct.pack(_RUN_FMT, start, fg_i, bg_i, attrs)
+            for (start, fg_i, bg_i, attrs) in run_records
+        )
+        return _HistRow(text, packed)
+
     class _TermScreen(pyte.HistoryScreen):
         """HistoryScreen that saves visible content to scrollback before full-screen erases.
 
@@ -203,7 +395,14 @@ try:
         def index(self):
             top, bottom = self.margins or (0, self.lines - 1)
             will_scroll = self.cursor.y == bottom
-            super().index()
+            # Scroll off the top row into history as a compact _HistRow,
+            # then delegate the buffer scroll to plain Screen.index() so
+            # HistoryScreen.index() does NOT also push its dict copy.
+            if will_scroll:
+                self.history.top.append(_row_to_hist(self.buffer[top]))
+                pyte.Screen.index(self)
+            else:
+                super().index()
             if will_scroll:
                 # Content in scroll region shifted up by 1 row.
                 new_set = set()
@@ -225,7 +424,7 @@ try:
                     row = self.buffer[y]
                     if any(getattr(c, 'data', ' ') not in (' ', '')
                            for c in row.values()):
-                        self.history.top.append(dict(row))
+                        self.history.top.append(_row_to_hist(row))
                 except Exception:
                     pass
 
@@ -250,7 +449,7 @@ try:
                     n_scroll = max(0, self.cursor.y - (lines - 1))
                     if n_scroll > 0:
                         for y in range(n_scroll):
-                            self.history.top.append(self.buffer[y])
+                            self.history.top.append(_row_to_hist(self.buffer[y]))
                         for y in range(self.lines - n_scroll):
                             self.buffer[y] = self.buffer[y + n_scroll]
                         for y in range(self.lines - n_scroll, self.lines):
@@ -356,7 +555,7 @@ try:
             overflow = max(0, len(new_rows) - new_lines)
             if overflow:
                 for y in range(overflow):
-                    self.history.top.append(new_rows[y])
+                    self.history.top.append(_row_to_hist(new_rows[y]))
                 new_rows = new_rows[overflow:]
                 nc_y = max(0, nc_y - overflow)
                 new_sw = {r - overflow for r in new_sw if r >= overflow}
@@ -384,16 +583,16 @@ try:
                 return
             if how == 2:
                 if self._ALT_SCREEN_FLAG not in self.mode:
-                    # CSI 2 J on main screen — save visible content to
-                    # scrollback before clearing display.  Do NOT wipe
-                    # existing history here; only CSI 3 J should do that.
-                    # Programs like top/vim use alt screen and are unaffected.
-                    if not getattr(self, '_suppress_history_push', False):
-                        self._push_visible_to_history()
+                    # CSI 2 J on main screen — shell `clear` command.
+                    # Wipe scrollback and do NOT push the visible content,
+                    # so `clear` actually clears (user expectation).
+                    # Programs like top/vim use the alt screen and are unaffected.
+                    self.history.top.clear()
+                    self.history.bottom.clear()
+                    self._soft_wrapped.clear()
+                    # Reset the suppress flag; no push happened.
                     self._suppress_history_push = False
                 super().erase_in_display(how, *args, **kwargs)
-                if self._ALT_SCREEN_FLAG not in self.mode:
-                    self._soft_wrapped.clear()
                 return
             super().erase_in_display(how, *args, **kwargs)
 
@@ -470,7 +669,12 @@ class TerminalWidget(QWidget):
     resize_pty     = pyqtSignal(int, int)   # cols, rows → SSH PTY resize
     scroll_changed = pyqtSignal(int, int)   # offset, max_offset
 
-    _SCROLLBACK = 50_000   # ~200 MB worst-case per session; freed on tab close
+    _SCROLLBACK = 500_000   # 50 MB - 500 MB per session (lines × ~100-1000 B);
+                            # freed on tab close. Increased from 50k so heavy
+                            # `docker logs -f` runs don't get truncated. CPU cost
+                            # is negligible — append is O(1) and the renderer
+                            # only looks at visible rows. Only first scroll after
+                            # a flush rebuilds the lookup cache (~30-50 ms).
 
     _CTRL_MAP = {
         Qt.Key.Key_At:            b'\x00',
@@ -580,6 +784,12 @@ class TerminalWidget(QWidget):
         self._coalesce_timer.timeout.connect(self._flush_pending)
         self._pending_data: list[str] = []
 
+        # Search state — populated by set_search_term(). Matches stored as
+        # (arow, col_start, col_end). _search_current_idx == -1 means no match yet.
+        self._search_term: str = ''
+        self._search_matches: list[tuple[int, int, int]] = []
+        self._search_current_idx: int = -1
+
     # ── Public API ────────────────────────────────────────────────────────
 
     def feed(self, data: str):
@@ -587,17 +797,47 @@ class TerminalWidget(QWidget):
         if not self._coalesce_timer.isActive():
             self._coalesce_timer.start()
 
+    def pending_chunks(self) -> int:
+        """How many received chunks are queued for pyte parsing.
+
+        Used by the SSH worker for back-pressure: when this grows past a
+        threshold, the worker pauses recv() so the OS-level SSH receive
+        buffer fills up and TCP signals the upstream server to slow down.
+        Nothing gets dropped — data is throttled at the network layer.
+        """
+        return len(self._pending_data)
+
     def _flush_pending(self):
-        """Process all buffered data in one batch and repaint once."""
+        """Process buffered data with a UI-thread timeslice and repaint once.
+
+        Pyte stream parsing is CPU-bound and blocks the UI thread. With heavy
+        output (e.g. `docker compose logs -f` over many services) a single
+        batch can take 50-200 ms, freezing typing/scrolling on every other
+        widget. We cap one flush at ~12 ms and reschedule the rest — UI gets
+        regular breathing room, no data is lost (chunks stay queued).
+        """
         if not self._pending_data:
             return
         if self._stream:
-            for chunk in self._pending_data:
+            import time as _t
+            # Tight timeslice — keeps the UI thread returning to its event
+            # loop fast enough that key presses (esp. Ctrl+C) don't get
+            # stuck behind a long flush of buffered chunks.
+            deadline = _t.monotonic() + 0.010   # ~10 ms per pass
+            n = len(self._pending_data)
+            i = 0
+            while i < n:
                 try:
-                    self._stream.feed(chunk)
+                    self._stream.feed(self._pending_data[i])
                 except Exception as _e:
                     import traceback; traceback.print_exc()
-        self._pending_data.clear()
+                i += 1
+                # Always process at least one chunk before checking the clock.
+                if i < n and _t.monotonic() >= deadline:
+                    break
+            del self._pending_data[:i]
+        else:
+            self._pending_data.clear()
         # Only auto-scroll to bottom if user is already at the bottom.
         # If user scrolled up to read logs, keep their position stable.
         if self._scroll_offset == 0:
@@ -615,6 +855,9 @@ class TerminalWidget(QWidget):
         self._blink.start(530)
         self.update()
         self._emit_scroll()
+        # If the timeslice expired with leftover work, schedule another pass.
+        if self._pending_data and not self._coalesce_timer.isActive():
+            self._coalesce_timer.start()
 
     def clear(self):
         self._pending_data.clear()
@@ -923,6 +1166,34 @@ class TerminalWidget(QWidget):
                 if text.rstrip():
                     p.drawText(int(run_x_start * cw), int(py + asc), text)
 
+        # Search highlights — drawn on top of text. Current match uses a stronger
+        # orange; others a softer yellow.
+        if self._search_matches:
+            hist_len = len(self._screen.history.top)
+            cur_idx = self._search_current_idx
+            match_bg  = QColor(255, 220, 70, 90)
+            current_bg = QColor(255, 140, 0, 170)
+            for i, (arow, c0, c1) in enumerate(self._search_matches):
+                vrow = arow - hist_len + offset
+                if vrow < y_start or vrow >= y_end:
+                    continue
+                py = int(vrow * lh)
+                rx = int(c0 * cw)
+                rw = int((c1 - c0) * cw) + 1
+                p.fillRect(rx, py, rw, int_lh, current_bg if i == cur_idx else match_bg)
+                # Re-draw the text on top so it stays legible.
+                row = self._get_row(vrow)
+                if row:
+                    chars = []
+                    for x in range(c0, c1):
+                        try:
+                            chars.append(row[x].data or ' ')
+                        except (KeyError, AttributeError, TypeError):
+                            chars.append(' ')
+                    p.setFont(self._font)
+                    p.setPen(QColor('#1c1f26'))
+                    p.drawText(rx, int(py + asc), ''.join(chars))
+
 
     # ── Resize ────────────────────────────────────────────────────────────
 
@@ -951,6 +1222,16 @@ class TerminalWidget(QWidget):
             self._hist_cache    = None
             self._pending_resize = None
             self.resize_pty.emit(new_cols, new_rows)
+            # Geometry changed — old match rects point to stale (line, col)
+            # positions. Recompute on the new buffer so highlights line up
+            # with the reflowed text.
+            if self._search_term:
+                self._rebuild_search_matches()
+                if self._search_matches:
+                    if self._search_current_idx >= len(self._search_matches):
+                        self._search_current_idx = 0
+                else:
+                    self._search_current_idx = -1
             self._emit_scroll()
             self.update()
 
@@ -973,6 +1254,12 @@ class TerminalWidget(QWidget):
         mods  = event.modifiers()
         ctrl  = bool(mods & Qt.KeyboardModifier.ControlModifier)
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        # Ctrl+Tab / Ctrl+Shift+Tab: defer to the dialog so it can cycle
+        # session tabs. Without ignore() the event would be swallowed here.
+        if ctrl and key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            event.ignore()
+            return
 
         # Ctrl+Shift+C: copy selection to clipboard
         if ctrl and shift and key == Qt.Key.Key_C:
@@ -1114,6 +1401,108 @@ class TerminalWidget(QWidget):
         self._sel_start = self._sel_end = None
         self.update()
         super().focusOutEvent(event)
+
+    # ── Terminal search ───────────────────────────────────────────────────
+
+    def _row_plain_text(self, arow: int) -> str:
+        """Plain text for absolute row (history as stored, buffer rendered to str)."""
+        row = self._get_row_abs(arow)
+        # _HistRow: already has .text
+        text = getattr(row, 'text', None)
+        if text is not None:
+            return text
+        if not row:
+            return ''
+        chars = []
+        last_nonspace = -1
+        for x in range(self._cols):
+            try:
+                ch = row[x].data or ' '
+            except (KeyError, AttributeError, TypeError):
+                ch = ' '
+            chars.append(ch)
+            if ch != ' ':
+                last_nonspace = x
+        if last_nonspace < 0:
+            return ''
+        return ''.join(chars[:last_nonspace + 1])
+
+    def set_search_term(self, term: str):
+        """Replace the current search term. Jumps to the first match from the top.
+        Passing '' clears the search."""
+        self._search_term = term or ''
+        self._hist_cache = None
+        self._rebuild_search_matches()
+        if self._search_matches:
+            self._search_current_idx = 0
+            self._scroll_to_match(0)
+        else:
+            self._search_current_idx = -1
+        self.update()
+
+    def search_next(self):
+        if not self._search_matches:
+            return
+        self._search_current_idx = (self._search_current_idx + 1) % len(self._search_matches)
+        self._scroll_to_match(self._search_current_idx)
+        self.update()
+
+    def search_prev(self):
+        if not self._search_matches:
+            return
+        self._search_current_idx = (self._search_current_idx - 1) % len(self._search_matches)
+        self._scroll_to_match(self._search_current_idx)
+        self.update()
+
+    def clear_search(self):
+        self._search_term = ''
+        self._search_matches = []
+        self._search_current_idx = -1
+        self.update()
+
+    def search_status(self) -> tuple[int, int]:
+        """Returns (current_1_based, total) — (0, 0) when nothing is active."""
+        if not self._search_matches:
+            return (0, 0)
+        return (self._search_current_idx + 1, len(self._search_matches))
+
+    def _rebuild_search_matches(self):
+        self._search_matches = []
+        if not self._search_term or not self._screen:
+            return
+        needle = self._search_term.lower()
+        nlen = len(needle)
+        if nlen == 0:
+            return
+        hist_len = len(self._screen.history.top)
+        total_rows = hist_len + self._rows
+        for arow in range(total_rows):
+            text = self._row_plain_text(arow)
+            if not text:
+                continue
+            hay = text.lower()
+            start = 0
+            while True:
+                idx = hay.find(needle, start)
+                if idx < 0:
+                    break
+                self._search_matches.append((arow, idx, idx + nlen))
+                # Allow overlapping matches: advance by 1 (common expectation
+                # when searching single characters).
+                start = idx + 1
+
+    def _scroll_to_match(self, idx: int):
+        if not (0 <= idx < len(self._search_matches)) or not self._screen:
+            return
+        arow = self._search_matches[idx][0]
+        hist_len = len(self._screen.history.top)
+        # Put the match in the middle of the visible area.
+        target_vrow = max(1, self._rows // 2)
+        new_offset = target_vrow - (arow - hist_len)
+        new_offset = max(0, min(new_offset, hist_len))
+        if new_offset != self._scroll_offset:
+            self._scroll_offset = new_offset
+            self.scroll_changed.emit(new_offset, hist_len)
 
 
 # ──────────────────────────────────────── Connection error page ──────────────
@@ -1267,6 +1656,23 @@ class _SshWorker(QThread):
         # worker drains it immediately on each loop tick — Ctrl+C reaches the
         # SSH channel within one iteration regardless of Qt event-queue depth.
         self._send_q: _queue.SimpleQueue[bytes] = _queue.SimpleQueue()
+        # Wakeup event: set by send() so the worker exits its 20 ms idle wait
+        # *immediately* when keystrokes arrive. Without this, Ctrl+C could be
+        # delayed by up to 20 ms on heavy log streams (and longer if the prior
+        # iteration's drain happened to land mid-sleep).
+        self._wake = threading.Event()
+        # Set by the UI thread when it has already written Ctrl+C straight
+        # to the channel. Worker treats it as got_ctrl_c (drains recv buffer)
+        # *without* re-sending — avoids the server seeing Ctrl+C twice and
+        # the shell echoing a second '^C'.
+        self._direct_ctrl_c_pending = False
+        # Back-pressure: set by UI before .start() so the worker can check
+        # how many chunks are queued in the terminal widget. When the queue
+        # grows past _BP_HIGH, we pause recv() so the TCP receive buffer
+        # fills up and the server slows down. Resumes when it drops below
+        # _BP_LOW. No data is ever dropped — only throttled upstream.
+        self._term_ref = None  # set externally; safe to read across threads
+                               # (only ever len(list), which is GIL-atomic)
 
     # ── Interactive password input ─────────────────────────────────────
 
@@ -1361,6 +1767,13 @@ class _SshWorker(QThread):
                 # send() puts bytes here so Ctrl+C reaches the SSH channel
                 # within one loop iteration regardless of Qt event-queue depth.
                 got_ctrl_c = False
+                if self._direct_ctrl_c_pending:
+                    # UI thread already wrote Ctrl+C straight to the channel.
+                    # Don't re-send (would duplicate the cancel and produce a
+                    # second '^C' echo from the shell). Just enter the same
+                    # post-Ctrl+C drain path used for queued cancels.
+                    self._direct_ctrl_c_pending = False
+                    got_ctrl_c = True
                 while not self._send_q.empty():
                     try:
                         data = self._send_q.get_nowait()
@@ -1378,18 +1791,33 @@ class _SshWorker(QThread):
                     for _ in range(50):
                         time.sleep(0.01)
                         if self._channel.recv_ready():
-                            while self._channel.recv_ready():
-                                self.output.emit(
-                                    self._channel.recv(8192)
-                                    .decode('utf-8', errors='replace'))
+                            self._drain_and_emit(max_total=262144)
                             break
 
                 if self._channel.recv_ready():
-                    self.output.emit(
-                        self._channel.recv(8192).decode('utf-8', errors='replace'))
+                    # Aggressive back-pressure for MobaXterm-like instant
+                    # Ctrl+C: only drain when the UI's pyte queue is fully
+                    # empty, and emit at most ~2 chunks per drain. This
+                    # caps the Qt event queue at 1-2 QMetaCallEvents ahead
+                    # of any user keystroke, so Ctrl+C surfaces within
+                    # ~20 ms instead of waiting behind a flush.
+                    #
+                    # Trade-off: throughput drops from ~3 MB/s to ~1 MB/s
+                    # for very heavy log streams. TCP back-pressure handles
+                    # the upstream — no data is dropped, server just slows.
+                    t = self._term_ref
+                    if t is None or t.pending_chunks() < 1:
+                        self._drain_and_emit(max_total=32768)
+                    # else: UI is behind; let the kernel buffer absorb it.
+                    # We loop back, drain _send_q again (so Ctrl+C still goes
+                    # out without delay), then re-check back-pressure.
                 if self._channel.closed or self._channel.exit_status_ready():
                     break
-                time.sleep(0.02)
+                # Idle wait — but wake immediately when send() pushes a
+                # keystroke (e.g. Ctrl+C). Without this we could spend 20 ms
+                # asleep while a Ctrl+C sits in _send_q.
+                self._wake.wait(0.02)
+                self._wake.clear()
         except paramiko.AuthenticationException:
             self.error.emit("Błąd autentykacji — sprawdź login i hasło.")
         except paramiko.BadHostKeyException as e:
@@ -1406,9 +1834,47 @@ class _SshWorker(QThread):
         finally:
             self.done.emit()
 
+    def _drain_and_emit(self, max_total: int = 131072):
+        """Drain up to `max_total` bytes from the channel, decode once, and
+        emit as multiple small ANSI-colorized chunks (~16 KB) split at line
+        boundaries.
+
+        Why split: pyte stream parsing in the UI thread cannot be interrupted
+        mid-chunk. A single 1 MB chunk takes >100 ms, blocking Ctrl+C and
+        typing. ~16 KB chunks let _flush_pending's 12 ms timeslice yield the
+        UI thread between chunks. Splitting at '\\n' keeps log records intact
+        for the colorize regexes (which match line-by-line).
+        """
+        chunks = []
+        total = 0
+        while self._channel.recv_ready() and total < max_total:
+            buf = self._channel.recv(32768)
+            if not buf:
+                break
+            chunks.append(buf)
+            total += len(buf)
+        if not chunks:
+            return
+        text = b''.join(chunks).decode('utf-8', errors='replace')
+        EMIT_SIZE = 16384
+        n = len(text)
+        if n <= EMIT_SIZE:
+            self.output.emit(_colorize_log(text))
+            return
+        pos = 0
+        while pos < n:
+            end = min(pos + EMIT_SIZE, n)
+            if end < n:
+                nl = text.rfind('\n', pos, end)
+                if nl > pos:
+                    end = nl + 1
+            self.output.emit(_colorize_log(text[pos:end]))
+            pos = end
+
     def send(self, data: bytes):
         """Queue bytes for immediate delivery by the worker thread."""
         self._send_q.put(data)
+        self._wake.set()   # wake the run loop now — don't wait out the idle
 
     def exec_one(self, cmd: str) -> str:
         """Run a one-shot command on the SSH client (separate from the PTY channel)."""
@@ -1422,6 +1888,7 @@ class _SshWorker(QThread):
 
     def stop(self):
         self._running = False
+        self._wake.set()   # break out of the idle wait so the loop exits now
         try:
             if self._channel: self._channel.close()
             if self._client:  self._client.close()
@@ -2020,6 +2487,11 @@ class SftpPanel(QWidget):
         self._table.setFont(sftp_font)
         self._table.setIconSize(QSize(16, 16))
         self._table.setSortingEnabled(True)
+        # Set row height once on the vertical header instead of per-row in
+        # _on_listing — saves O(n) layout passes for large directories.
+        vh = self._table.verticalHeader()
+        vh.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        vh.setDefaultSectionSize(24)
         self._table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._context_menu)
@@ -2239,33 +2711,46 @@ class SftpPanel(QWidget):
         self._path_lbl.setText(path)
         self._end_path_edit()
         self._update_history_menu()
-        self._table.setRowCount(0)
 
-        for i, (name, is_dir, size, mtime, perms) in enumerate(entries):
-            self._table.insertRow(i)
+        # Bulk-fill the table: pre-allocate row count and freeze repaints
+        # so 500-row listings don't trigger a layout pass per cell.
+        # Sorting is already disabled by _list() before the worker starts.
+        table = self._table
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.clearContents()
+            table.setRowCount(len(entries))
 
-            # Col 0: name with file-type icon (dirs-first sort)
-            ni = _DirFirstItem(name)
-            ni.setIcon(_icon_for_entry(name, is_dir))
-            ni.setData(Qt.ItemDataRole.UserRole, (name, is_dir, size))
-            if is_dir:
-                ni.setForeground(QColor("#e6edf3"))
-            self._table.setItem(i, 0, ni)
+            for i, (name, is_dir, size, mtime, perms) in enumerate(entries):
+                # Col 0: name with file-type icon (dirs-first sort)
+                ni = _DirFirstItem(name)
+                ni.setIcon(_icon_for_entry(name, is_dir))
+                ni.setData(Qt.ItemDataRole.UserRole, (name, is_dir, size))
+                if is_dir:
+                    ni.setForeground(QColor("#e6edf3"))
+                table.setItem(i, 0, ni)
 
-            # Col 1: size (numeric sort)
-            si = _NumItem("" if is_dir else _fmt_size(size))
-            si.setData(Qt.ItemDataRole.UserRole, size)
-            si.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self._table.setItem(i, 1, si)
+                # Col 1: size (numeric sort)
+                si = _NumItem("" if is_dir else _fmt_size(size))
+                si.setData(Qt.ItemDataRole.UserRole, size)
+                si.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(i, 1, si)
 
-            # Col 2: modified date
-            self._table.setItem(i, 2, QTableWidgetItem(mtime))
+                # Col 2: modified date
+                table.setItem(i, 2, QTableWidgetItem(mtime))
 
-            self._table.setItem(i, 3, QTableWidgetItem(perms))
-            self._table.setRowHeight(i, 24)
+                table.setItem(i, 3, QTableWidgetItem(perms))
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
 
-        self._table.setSortingEnabled(True)
-        self._table.sortItems(0, Qt.SortOrder.AscendingOrder)
+        # Worker already returned entries in dirs-first / name-asc order.
+        # Reset the sort indicator to that order before re-enabling sorting,
+        # otherwise Qt re-sorts using whatever indicator the user last set
+        # (e.g. descending date) — which would silently flip the new listing.
+        table.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        table.setSortingEnabled(True)
         self._btn_dl.setEnabled(False)
 
     def eventFilter(self, obj, event):
@@ -2277,22 +2762,46 @@ class SftpPanel(QWidget):
             if event.type() == QEvent.Type.FocusOut:
                 self._end_path_edit()
         if obj == self._table.viewport() and event.type() == QEvent.Type.ToolTip:
-            idx = self._table.indexAt(event.pos())
-            if idx.isValid() and idx.column() == 0:
-                item = self._table.item(idx.row(), 0)
-                if item:
-                    fm = self._table.fontMetrics()
-                    # available width = column width minus icon/padding (~30px)
-                    avail = self._table.columnWidth(0) - 30
-                    text_w = fm.horizontalAdvance(item.text())
-                    if text_w > avail:
-                        from PyQt6.QtWidgets import QToolTip
-                        QToolTip.showText(event.globalPos(), item.text(), self._table.viewport())
-                    else:
-                        from PyQt6.QtWidgets import QToolTip
-                        QToolTip.hideText()
-                    return True
             from PyQt6.QtWidgets import QToolTip
+            from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+            from html import escape as _esc
+            idx = self._table.indexAt(event.pos())
+            if idx.isValid():
+                row = idx.row()
+                name_item = self._table.item(row, 0)
+                size_item = self._table.item(row, 1)
+                date_item = self._table.item(row, 2)
+                perm_item = self._table.item(row, 3)
+                if name_item:
+                    name = name_item.text()
+                    size_txt = (size_item.text() if size_item else '') or '—'
+                    date_txt = (date_item.text() if date_item else '') or '—'
+                    perm_txt = (perm_item.text() if perm_item else '') or '—'
+                    data = name_item.data(Qt.ItemDataRole.UserRole)
+                    is_dir = bool(data[1]) if data else False
+                    icon = _icon_for_entry(name, is_dir)
+                    pix = icon.pixmap(QSize(16, 16))
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    pix.save(buf, "PNG")
+                    buf.close()
+                    b64 = bytes(ba.toBase64()).decode('ascii')
+                    img_tag = (
+                        f"<img src='data:image/png;base64,{b64}' "
+                        f"width='16' height='16' style='vertical-align:middle;'/>"
+                    )
+                    sep = "&nbsp;&nbsp;&nbsp;&nbsp;"
+                    html = (
+                        "<div style='font-family:Consolas; white-space:nowrap;'>"
+                        f"{img_tag}&nbsp;<b>{_esc(name)}</b>"
+                        f"{sep}{_esc(size_txt)}"
+                        f"{sep}{_esc(date_txt)}"
+                        f"{sep}{_esc(perm_txt)}"
+                        "</div>"
+                    )
+                    QToolTip.showText(event.globalPos(), html, self._table.viewport())
+                    return True
             QToolTip.hideText()
             return True
         if obj == self._table.viewport() and event.type() == QEvent.Type.MouseButtonPress:
@@ -3529,7 +4038,7 @@ class _TerminalPane(QWidget):
 class _Session:
     """One SSH session: terminal pane + worker + optional SFTP connection."""
     __slots__ = ('pane', 'worker', 'label', 'sftp', 'sftp_client', 'sftp_path',
-                 'sftp_history', 'stats_worker', 'last_stats')
+                 'sftp_history', 'stats_worker', 'last_stats', 'has_unread')
 
     def __init__(self, pane: _TerminalPane, worker: '_SshWorker', label: str):
         self.pane         = pane
@@ -3541,6 +4050,7 @@ class _Session:
         self.sftp_history: list[str] = []
         self.stats_worker = None
         self.last_stats: tuple | None = None   # (load, mem, uptime, disk) — last known values
+        self.has_unread   = False              # set when output arrives on inactive tab
 
     @property
     def term(self) -> 'TerminalWidget':
@@ -3801,7 +4311,17 @@ class SshDialog(QDialog):
         # Pass parent=None so this is a true top-level window with own taskbar icon
         super().__init__(None)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setWindowFlag(Qt.WindowType.Window)
+        # QDialog defaults strip Min/Max button hints on Windows; restore them
+        # so the user can minimize/maximize the SSH window (especially when
+        # opened with showMaximized() via the "open in big window" option).
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         SshDialog._alive.append(self)
         self._machine  = machine
         self._hospital = hospital
@@ -3832,6 +4352,26 @@ class SshDialog(QDialog):
             return
 
         QTimer.singleShot(0, self._add_first_session)
+
+    def keyPressEvent(self, event):
+        """Cycle session tabs with Ctrl+Tab / Ctrl+Shift+Tab.
+
+        Reaches us because TerminalWidget.keyPressEvent ignores these keys
+        (event.ignore() bubbles up to the parent dialog).
+        """
+        key = event.key()
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            cnt = self._tab_widget.count()
+            if cnt > 1:
+                cur = self._tab_widget.currentIndex()
+                step = -1 if (shift or key == Qt.Key.Key_Backtab) else 1
+                self._tab_widget.setCurrentIndex((cur + step) % cnt)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ── UI ────────────────────────────────────────────────────────────────
 
@@ -3910,6 +4450,10 @@ class SshDialog(QDialog):
         self._tab_widget.setStyleSheet(_session_tab_style())
         self._tab_widget.setMovable(True)
         self._tab_widget.setTabsClosable(True)
+        # Compact icon size — used for the teal "unread" dot. Default is 16x16
+        # which would push the label sideways and make the tab wider whenever
+        # activity arrives.
+        self._tab_widget.setIconSize(QSize(10, 10))
         self._tab_widget.tabCloseRequested.connect(self._close_session)
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
         self._tab_widget.tabBar().tabMoved.connect(self._on_tab_moved)
@@ -3961,6 +4505,60 @@ class SshDialog(QDialog):
         sbl.setSpacing(0)
 
         _s = "color:#6e7681; font-size:12px; font-family:Consolas; background:transparent;"
+
+        # ── Terminal search: lupa + find field ──────────────────────────────
+        self._search_btn = QToolButton()
+        self._search_btn.setText("🔍")
+        self._search_btn.setCheckable(True)
+        self._search_btn.setToolTip("Szukaj w terminalu (Ctrl+F)")
+        self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._search_btn.setFixedSize(22, 22)
+        self._search_btn.setStyleSheet(
+            "QToolButton { background: transparent; color: #6e7681; border: none;"
+            " font-size: 13px; padding: 0; }"
+            "QToolButton:hover { color: #c9d1d9; }"
+            "QToolButton:checked { color: #58a6ff; }"
+        )
+        self._search_btn.clicked.connect(self._toggle_search)
+        sbl.addWidget(self._search_btn)
+        sbl.addSpacing(6)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Wyszukaj frazę...")
+        self._search_edit.setFixedWidth(220)
+        self._search_edit.setFixedHeight(20)
+        self._search_edit.setStyleSheet(
+            "QLineEdit { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;"
+            " border-radius: 3px; padding: 0 6px; font-size: 11px; }"
+            "QLineEdit:focus { border-color: #1f6feb; }"
+        )
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        self._search_edit.returnPressed.connect(self._on_search_next)
+        self._search_edit.installEventFilter(self)
+        self._search_edit.setVisible(False)
+        sbl.addWidget(self._search_edit)
+        sbl.addSpacing(4)
+
+        self._search_prev_btn = QToolButton()
+        self._search_prev_btn.setText("▲")
+        self._search_prev_btn.setToolTip("Poprzedni wynik (Shift+Enter)")
+        self._search_prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._search_prev_btn.setFixedSize(20, 20)
+        self._search_prev_btn.setStyleSheet(
+            "QToolButton { background: transparent; color: #6e7681; border: none;"
+            " font-size: 10px; padding: 0; }"
+            "QToolButton:hover { color: #c9d1d9; }"
+        )
+        self._search_prev_btn.clicked.connect(self._on_search_prev)
+        self._search_prev_btn.setVisible(False)
+        sbl.addWidget(self._search_prev_btn)
+        sbl.addSpacing(6)
+
+        self._search_count_lbl = QLabel("")
+        self._search_count_lbl.setStyleSheet(
+            "color: #6e7681; font-size: 10px; background: transparent;")
+        self._search_count_lbl.setVisible(False)
+        sbl.addWidget(self._search_count_lbl)
 
         sbl.addStretch()
 
@@ -4172,8 +4770,57 @@ class SshDialog(QDialog):
             # Update last_tab_idx to follow the moved tab
             self._last_tab_idx = self._tab_widget.currentIndex()
 
+    # Color used to mark inactive tabs that received new output.
+    _UNREAD_TAB_COLOR = QColor('#1abc9c')   # morski (teal)
+
+    @classmethod
+    def _unread_icon(cls) -> QIcon:
+        """Cached teal-dot icon shown next to a tab label when it has unread output.
+
+        We use an icon (rather than setTabTextColor) because the tab stylesheet
+        defines an explicit `color:` on QTabBar::tab, which overrides any
+        per-tab text color set programmatically. Icons are not subject to that.
+        """
+        cached = getattr(cls, '_unread_icon_cached', None)
+        if cached is not None:
+            return cached
+        # Small icon (10x10) with a 6x6 dot — keeps the tab from growing
+        # noticeably wider when the dot appears.
+        pix = QPixmap(10, 10)
+        pix.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QBrush(cls._UNREAD_TAB_COLOR))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(2, 2, 6, 6)
+        p.end()
+        ico = QIcon(pix)
+        cls._unread_icon_cached = ico
+        return ico
+
+    def _mark_session_activity(self, session: '_Session'):
+        """Show a teal dot on the tab when output arrives on a non-current tab.
+
+        Cleared when the user switches to that tab (see _on_tab_changed).
+        """
+        idx = self._tab_widget.indexOf(session.pane)
+        if idx < 0:
+            return
+        if idx == self._tab_widget.currentIndex():
+            return   # user is looking at this tab — nothing to flag
+        if session.has_unread:
+            return   # already flagged — avoid hammering on every chunk
+        session.has_unread = True
+        self._tab_widget.setTabIcon(idx, self._unread_icon())
+
     def _on_tab_changed(self, idx: int):
         """Update environment panel + SFTP panel when active terminal tab changes."""
+        # Clear unread highlight on the tab we're entering (regardless of mode).
+        if 0 <= idx < len(self._sessions):
+            s_new = self._sessions[idx]
+            if s_new.has_unread:
+                s_new.has_unread = False
+                self._tab_widget.setTabIcon(idx, QIcon())
         if self._multiexec:
             return
         # Save SFTP state of the tab we're leaving
@@ -4196,6 +4843,8 @@ class SshDialog(QDialog):
             self._update_stats_display(*s.last_stats)
         else:
             self._clear_stats_display()
+        # Pole wyszukiwania pokazuje zapytanie tej sesji (per-session state).
+        self._sync_search_ui_to_active()
 
     def _prompt_new_session(self):
         """Show dialog to create a new SSH session with custom credentials."""
@@ -4218,6 +4867,7 @@ class SshDialog(QDialog):
         self._add_session(label=label, ip=machine.ip,
                           user=cred.login if cred else '',
                           password=cred.password if cred else '')
+        self._left_tabs.setCurrentWidget(self._sftp_panel)
 
     def _open_machine_with_cred(self, machine, cred):
         """Connect to a machine with a specific credential (from context menu)."""
@@ -4225,6 +4875,7 @@ class SshDialog(QDialog):
         label += f"  [{cred.login}]"
         self._add_session(label=label, ip=machine.ip,
                           user=cred.login, password=cred.password)
+        self._left_tabs.setCurrentWidget(self._sftp_panel)
 
     def _teardown_session(self, s: '_Session'):
         """Release all memory held by a session (worker + pyte scrollback).
@@ -4303,6 +4954,10 @@ class SshDialog(QDialog):
         else:
             self._rebuild_tabs()
             self._mode_stack.setCurrentIndex(0)
+        # Każda sesja zachowuje własne wyszukiwanie; po relayoucie terminal
+        # sam przeliczy pozycje trafień w _emit_resize (po debounce). UI
+        # synchronizujemy do nowej aktywnej sesji.
+        QTimer.singleShot(0, self._sync_search_ui_to_active)
 
     def _rebuild_grid(self):
         # Pull panes out of tab widget — removeTab hides them, so we must
@@ -4348,15 +5003,38 @@ class SshDialog(QDialog):
     # ── Input ─────────────────────────────────────────────────────────────
 
     def _on_key(self, data: bytes, source_term: TerminalWidget):
+        # Ctrl+C fast-path: write straight to the channel from the UI
+        # thread, bypassing the worker's send_q drain (which can sit
+        # asleep for up to ~20 ms under heavy output). Paramiko Channel
+        # is thread-safe. Then signal the worker via _direct_ctrl_c_pending
+        # so it still triggers the post-Ctrl+C recv drain — without
+        # re-sending '\x03' (which would otherwise duplicate the cancel
+        # and produce a second '^C' echo).
+        is_ctrl_c = b'\x03' in data
         if not self._multiexec:
             for s in self._sessions:
                 if s.term is source_term:
-                    s.worker.send(data)
+                    self._send_one(s, data, is_ctrl_c)
                     return
         else:
             for s in self._sessions:
                 if not s.excluded:
-                    s.worker.send(data)
+                    self._send_one(s, data, is_ctrl_c)
+
+    def _send_one(self, s: '_Session', data: bytes, is_ctrl_c: bool):
+        """Route a keystroke to one session via the fast direct path
+        when possible, falling back to the worker's send_q on error."""
+        if is_ctrl_c and s.worker._channel:
+            try:
+                s.worker._channel.send(data)
+            except Exception:
+                # Direct write failed — fall back to the queue.
+                s.worker.send(data)
+                return
+            s.worker._direct_ctrl_c_pending = True
+            s.worker._wake.set()
+            return
+        s.worker.send(data)
 
     def _clear_current(self):
         idx = self._tab_widget.currentIndex()
@@ -4388,7 +5066,17 @@ class SshDialog(QDialog):
                         pane: _TerminalPane, ip: str, user: str,
                         is_first: bool, session: '_Session | None' = None):
         """Wire up all signals for a (new or retried) SSH worker."""
-        worker.output.connect(lambda text, t=term: t.feed(_colorize_log(text)))
+        # Colorization already happens on the worker thread before emit,
+        # so the UI thread only does the pyte feed + repaint here.
+        worker.output.connect(lambda text, t=term: t.feed(text))
+        # Hand the worker a back-reference to the terminal so it can read
+        # pending_chunks() for back-pressure (see _SshWorker.run).
+        worker._term_ref = term
+        # Activity highlight: tint the tab text teal when output arrives on
+        # an inactive tab so the user notices background sessions changing.
+        if session is not None:
+            worker.output.connect(
+                lambda _text, s=session: self._mark_session_activity(s))
         worker.done.connect(lambda w=worker: self._auto_close_session(w))
         # Overwrite "Łączenie z ip…" line with success message
         worker.connected.connect(
@@ -4500,6 +5188,88 @@ class SshDialog(QDialog):
         if 0 <= idx < len(self._sessions):
             return self._sessions[idx]
         return None
+
+    # ── Terminal search ───────────────────────────────────────────────────
+
+    def _toggle_search(self):
+        show = self._search_btn.isChecked()
+        self._search_edit.setVisible(show)
+        self._search_prev_btn.setVisible(show)
+        self._search_count_lbl.setVisible(show)
+        if show:
+            # Pokaż w polu to, czego szuka aktualna sesja (każda trzyma własne zapytanie).
+            self._sync_search_ui_to_active()
+            self._search_edit.setFocus()
+            self._search_edit.selectAll()
+        else:
+            # Zamknięcie paska czyści wyszukiwanie tylko tam, gdzie jesteśmy
+            # — pozostałe sesje zachowują swoje podświetlenia.
+            self._apply_search_to_active('')
+            self._search_count_lbl.setText('')
+
+    def _sync_search_ui_to_active(self):
+        """Dostosuj zawartość pola i licznik do stanu aktywnej sesji bez
+        ponownego uruchamiania wyszukiwania."""
+        if not self._search_btn.isChecked():
+            return
+        active = self._active_session()
+        term = active.term._search_term if active else ''
+        self._search_edit.blockSignals(True)
+        self._search_edit.setText(term)
+        self._search_edit.blockSignals(False)
+        self._update_search_count()
+
+    def _apply_search_to_active(self, term: str):
+        active = self._active_session()
+        if active is None:
+            self._search_count_lbl.setText('')
+            return
+        if term:
+            active.term.set_search_term(term)
+        else:
+            active.term.clear_search()
+        self._update_search_count()
+
+    def _on_search_text_changed(self, text: str):
+        self._apply_search_to_active(text)
+
+    def _on_search_next(self):
+        active = self._active_session()
+        if active is None:
+            return
+        active.term.search_next()
+        self._update_search_count()
+
+    def _on_search_prev(self):
+        active = self._active_session()
+        if active is None:
+            return
+        active.term.search_prev()
+        self._update_search_count()
+
+    def _update_search_count(self):
+        active = self._active_session()
+        if active is None:
+            self._search_count_lbl.setText('')
+            return
+        cur, total = active.term.search_status()
+        if total == 0:
+            txt = 'brak' if self._search_edit.text() else ''
+            self._search_count_lbl.setText(txt)
+        else:
+            self._search_count_lbl.setText(f'{cur}/{total}')
+
+    def eventFilter(self, obj, event):
+        if obj is self._search_edit and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self._search_btn.setChecked(False)
+                self._toggle_search()
+                return True
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
+                    and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._on_search_prev()
+                return True
+        return super().eventFilter(obj, event)
 
     # ── Live stats ────────────────────────────────────────────────────────
 

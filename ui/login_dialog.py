@@ -87,6 +87,43 @@ class LoginDialog(QDialog):
             self._stack.setCurrentIndex(0)
             self.setFixedSize(400, 360)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # setFocus() during construction is ignored while the widget is not yet
+        # visible — defer until after the dialog is shown and the event loop ticks.
+        if getattr(self, "_pass_edit", None) is not None:
+            QTimer.singleShot(0, self._pass_edit.setFocus)
+
+    def keyPressEvent(self, event):
+        # Fallback — normally the eventFilter on _pass_edit handles arrows first,
+        # but this covers focus on other widgets (e.g. buttons) on the quick page.
+        if self._maybe_switch_vault_on_key(event):
+            return
+        super().keyPressEvent(event)
+
+    def _maybe_switch_vault_on_key(self, event) -> bool:
+        if (len(getattr(self, "_vaults", [])) > 1
+                and getattr(self, "_pass_edit", None) is not None
+                and self._stack.currentIndex() == 0
+                and not self._pass_edit.text()):
+            if event.key() == Qt.Key.Key_Left:
+                self._switch_vault(-1)
+                return True
+            if event.key() == Qt.Key.Key_Right:
+                self._switch_vault(1)
+                return True
+        return False
+
+    def eventFilter(self, obj, event):
+        # QLineEdit swallows arrow keys before they reach the dialog's
+        # keyPressEvent — intercept them here when the field is empty.
+        from PyQt6.QtCore import QEvent
+        if (event.type() == QEvent.Type.KeyPress
+                and obj is getattr(self, "_pass_edit", None)
+                and self._maybe_switch_vault_on_key(event)):
+            return True
+        return super().eventFilter(obj, event)
+
     # ------------------------------------------------------------------ #
     # Quick login page                                                     #
     # ------------------------------------------------------------------ #
@@ -165,6 +202,7 @@ class LoginDialog(QDialog):
             "QLineEdit:focus { border-color: #1f6feb; }"
         )
         self._pass_edit.returnPressed.connect(self._do_open_active)
+        self._pass_edit.installEventFilter(self)
         layout.addWidget(self._pass_edit)
 
         layout.addSpacing(8)

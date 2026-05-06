@@ -214,7 +214,22 @@ class AppManager:
         if window in self._windows:
             self._windows.remove(window)
         if not self._windows:
+            self._close_all_ssh_dialogs()
             self._app.quit()
+
+    @staticmethod
+    def _close_all_ssh_dialogs():
+        """Close all open top-level SshDialog windows so their QThreads/sessions
+        don't keep the process alive after the main windows are gone."""
+        try:
+            from ui.ssh_panel import SshDialog
+        except Exception:
+            return
+        for dlg in list(SshDialog._alive):
+            try:
+                dlg.close()
+            except Exception:
+                pass
 
     def _on_title_changed(self, window: MainWindow):
         tray = self._trays.get(window)
@@ -309,6 +324,7 @@ class AppManager:
                     pass
                 else:
                     return  # Cancel — abort quit
+        self._close_all_ssh_dialogs()
         for w in self._windows:
             w.destroy_cleanup()
         for tray in self._trays.values():
@@ -387,7 +403,12 @@ def main():
     manager = AppManager(app)
     manager.run_initial_login()
 
-    app.exec()
+    exit_code = app.exec()
+    # Force-terminate: Qt threads or blocked I/O (paramiko/pysftp) can
+    # keep the interpreter alive after app.quit(). Best-effort cleanup
+    # already ran via tray/close handlers, so exit hard here.
+    _cleanup_sftp_temp()
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -934,12 +934,227 @@ def _is_process_running(exe_name: str) -> bool:
         return False
 
 
-_adapter_cache: tuple[float, str, str] = (0.0, "", "")  # (timestamp, ipconfig_out, netsh_out)
-_ADAPTER_CACHE_TTL = 2.0  # seconds
+# ====================================================================== #
+# Native Windows API: GetAdaptersAddresses                                 #
+# ====================================================================== #
+# Zastępuje subprocess'y ipconfig / netsh / PowerShell Get-NetAdapter
+# jednym natywnym wywołaniem przez ctypes (~1-5ms, zero spawn'ów procesu).
+# To eliminuje mikro-zacięcia UI powodowane wcześniej przez spawn co 5s.
+
+_ADAPTERS_CACHE: tuple[float, list] = (0.0, [])  # (ts, list[dict])
+_ADAPTERS_CACHE_TTL = 2.0  # API call jest szybkie, krótki cache OK
+
+
+def _build_winapi_structs():
+    """Lazy build of GetAdaptersAddresses ctypes structs (called once)."""
+    import ctypes
+    from ctypes import wintypes, POINTER, Structure, c_ulong, c_int, c_ubyte, c_ushort, c_byte, c_wchar_p, c_char_p
+
+    class SOCKADDR(Structure):
+        _fields_ = [
+            ("sa_family", c_ushort),
+            ("sa_data", c_byte * 26),
+        ]
+
+    class SOCKET_ADDRESS(Structure):
+        _fields_ = [
+            ("lpSockaddr", POINTER(SOCKADDR)),
+            ("iSockaddrLength", c_int),
+        ]
+
+    class IP_ADAPTER_UNICAST_ADDRESS(Structure):
+        pass
+
+    IP_ADAPTER_UNICAST_ADDRESS._fields_ = [
+        ("Length", c_ulong),
+        ("Flags", c_ulong),
+        ("Next", POINTER(IP_ADAPTER_UNICAST_ADDRESS)),
+        ("Address", SOCKET_ADDRESS),
+        ("PrefixOrigin", c_int),
+        ("SuffixOrigin", c_int),
+        ("DadState", c_int),
+        ("ValidLifetime", c_ulong),
+        ("PreferredLifetime", c_ulong),
+        ("LeaseLifetime", c_ulong),
+        ("OnLinkPrefixLength", c_ubyte),
+    ]
+
+    # IP_ADAPTER_ADDRESSES_LH (Vista+) — używamy tylko pól nas interesujących,
+    # reszta jako padding (c_void_p × N) do wystarczającej długości.
+    # Pełna struktura jest długa i ma różne wersje — ale Length, Next, Description,
+    # FriendlyName, FirstUnicastAddress, OperStatus są stabilne na Vista+.
+    class IP_ADAPTER_ADDRESSES(Structure):
+        pass
+
+    # Layout (Vista+, sprawdzony):
+    # union { ULONGLONG Alignment; struct { ULONG Length; DWORD IfIndex; }; }
+    # PIP_ADAPTER_ADDRESSES Next;
+    # PCHAR AdapterName;
+    # PIP_ADAPTER_UNICAST_ADDRESS_LH FirstUnicastAddress;
+    # PIP_ADAPTER_ANYCAST_ADDRESS_XP FirstAnycastAddress;
+    # PIP_ADAPTER_MULTICAST_ADDRESS_XP FirstMulticastAddress;
+    # PIP_ADAPTER_DNS_SERVER_ADDRESS_XP FirstDnsServerAddress;
+    # PWCHAR DnsSuffix;
+    # PWCHAR Description;
+    # PWCHAR FriendlyName;
+    # BYTE PhysicalAddress[MAX_ADAPTER_ADDRESS_LENGTH=8];
+    # ULONG PhysicalAddressLength;
+    # ULONG Flags;
+    # ULONG Mtu;
+    # DWORD IfType;
+    # IF_OPER_STATUS OperStatus;  (enum, c_int)
+    # ... (więcej pól, ale nieinteresujących)
+    IP_ADAPTER_ADDRESSES._fields_ = [
+        ("Length", c_ulong),
+        ("IfIndex", c_ulong),
+        ("Next", POINTER(IP_ADAPTER_ADDRESSES)),
+        ("AdapterName", c_char_p),
+        ("FirstUnicastAddress", POINTER(IP_ADAPTER_UNICAST_ADDRESS)),
+        ("FirstAnycastAddress", ctypes.c_void_p),
+        ("FirstMulticastAddress", ctypes.c_void_p),
+        ("FirstDnsServerAddress", ctypes.c_void_p),
+        ("DnsSuffix", c_wchar_p),
+        ("Description", c_wchar_p),
+        ("FriendlyName", c_wchar_p),
+        ("PhysicalAddress", c_ubyte * 8),
+        ("PhysicalAddressLength", c_ulong),
+        ("Flags", c_ulong),
+        ("Mtu", c_ulong),
+        ("IfType", c_ulong),
+        ("OperStatus", c_int),
+        # Reszta pól jako padding (ZoneIndices, FirstPrefix, TransmitLinkSpeed, ...)
+        # Allokujemy duży bufor w wywołaniu, więc nadmiar nie szkodzi.
+        ("_padding", c_ubyte * 256),
+    ]
+
+    return IP_ADAPTER_ADDRESSES, IP_ADAPTER_UNICAST_ADDRESS
+
+
+# Windows constants
+_AF_INET = 2
+_AF_UNSPEC = 0
+_ERROR_BUFFER_OVERFLOW = 111
+_ERROR_SUCCESS = 0
+_GAA_FLAG_SKIP_ANYCAST = 0x0002
+_GAA_FLAG_SKIP_MULTICAST = 0x0004
+_GAA_FLAG_SKIP_DNS_SERVER = 0x0008
+_IF_OPER_STATUS_UP = 1
+
+_winapi_cached_structs = None
+
+
+def _enumerate_adapters_winapi() -> list:
+    """Return [{description, friendly_name, ipv4_addresses, oper_status_up}].
+
+    Zwraca pustą listę gdy API zawiedzie — caller powinien fallback'ować
+    na ipconfig/netsh.
+    """
+    global _winapi_cached_structs
+    import ctypes
+    from ctypes import POINTER, byref, c_ulong, cast
+
+    try:
+        if _winapi_cached_structs is None:
+            _winapi_cached_structs = _build_winapi_structs()
+        IP_ADAPTER_ADDRESSES, _ = _winapi_cached_structs
+
+        iphlpapi = ctypes.windll.iphlpapi
+        get_adapters = iphlpapi.GetAdaptersAddresses
+        get_adapters.argtypes = [
+            c_ulong, c_ulong, ctypes.c_void_p,
+            POINTER(IP_ADAPTER_ADDRESSES), POINTER(c_ulong)
+        ]
+        get_adapters.restype = c_ulong
+
+        flags = (_GAA_FLAG_SKIP_ANYCAST | _GAA_FLAG_SKIP_MULTICAST
+                 | _GAA_FLAG_SKIP_DNS_SERVER)
+        size = c_ulong(32768)
+        buf = ctypes.create_string_buffer(size.value)
+        ret = get_adapters(_AF_INET, flags, None,
+                           cast(buf, POINTER(IP_ADAPTER_ADDRESSES)),
+                           byref(size))
+        if ret == _ERROR_BUFFER_OVERFLOW:
+            buf = ctypes.create_string_buffer(size.value)
+            ret = get_adapters(_AF_INET, flags, None,
+                               cast(buf, POINTER(IP_ADAPTER_ADDRESSES)),
+                               byref(size))
+        if ret != _ERROR_SUCCESS:
+            return []
+
+        result = []
+        p = cast(buf, POINTER(IP_ADAPTER_ADDRESSES))
+        while p:
+            try:
+                a = p.contents
+            except (ValueError, OSError):
+                break
+            ipv4 = []
+            ua = a.FirstUnicastAddress
+            while ua:
+                try:
+                    sa_ptr = ua.contents.Address.lpSockaddr
+                    if sa_ptr:
+                        sa = sa_ptr.contents
+                        if sa.sa_family == _AF_INET:
+                            # sin_addr at offset 4 (after sa_family + sin_port)
+                            data = bytes(sa.sa_data[:6])
+                            ipv4.append("{}.{}.{}.{}".format(
+                                data[2] & 0xFF, data[3] & 0xFF,
+                                data[4] & 0xFF, data[5] & 0xFF))
+                    ua = ua.contents.Next
+                except (ValueError, OSError):
+                    break
+            result.append({
+                "description": (a.Description or "").lower(),
+                "friendly_name": (a.FriendlyName or "").lower(),
+                "ipv4_addresses": ipv4,
+                "oper_status_up": a.OperStatus == _IF_OPER_STATUS_UP,
+            })
+            p = a.Next
+        return result
+    except Exception:
+        return []
+
+
+def _get_adapters() -> list:
+    """Cached adapter list via Windows API."""
+    global _ADAPTERS_CACHE
+    import time
+    now = time.monotonic()
+    with _state_lock:
+        if now - _ADAPTERS_CACHE[0] < _ADAPTERS_CACHE_TTL and _ADAPTERS_CACHE[1] is not None:
+            return _ADAPTERS_CACHE[1]
+
+    adapters = _enumerate_adapters_winapi()
+
+    with _state_lock:
+        _ADAPTERS_CACHE = (now, adapters)
+    return adapters
+
+
+def invalidate_adapter_cache() -> None:
+    """Wymuś świeży odczyt adapterów przy najbliższym _check_adapter_status.
+
+    Wywoływane z UI po connect/disconnect — bez tego cache (2s) opóźniałby
+    aktualizację statusu o do 2s. Z natywnym API to mała różnica, ale
+    natychmiastowa reakcja po akcji użytkownika lepsza niż czekanie.
+    """
+    global _ADAPTERS_CACHE, _adapter_cache
+    with _state_lock:
+        _ADAPTERS_CACHE = (0.0, [])
+        _adapter_cache = (0.0, "", "")
+
+
+# ---------------------------------------------------------------------- #
+# Fallback: subprocess-based (gdy WinAPI zawiedzie — rzadkie)              #
+# ---------------------------------------------------------------------- #
+
+_adapter_cache: tuple[float, str, str] = (0.0, "", "")  # (ts, ipconfig, netsh)
+_ADAPTER_CACHE_TTL = 4.0  # seconds
 
 
 def _get_adapter_outputs() -> tuple[str, str]:
-    """Return cached (ipconfig_output, netsh_output). Refreshed every _ADAPTER_CACHE_TTL seconds."""
+    """Fallback: ipconfig+netsh subprocess. Wywoływane tylko gdy WinAPI zwróci pusto."""
     global _adapter_cache
     import time
     now = time.monotonic()
@@ -969,39 +1184,71 @@ def _get_adapter_outputs() -> tuple[str, str]:
 
 
 def _check_adapter_status(*keywords: str) -> str | None:
-    """Check adapter status by searching ipconfig /all (description) and netsh (name).
-    Returns 'Connected', 'Disconnected', or None if adapter not found."""
+    """Check adapter status using native Windows API (GetAdaptersAddresses).
+    Returns 'Connected', 'Disconnected', or None if adapter not found.
+
+    Logika:
+      - 'Connected'   = adapter pasuje (description/friendly_name) AND ma IPv4
+                        OR (oper_status=Up — łapie Forti IPsec NDIS bez IPv4)
+      - 'Disconnected'= adapter pasuje ale brak IPv4 i oper_status != Up
+      - None          = żaden adapter nie pasuje do keywords
+
+    Fallback: jeśli WinAPI zwróci pustą listę, spada do ipconfig/netsh.
+    """
+    adapters = _get_adapters()
+    if adapters:
+        any_match = False
+        any_up_or_ip = False
+        for ad in adapters:
+            if any(kw in ad["description"] or kw in ad["friendly_name"] for kw in keywords):
+                any_match = True
+                # Connected = ma IPv4, LUB oper_status=Up (Forti IPsec NDIS bez IPv4)
+                if ad["ipv4_addresses"] or ad["oper_status_up"]:
+                    any_up_or_ip = True
+        if any_match:
+            return "Connected" if any_up_or_ip else "Disconnected"
+        return None
+
+    # Fallback path — gdy WinAPI zawiedzie (bardzo rzadkie)
     ipconfig_out, netsh_out = _get_adapter_outputs()
 
-    # Search ipconfig /all — matches adapter description + checks for IP
     low_ip = ipconfig_out.lower()
     in_section = False
-    has_ip = False
+    section_has_ip = False
+    section_disconnected = False
+    any_match = False
+    any_connected = False
+
+    def _finalize_section():
+        nonlocal any_connected
+        if in_section and section_has_ip and not section_disconnected:
+            any_connected = True
+
     for line in low_ip.splitlines():
         stripped = line.strip()
-        # Detect adapter section header (contains keyword in description)
         if not line.startswith(" ") and not line.startswith("\t") and stripped:
-            if in_section:
-                # Previous section matched — return based on IP
-                return "Connected" if has_ip else "Disconnected"
+            _finalize_section()
             in_section = any(kw in stripped for kw in keywords)
-            has_ip = False
+            if in_section:
+                any_match = True
+            section_has_ip = False
+            section_disconnected = False
             continue
         if in_section:
             if any(m in stripped for m in ("media disconnected", "nośnik odłączony",
                                                 "odłączony", "odmowa nośnika")):
-                return "Disconnected"
+                section_disconnected = True
+                continue
             if "ipv4" in stripped and ":" in stripped:
                 addr = stripped.split(":", 1)[1].strip()
                 if addr and addr[0].isdigit():
-                    has_ip = True
-    if in_section:
-        return "Connected" if has_ip else "Disconnected"
+                    section_has_ip = True
+    _finalize_section()
+    if any_match:
+        return "Connected" if any_connected else "Disconnected"
 
-    # Fallback: netsh interface show interface — matches Name only
     for line in netsh_out.lower().splitlines():
         if any(kw in line for kw in keywords):
-            # Check disconnected first (EN: "Disconnected", PL: "Odłączony"/"Rozłączony")
             if any(w in line for w in ("disconnected", "odłącz", "rozłącz")):
                 return "Disconnected"
             if any(w in line for w in ("connected", "połącz")):
@@ -1012,8 +1259,16 @@ def _check_adapter_status(*keywords: str) -> str | None:
 
 def _is_forti_tunnel_active() -> bool:
     """Check if FortiClient VPN adapter has an IP address (= tunnel is up).
-    Uses cached ipconfig /all output."""
-    status = _check_adapter_status("fortinet ssl", "fortissl")
+    Uses cached ipconfig /all output.
+
+    Wzorce pokrywają oba tryby FortiClient:
+      - SSL VPN: 'Fortinet SSL VPN Virtual Ethernet Adapter' / 'fortissl'
+      - IPsec:   'Fortinet Virtual Ethernet Adapter (NDIS x.xx)'
+    Samo wykrycie adaptera NIE decyduje, który profil jest 'Connected' —
+    to rozstrzyga logika w get_status (match po _last_connected albo IP
+    serwera profilu vs IP aktualnie utrzymywanego połączenia).
+    """
+    status = _check_adapter_status("fortinet ssl", "fortissl", "fortinet virtual")
     return status == "Connected"
 
 
@@ -1824,12 +2079,19 @@ def _dbg(msg: str):
 
 def connect(provider: str, server: str, port: str, login: str, password: str,
             group: str = "", domain: str = "",
-            app_path: str = "", profile_name: str = "") -> tuple[bool, str]:
+            app_path: str = "", profile_name: str = "",
+            autofill: bool = True) -> tuple[bool, str]:
 
-    _dbg(f"connect() provider={provider} app_path={app_path!r} profile={profile_name!r}")
+    _dbg(f"connect() provider={provider} app_path={app_path!r} profile={profile_name!r} autofill={autofill}")
 
     _last_connected[provider] = profile_name or ""
     _dbg(f"  _last_connected[{provider}] set to {_last_connected[provider]!r}")
+
+    # Autofill OFF: copy password to clipboard once, up-front, so the user can paste
+    # manually into any VPN client window. Subsequent branches skip CLI credential
+    # passing and GUI-field autofill threads.
+    if not autofill and password:
+        _copy_to_clipboard(password)
 
     if provider == "FortiClient":
         import threading
@@ -1844,21 +2106,24 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
                 win32gui.SetForegroundWindow(fc_hwnd)
             except Exception:
                 pass
-            # Auto-fill in background
-            threading.Thread(target=_autofill_forticlient,
-                             args=(login, password, profile_name),
-                             daemon=True).start()
-            return True, "FortiClient — wypełniam dane..."
+            if autofill:
+                threading.Thread(target=_autofill_forticlient,
+                                 args=(login, password, profile_name),
+                                 daemon=True).start()
+                return True, "FortiClient — wypełniam dane..."
+            return True, "FortiClient — hasło w schowku."
 
-        # Check for EMS auth window (instant check — no waiting)
-        ok, msg = _fill_forti_auth_window(login, password, timeout=0.1)
-        if ok:
-            return True, msg
+        # Check for EMS auth window (instant check — no waiting) — only when autofill on
+        if autofill:
+            ok, msg = _fill_forti_auth_window(login, password, timeout=0.1)
+            if ok:
+                return True, msg
 
-        # CLI (EMS/ZTNA) — non-blocking Popen
+        # CLI (EMS/ZTNA) — non-blocking Popen. Skip when autofill disabled
+        # (CLI would pass credentials headless, bypassing the user's intent).
         cli_ok = _is_fortivpn_cli_supported(app_path)
         _dbg(f"  cli_supported={cli_ok} profile={profile_name!r}")
-        if cli_ok and profile_name:
+        if autofill and cli_ok and profile_name:
             fortivpn = _find_fortivpn(app_path)
             cmd = [fortivpn, "--cli", "--connect", "--tunnel", profile_name]
             if login:
@@ -1875,26 +2140,29 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
             except Exception:
                 pass
 
-        # Legacy FortiSSLVPNclient.exe
-        exe = find_executable(provider)
-        if exe:
-            addr = f"{server}:{port}" if port else server
-            cmd = [exe, "connect", "-s", addr, "-u", login]
-            if password:
-                cmd += ["-p", password]
-            try:
-                subprocess.Popen(cmd, creationflags=_NO_WINDOW)
-                return True, "Łączenie z FortiClient (legacy)..."
-            except Exception:
-                pass
+        # Legacy FortiSSLVPNclient.exe — also passes credentials, skip when autofill off
+        if autofill:
+            exe = find_executable(provider)
+            if exe:
+                addr = f"{server}:{port}" if port else server
+                cmd = [exe, "connect", "-s", addr, "-u", login]
+                if password:
+                    cmd += ["-p", password]
+                try:
+                    subprocess.Popen(cmd, creationflags=_NO_WINDOW)
+                    return True, "Łączenie z FortiClient (legacy)..."
+                except Exception:
+                    pass
 
-        # Open GUI + auto-fill in background
+        # Open GUI (+ auto-fill in background when enabled)
         ok, msg = _open_forticlient_gui(app_path)
         if ok:
-            threading.Thread(target=_autofill_forticlient,
-                             args=(login, password, profile_name),
-                             daemon=True).start()
-            return True, "Otwarto FortiClient — wypełniam dane..."
+            if autofill:
+                threading.Thread(target=_autofill_forticlient,
+                                 args=(login, password, profile_name),
+                                 daemon=True).start()
+                return True, "Otwarto FortiClient — wypełniam dane..."
+            return True, "Otwarto FortiClient — hasło w schowku."
         return ok, msg
 
     elif provider == "GlobalProtect":
@@ -1902,9 +2170,9 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
         if not exe:
             return False, "Nie znaleziono GlobalProtect.\nSprawdź instalację lub uruchom ręcznie."
         gp_dir = os.path.dirname(exe)
-        # Check if CLI version exists (globalprotect.exe — newer GP 5.x+)
+        # CLI version (passes credentials) — only when autofill is enabled
         gp_cli = os.path.join(gp_dir, "globalprotect.exe")
-        if os.path.isfile(gp_cli):
+        if autofill and os.path.isfile(gp_cli):
             cmd = [gp_cli, "connect", "--portal", server or profile_name]
             if login:
                 cmd += ["--username", login]
@@ -1926,7 +2194,10 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
         _last_connected[provider] = profile_name or ""
         try:
             os.startfile(exe)
-            return True, f"Otwarto GlobalProtect — użyj 📋 by skopiować hasło."
+            msg = ("Otwarto GlobalProtect — hasło w schowku."
+                   if not autofill else
+                   "Otwarto GlobalProtect — użyj 📋 by skopiować hasło.")
+            return True, msg
         except Exception as e:
             return False, f"Błąd uruchamiania GlobalProtect:\n{e}"
 
@@ -2005,7 +2276,7 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
                 time.sleep(1.5)
                 # Window already visible via Qt — just bring to front (no ShowWindow!)
                 _bring_window_to_front("stormshield")
-                if login or password:
+                if autofill and (login or password):
                     time.sleep(0.5)
                     _autofill_stormshield(server, port, login, password)
                 return True
@@ -2023,10 +2294,11 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
             win32gui.EnumWindows(_cb, None)
             if _found:
                 _bring_window_to_front("stormshield")
-                if login or password:
+                if autofill and (login or password):
                     import time; time.sleep(0.5)
                     _autofill_stormshield(server, port, login, password)
-                return True, "Przywrócono Stormshield + wypełniono."
+                    return True, "Przywrócono Stormshield + wypełniono."
+                return True, "Przywrócono Stormshield — hasło w schowku."
         except Exception:
             pass
 
@@ -2068,21 +2340,19 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
 
     elif provider == "Barracuda":
         _last_connected[provider] = profile_name or ""
-        # Try app_path first (direct exe launch + autofill)
         exe = app_path if (app_path and os.path.isfile(app_path)) else None
         if exe:
             try:
                 os.startfile(exe)
-                if login or password:
+                if autofill and (login or password):
                     _autofill_native_vpn_window(login, password, os.path.basename(exe))
-                return True, f"Łączenie {profile_name or provider}..."
+                    return True, f"Łączenie {profile_name or provider}..."
+                return True, f"Otwarto {provider} — hasło w schowku."
             except Exception as e:
                 return False, f"Błąd uruchamiania:\n{e}"
-        # Fallback: rasdial (server or profile_name as connection name)
-        # Note: rasdial requires password as CLI arg — Windows API limitation.
-        # CREATE_NO_WINDOW + capture_output mitigate exposure.
+        # Fallback: rasdial (headless auth with credentials on CLI) — only with autofill on
         conn_name = server or profile_name
-        if conn_name:
+        if autofill and conn_name:
             try:
                 cmd = ["rasdial", conn_name, login, password]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
@@ -2102,6 +2372,8 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
     if exe:
         try:
             os.startfile(exe)
+            if not autofill and password:
+                return True, f"Uruchomiono {provider} — hasło w schowku."
             return True, f"Uruchomiono {provider}."
         except Exception as e:
             return False, f"Błąd uruchamiania {provider}:\n{e}"
@@ -2391,13 +2663,17 @@ def get_status(provider: str, app_path: str = "",
 def connect_monitored(provider: str, server: str, port: str, login: str, password: str,
                       group: str = "", domain: str = "",
                       app_path: str = "", profile_name: str = "",
-                      token: str = "") -> tuple[bool, str, object]:
+                      token: str = "",
+                      autofill: bool = True) -> tuple[bool, str, object]:
     """
     Like connect() but returns (ok, msg, process) where process is a Popen
     whose stdout can be monitored for 2FA prompts. process is None when
     interactive monitoring is not available.
     """
-    if provider == "FortiClient" and _is_fortivpn_cli_supported(app_path):
+    # When autofill is disabled, skip the FortiClient CLI path (it would pass
+    # credentials headless, bypassing the user's manual-entry intent) and fall
+    # through to connect(), which handles clipboard + GUI-only launch.
+    if autofill and provider == "FortiClient" and _is_fortivpn_cli_supported(app_path):
         fortivpn = _find_fortivpn(app_path)
         cmd = [fortivpn, "--cli", "--connect", "--tunnel", profile_name]
         if login:
@@ -2423,11 +2699,11 @@ def connect_monitored(provider: str, server: str, port: str, login: str, passwor
     # NetExtender: open GUI directly
     if provider == "SonicWall NetExtender":
         ok, msg = connect(provider, server, port, login, password, group, domain,
-                          app_path, profile_name)
+                          app_path, profile_name, autofill=autofill)
         return ok, msg, None
 
     ok, msg = connect(provider, server, port, login, password, group, domain,
-                      app_path, profile_name)
+                      app_path, profile_name, autofill=autofill)
     return ok, msg, None
 
 

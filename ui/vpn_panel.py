@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import models
 import vpn_connect
 from config import (load_vpn_provider_paths, save_vpn_provider_paths,
-                    load_custom_vpn_providers, save_custom_vpn_providers)
+                    load_custom_vpn_providers, save_custom_vpn_providers,
+                    load_vpn_autofill_enabled, save_vpn_autofill_enabled)
 
 # ------------------------------------------------------------------ #
 # 2FA dialog                                                           #
@@ -95,6 +96,39 @@ _SMALL_BTN = (
     " border-radius: 4px; font-size: 11px; padding: 3px 8px; }"
     "QPushButton:hover { background: #30363d; }"
 )
+
+
+class _CheckmarkCheckBox(QCheckBox):
+    """QCheckBox that overpaints a ✓ glyph on top of the styled indicator,
+    instead of Qt's default solid fill or platform-native tick. Works with any
+    stylesheet because the checkmark is drawn separately on top."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        from PyQt6.QtWidgets import QStyle, QStyleOptionButton
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        r = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator, opt, self
+        )
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#58a6ff"))
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        # Tick inside the indicator rect: P1 → P2 → P3 (bottom-left → mid → top-right).
+        x, y, w, h = r.x(), r.y(), r.width(), r.height()
+        from PyQt6.QtCore import QPointF
+        p.drawPolyline(
+            QPointF(x + w * 0.22, y + h * 0.55),
+            QPointF(x + w * 0.43, y + h * 0.76),
+            QPointF(x + w * 0.80, y + h * 0.28),
+        )
+        p.end()
 
 
 class VpnSettingsDialog(QDialog):
@@ -193,6 +227,35 @@ class VpnSettingsDialog(QDialog):
         lay.addLayout(self._custom_container)
         self._rebuild_custom_list()
 
+        # --- Section: Automation ---
+        sep_auto = QFrame()
+        sep_auto.setFrameShape(QFrame.Shape.HLine)
+        sep_auto.setStyleSheet("color: #30363d;")
+        lay.addWidget(sep_auto)
+
+        lbl_auto = QLabel("Automatyzacja")
+        lbl_auto.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: bold;")
+        lay.addWidget(lbl_auto)
+
+        self._autofill_cb = _CheckmarkCheckBox("Automatycznie uzupełniaj pola w oknach VPN")
+        self._autofill_cb.setChecked(load_vpn_autofill_enabled())
+        self._autofill_cb.setStyleSheet(
+            "QCheckBox { color: #c9d1d9; font-size: 11px; spacing: 8px; padding: 2px 0; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px;"
+            " border: 1px solid #30363d; background: #21262d; }"
+            "QCheckBox::indicator:hover { border-color: #58a6ff; }"
+            "QCheckBox::indicator:checked { border-color: #58a6ff; background: #21262d; }"
+        )
+        lay.addWidget(self._autofill_cb)
+
+        desc_auto = QLabel(
+            "Gdy włączone — login, hasło i token są automatycznie wpisywane w okno klienta VPN.\n"
+            "Gdy wyłączone — okno zostanie tylko otwarte, a hasło skopiowane do schowka (Ctrl+V)."
+        )
+        desc_auto.setStyleSheet("color: #8b949e; font-size: 10px; padding-left: 24px;")
+        desc_auto.setWordWrap(True)
+        lay.addWidget(desc_auto)
+
         lay.addStretch()
 
         # --- Import FortiClient ---
@@ -282,6 +345,9 @@ class VpnSettingsDialog(QDialog):
 
     def get_custom_providers(self) -> list:
         return list(self._custom_list)
+
+    def get_autofill_enabled(self) -> bool:
+        return self._autofill_cb.isChecked()
 
 
 # ------------------------------------------------------------------ #
@@ -417,10 +483,12 @@ class VpnPanel(QWidget):
         self._setup_ui()
         self._rebuild_cards()
 
-        # Poll VPN status every 3 seconds
+        # Poll VPN status every 5 seconds — większy interval ogranicza spawn
+        # subprocesów (ipconfig/netsh/PS) do akceptowalnego poziomu. Status VPN
+        # nie zmienia się tak szybko, by potrzebne było odświeżanie co 3s.
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_status)
-        self._status_timer.start(3000)
+        self._status_timer.start(5000)
 
     def cleanup(self):
         """Stop timers and workers — call before discarding this panel."""
@@ -1030,7 +1098,8 @@ class VpnPanel(QWidget):
 
         ok, msg, process = vpn_connect.connect_monitored(
             p.provider, p.server, p.port, p.login, p.password, p.group, p.domain,
-            app_path, p.profile_name
+            app_path, p.profile_name,
+            autofill=load_vpn_autofill_enabled(),
         )
         if lbl:
             color = "#58a6ff" if ok else "#f85149"
@@ -1042,6 +1111,9 @@ class VpnPanel(QWidget):
             # in case the provider ignores --token and still prompts via stdout)
             if process is not None:
                 self._start_monitor(idx, process)
+            # Invalidate adapter cache — następny poll musi widzieć świeży stan
+            # adapterów, nie odpowiedź sprzed connectu (cache trzyma do 15s).
+            vpn_connect.invalidate_adapter_cache()
             QTimer.singleShot(2000, self._poll_status)
 
     def _start_monitor(self, idx: int, process):
@@ -1080,6 +1152,9 @@ class VpnPanel(QWidget):
             lbl.setText(msg[:30])
         if ok:
             self._update_toggle_btn(idx, "disconnected")
+            # Invalidate adapter cache — bez tego pierwszy poll po disconnect
+            # mógłby zwrócić stary "Connected" z cache (TTL 4s/15s).
+            vpn_connect.invalidate_adapter_cache()
             # Poll quickly after disconnect to catch status change
             QTimer.singleShot(1000, self._poll_status)
             QTimer.singleShot(3000, self._poll_status)
@@ -1095,6 +1170,7 @@ class VpnPanel(QWidget):
             save_vpn_provider_paths(dlg.get_paths())
             custom = dlg.get_custom_providers()
             save_custom_vpn_providers(custom)
+            save_vpn_autofill_enabled(dlg.get_autofill_enabled())
             models.refresh_vpn_providers(custom)
             # Apply global paths to profiles that have no custom path
             global_paths = dlg.get_paths()
