@@ -370,6 +370,11 @@ try:
         """
         _ALT_SCREEN = 1049          # DECSET 1049: alternate screen buffer
         _ALT_SCREEN_FLAG = 1049 << 5  # pyte stores private modes shifted by 5
+        # All three private-mode codes that switch to an alternate screen:
+        # 47 (legacy), 1047 (clear-on-entry), 1049 (save cursor + alt). Some
+        # builds of top/htop/less still use the older variants.
+        _ALT_SCREEN_MODES = (47, 1047, 1049)
+        _ALT_SCREEN_FLAGS = frozenset(m << 5 for m in (47, 1047, 1049))
 
         # Track which rows are continuations of the previous row (soft-wrap).
         # A row number in this set means it continues the line from the row above.
@@ -378,12 +383,34 @@ try:
 
         def __init__(self, *args, **kwargs):
             self._soft_wrapped = set()
+            self._just_homed = False
+            # Set by TerminalWidget when the user explicitly invokes a
+            # scrollback-wiping command (`clear`, `cls`, `reset`, Ctrl+L).
+            # Consumed by the next CSI 2 J on the main screen.
+            self._user_clear_pending = False
             super().__init__(*args, **kwargs)
 
         def reset(self):
             super().reset()
             self._soft_wrapped = set()
             self._in_draw = False
+            self._just_homed = False
+            self._user_clear_pending = False
+
+        def before_event(self, event):
+            # The `clear` command emits CSI H immediately followed by
+            # CSI 2 J with no other event between. Keep _just_homed alive
+            # across exactly that pair; clear it on anything else so that
+            # leftover cursor-at-home state (e.g. after `top` exited the
+            # alt screen leaving the cursor there) cannot retroactively
+            # turn an unrelated 2 J into a scrollback wipe.
+            super().before_event(event)
+            if event not in ('cursor_position', 'erase_in_display'):
+                self._just_homed = False
+
+        def cursor_position(self, line=None, column=None):
+            super().cursor_position(line, column)
+            self._just_homed = (self.cursor.x == 0 and self.cursor.y == 0)
 
         def draw(self, *args, **kwargs):
             self._in_draw = True
@@ -574,33 +601,46 @@ try:
             self.cursor.y = min(nc_y, new_lines - 1)
             self.cursor.x = min(nc_x, new_cols - 1)
 
+        def _in_alt_screen(self):
+            return not self._ALT_SCREEN_FLAGS.isdisjoint(self.mode)
+
         def erase_in_display(self, how=0, *args, **kwargs):
             if how == 3:
-                # CSI 3 J — explicit "erase scrollback buffer" command.
-                self.history.top.clear()
-                self.history.bottom.clear()
-                self._soft_wrapped.clear()
+                # CSI 3 J — programs like top/htop send this on startup
+                # (terminfo E3 capability). Keep scrollback intact; only
+                # `clear` / Ctrl+L is allowed to wipe it.
                 return
             if how == 2:
-                if self._ALT_SCREEN_FLAG not in self.mode:
-                    # CSI 2 J on main screen — shell `clear` command.
-                    # Wipe scrollback and do NOT push the visible content,
-                    # so `clear` actually clears (user expectation).
-                    # Programs like top/vim use the alt screen and are unaffected.
+                # CSI 2 J — by default this only wipes the visible buffer.
+                # The shell `clear` command and Ctrl+L both go through this
+                # path, but so do top/htop/vim/etc. — escape-sequence-based
+                # heuristics cannot reliably tell them apart on every distro.
+                # Instead we trust the actual user signal: TerminalWidget
+                # sets _user_clear_pending when it observes the user typing
+                # `clear`/`cls`/`reset`<Enter> or pressing Ctrl+L. Anything
+                # else that emits CSI 2 J (full-screen apps repainting) sees
+                # the flag still False and leaves scrollback intact.
+                consume = self._user_clear_pending and not self._in_alt_screen()
+                self._user_clear_pending = False
+                self._just_homed = False
+                if consume:
                     self.history.top.clear()
                     self.history.bottom.clear()
                     self._soft_wrapped.clear()
-                    # Reset the suppress flag; no push happened.
                     self._suppress_history_push = False
                 super().erase_in_display(how, *args, **kwargs)
                 return
             super().erase_in_display(how, *args, **kwargs)
 
         def set_mode(self, *modes, **kwargs):
-            # Entering alternate screen (\x1b[?1049h) → save main screen to history.
-            if kwargs.get("private") and self._ALT_SCREEN in modes:
-                if self._ALT_SCREEN_FLAG not in self.mode:
-                    self._push_visible_to_history()
+            # Entering any alternate screen variant (47 / 1047 / 1049) →
+            # save the current main-screen content into scrollback first
+            # so it remains accessible while the full-screen app runs and
+            # after it exits.
+            if kwargs.get("private")\
+                    and any(m in self._ALT_SCREEN_MODES for m in modes)\
+                    and not self._in_alt_screen():
+                self._push_visible_to_history()
             super().set_mode(*modes, **kwargs)
 
 except ImportError:
@@ -669,12 +709,13 @@ class TerminalWidget(QWidget):
     resize_pty     = pyqtSignal(int, int)   # cols, rows → SSH PTY resize
     scroll_changed = pyqtSignal(int, int)   # offset, max_offset
 
-    _SCROLLBACK = 500_000   # 50 MB - 500 MB per session (lines × ~100-1000 B);
-                            # freed on tab close. Increased from 50k so heavy
-                            # `docker logs -f` runs don't get truncated. CPU cost
-                            # is negligible — append is O(1) and the renderer
-                            # only looks at visible rows. Only first scroll after
-                            # a flush rebuilds the lookup cache (~30-50 ms).
+    _SCROLLBACK = 250_000   # 25 MB - 250 MB per session (lines × ~100-1000 B);
+                            # freed on tab close. Still 2.5× MobaXterm's max
+                            # (99 999) so heavy `docker logs -f` runs aren't
+                            # truncated. CPU cost is negligible — append is O(1)
+                            # and the renderer only looks at visible rows. Only
+                            # first scroll after a flush rebuilds the lookup
+                            # cache (~30-50 ms).
 
     _CTRL_MAP = {
         Qt.Key.Key_At:            b'\x00',
@@ -744,6 +785,11 @@ class TerminalWidget(QWidget):
         self._rows = 50
         self._screen = _TermScreen(self._cols, self._rows, history=self._SCROLLBACK) if _PYTE_OK else None
         self._stream = pyte.Stream(self._screen) if _PYTE_OK else None
+
+        # Buffer of bytes typed on the current input line. Used by
+        # _emit_input to detect when the user invokes a scrollback-wiping
+        # command so the next CSI 2 J is allowed to clear scrollback.
+        self._typed_line = bytearray()
 
         self._cur_vis = True
         self._blink   = QTimer(self)
@@ -859,6 +905,48 @@ class TerminalWidget(QWidget):
         if self._pending_data and not self._coalesce_timer.isActive():
             self._coalesce_timer.start()
 
+    _CLEAR_COMMANDS = frozenset([b'clear', b'cls', b'reset', b'tput'])
+
+    def _emit_input(self, data: bytes):
+        """Forward typed bytes to the SSH worker, but first sniff for the
+        user invoking an explicit scrollback-wipe command. Sets a flag on
+        the screen so the next CSI 2 J on the main screen actually wipes
+        scrollback. Anything else (top/htop/vim/...) emits CSI 2 J without
+        the flag and scrollback is preserved."""
+        screen = self._screen
+        if screen is not None and data:
+            for b in data:
+                if b == 0x0c:  # Ctrl+L — shell turns this into a clear sequence
+                    screen._user_clear_pending = True
+                    self._typed_line.clear()
+                elif b in (0x0d, 0x0a):  # Enter
+                    line = bytes(self._typed_line).strip().lower()
+                    for sep in (b';', b'&', b'|', b'`'):
+                        line = line.replace(sep, b' ')
+                    tokens = line.split()
+                    if tokens and (tokens[-1] in self._CLEAR_COMMANDS
+                                   or tokens[0] in self._CLEAR_COMMANDS):
+                        screen._user_clear_pending = True
+                    self._typed_line.clear()
+                elif b == 0x15:  # Ctrl+U — kill line
+                    self._typed_line.clear()
+                    screen._user_clear_pending = False
+                elif b == 0x03:  # Ctrl+C — abort current input
+                    self._typed_line.clear()
+                    screen._user_clear_pending = False
+                elif b in (0x08, 0x7f):  # backspace
+                    if self._typed_line:
+                        self._typed_line.pop()
+                elif 0x20 <= b <= 0x7e:  # printable ASCII
+                    self._typed_line.append(b)
+                    # User still typing — invalidate any stale pending flag
+                    screen._user_clear_pending = False
+                # Other bytes (escape sequences, arrow keys, tabs) leave the
+                # buffer alone — we can't track shell-side line edits, but a
+                # mistracked buffer just means no auto-wipe, which is the
+                # safe failure mode (user can still hit Ctrl+Shift+L).
+        self.char_input.emit(data)
+
     def clear(self):
         self._pending_data.clear()
         if self._screen:
@@ -871,6 +959,21 @@ class TerminalWidget(QWidget):
         self._scroll_offset = 0
         self._hist_cache    = None
         self._sel_start = self._sel_end = None
+        self.update()
+        self._emit_scroll()
+
+    def clear_scrollback(self):
+        """Wipe scrollback only (leave the visible buffer alone). Bound to
+        Ctrl+Shift+L — matches iTerm2 / gnome-terminal / Windows Terminal
+        convention for explicit history wipe."""
+        if self._screen:
+            self._screen.history.top.clear()
+            self._screen.history.bottom.clear()
+            self._screen._soft_wrapped = {
+                r for r in self._screen._soft_wrapped if r < self._screen.lines
+            }
+        self._scroll_offset = 0
+        self._hist_cache    = None
         self.update()
         self._emit_scroll()
 
@@ -1279,7 +1382,15 @@ class TerminalWidget(QWidget):
             text = QApplication.clipboard().text()
             if text:
                 self._scroll_offset = 0
-                self.char_input.emit(text.encode('utf-8'))
+                self._emit_input(text.encode('utf-8'))
+            event.accept()
+            return
+
+        # Ctrl+Shift+L: wipe scrollback (visible buffer untouched). The
+        # shell `clear` command no longer eats scrollback (it would mis-fire
+        # for top/htop/vim too) — this shortcut is the explicit override.
+        if ctrl and shift and key == Qt.Key.Key_L:
+            self.clear_scrollback()
             event.accept()
             return
 
@@ -1298,7 +1409,7 @@ class TerminalWidget(QWidget):
         if data:
             self._cur_vis = True
             self._blink.start(530)
-            self.char_input.emit(data)
+            self._emit_input(data)
         event.accept()
 
     # ── Mouse ─────────────────────────────────────────────────────────────
@@ -1318,7 +1429,7 @@ class TerminalWidget(QWidget):
             text = QApplication.clipboard().text()
             if text:
                 self._scroll_offset = 0
-                self.char_input.emit(text.encode('utf-8'))
+                self._emit_input(text.encode('utf-8'))
 
     def mouseMoveEvent(self, event):
         if self._selecting and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -2006,33 +2117,58 @@ class _TransferWorker(QThread):
     error     = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, sftp, mode, remote, local, total=0):
+    def __init__(self, ssh_client, mode, remote, local, total=0, open_lock=None):
         super().__init__()
-        self._sftp, self._mode = sftp, mode
+        self._ssh_client = ssh_client
+        self._mode = mode
         self._remote, self._local, self._total = remote, local, total
+        self._open_lock = open_lock or threading.Lock()
         self._cancel = False
+        self._sftp = None   # private SFTP channel — safe to close on cancel
 
     def cancel(self):
         self._cancel = True
+        # Hard cancel: close the private SFTP channel so paramiko's blocking
+        # read/write raises immediately instead of waiting for the next chunk.
+        s = self._sftp
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
 
     def run(self):
         try:
-            def cb(done, total):
-                if self._cancel:
-                    raise _CancelledError()
-                t = total or self._total or 1
-                self.progress.emit(min(int(done * 100 / t), 100))
+            with self._open_lock:
+                self._sftp = self._ssh_client.open_sftp()
+            try:
+                def cb(done, total):
+                    if self._cancel:
+                        raise _CancelledError()
+                    t = total or self._total or 1
+                    self.progress.emit(min(int(done * 100 / t), 100))
 
-            if self._mode == 'get':
-                self._sftp.get(self._remote, self._local, callback=cb)
-                self.done.emit(f"Pobrano: {os.path.basename(self._local)}")
-            else:
-                self._sftp.put(self._local, self._remote, callback=cb)
-                self.done.emit(f"Wgrano: {os.path.basename(self._local)}")
+                if self._mode == 'get':
+                    self._sftp.get(self._remote, self._local, callback=cb)
+                    self.done.emit(f"Pobrano: {os.path.basename(self._local)}")
+                else:
+                    self._sftp.put(self._local, self._remote, callback=cb)
+                    self.done.emit(f"Wgrano: {os.path.basename(self._local)}")
+            finally:
+                try:
+                    self._sftp.close()
+                except Exception:
+                    pass
         except _CancelledError:
             self.cancelled.emit()
         except Exception as e:
-            self.error.emit(str(e))
+            # If hard-cancel closed the channel mid-transfer, paramiko
+            # surfaces a generic exception — surface it as cancellation,
+            # not an error.
+            if self._cancel:
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
 
 
 class _SimpleWorker(QThread):
@@ -2045,9 +2181,21 @@ class _SimpleWorker(QThread):
         super().__init__()
         self._fn = fn
         self._cancel = False
+        self._cancel_hook = None
+
+    def set_cancel_hook(self, hook):
+        """Register a callable invoked from cancel() — typically used to
+        close an open SFTP channel so a blocking transfer raises promptly."""
+        self._cancel_hook = hook
 
     def cancel(self):
         self._cancel = True
+        h = self._cancel_hook
+        if h is not None:
+            try:
+                h()
+            except Exception:
+                pass
 
     def run(self):
         try:
@@ -2056,7 +2204,12 @@ class _SimpleWorker(QThread):
         except _CancelledError:
             self.cancelled.emit()
         except Exception as e:
-            self.error.emit(str(e))
+            # Hard-cancelled transfers surface as generic exceptions —
+            # report them as cancellation instead of an error.
+            if self._cancel:
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
 
 
 # ──────────────────────────────────────── Numeric sort item ──────────────────
@@ -3070,11 +3223,14 @@ class SftpPanel(QWidget):
         self._btn_cancel.setVisible(True)
         self._btn_dl.setEnabled(False)
         self._btn_ul.setEnabled(False)
-        w = _TransferWorker(self._sftp, mode, remote, local, size)
+        w = _TransferWorker(self._ssh_client, mode, remote, local, size,
+                            open_lock=self._sftp_open_lock)
         self._active_transfer_worker = w
         w.progress.connect(self._progress.setValue)
         w.done.connect(self._transfer_done)
-        w.cancelled.connect(lambda: self._transfer_cancelled(local if mode == 'get' else None))
+        w.cancelled.connect(lambda: self._transfer_cancelled(
+            local if mode == 'get' else None,
+            remote_partial=remote if mode == 'put' else None))
         w.error.connect(lambda e: self._transfer_error(e))
         w.start()
         self._workers.append(w)
@@ -3104,7 +3260,7 @@ class SftpPanel(QWidget):
             self._transfer_finished_cleanup()
             self.status_msg.emit(f"Transfer: {e}", True)
 
-    def _transfer_cancelled(self, partial_file: str = None):
+    def _transfer_cancelled(self, partial_file: str = None, remote_partial: str = None):
         self._transfer_queue = []
         self._transfer_finished_cleanup()
         if partial_file and os.path.exists(partial_file):
@@ -3112,12 +3268,25 @@ class SftpPanel(QWidget):
                 os.remove(partial_file)
             except OSError:
                 pass
+        if remote_partial and self._sftp:
+            # Upload was hard-cancelled — its private SFTP channel is gone.
+            # Reuse the navigation channel (self._sftp) to drop the partial
+            # file. One round-trip, runs synchronously here; opening a new
+            # channel from a side thread proved fragile under rapid cancel.
+            try:
+                self._sftp.remove(remote_partial)
+            except Exception:
+                pass
+            if self._path:
+                self._list(self._path)
         self.status_msg.emit("Transfer anulowany", False)
 
     def _transfer_finished_cleanup(self):
+        self._progress.setRange(0, 100)
         self._progress.setFormat("%p%")
         self._progress.setVisible(False)
         self._btn_cancel.setVisible(False)
+        self._btn_cancel.setEnabled(True)
         self._btn_ul.setEnabled(True)
         self._active_transfer_worker = None
         self._on_sel_change()  # re-evaluate download button state
@@ -3129,6 +3298,14 @@ class SftpPanel(QWidget):
         if w:
             self._transfer_queue = []
             w.cancel()
+            # The worker may take several seconds to unwind — paramiko
+            # only checks _cancel between chunk reads, and slow networks
+            # mean long gaps. Give the user immediate visual feedback so
+            # they know the cancel was registered (not a hang).
+            self._btn_cancel.setEnabled(False)
+            self._progress.setRange(0, 0)   # indeterminate / animated
+            self._progress.setFormat("Anulowanie…")
+            self.status_msg.emit("Anulowanie transferu…", False)
 
     _DANGEROUS_EXT = frozenset({
         '.exe', '.bat', '.cmd', '.com', '.msi', '.scr', '.pif',
@@ -3175,10 +3352,12 @@ class SftpPanel(QWidget):
         self._btn_cancel.setVisible(True)
 
         worker_ref = [None]
+        sftp_ref = [None]
 
         def do_open():
             with lock:                          # serialize channel opens
                 sftp = ssh_client.open_sftp()
+            sftp_ref[0] = sftp
             try:
                 try:
                     total = sftp.stat(remote).st_size or 1
@@ -3190,12 +3369,25 @@ class SftpPanel(QWidget):
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
                 sftp.get(remote, tmp_path, callback=cb)
             finally:
-                sftp.close()
+                sftp_ref[0] = None
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
             self._open_local.emit(tmp_path)
             size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
             self._watch_file_sig.emit(tmp_path, remote, size)
 
+        def hard_cancel():
+            s = sftp_ref[0]
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
         w = _SimpleWorker(do_open)
+        w.set_cancel_hook(hard_cancel)
         worker_ref[0] = w
         self._active_transfer_worker = w
         w.progress.connect(self._progress.setValue)
@@ -3224,10 +3416,12 @@ class SftpPanel(QWidget):
         self._btn_cancel.setVisible(True)
 
         worker_ref = [None]
+        sftp_ref = [None]
 
         def do_download():
             with lock:
                 sftp = ssh_client.open_sftp()
+            sftp_ref[0] = sftp
             try:
                 try:
                     total = sftp.stat(remote).st_size or 1
@@ -3239,7 +3433,19 @@ class SftpPanel(QWidget):
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
                 sftp.get(remote, tmp_path, callback=cb)
             finally:
-                sftp.close()
+                sftp_ref[0] = None
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        def hard_cancel():
+            s = sftp_ref[0]
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
         def on_done():
             self._transfer_finished_cleanup()
@@ -3254,6 +3460,7 @@ class SftpPanel(QWidget):
             self._watch_file_sig.emit(tmp_path, remote, size)
 
         w = _SimpleWorker(do_download)
+        w.set_cancel_hook(hard_cancel)
         worker_ref[0] = w
         self._active_transfer_worker = w
         w.progress.connect(self._progress.setValue)
@@ -3427,10 +3634,12 @@ class SftpPanel(QWidget):
         self._btn_cancel.setVisible(True)
 
         worker_ref = [None]
+        sftp_ref = [None]
 
         def do_upload():
             with lock:
                 sftp = ssh_client.open_sftp()
+            sftp_ref[0] = sftp
             try:
                 def cb(done, t):
                     if worker_ref[0]._cancel:
@@ -3438,7 +3647,19 @@ class SftpPanel(QWidget):
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
                 sftp.put(local, remote, callback=cb)
             finally:
-                sftp.close()
+                sftp_ref[0] = None
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        def hard_cancel():
+            s = sftp_ref[0]
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
         def on_done(_=None):
             self._upload_active.discard(local)
@@ -3457,6 +3678,7 @@ class SftpPanel(QWidget):
             self.status_msg.emit(f"Błąd zapisu: {e}", True)
 
         w = _SimpleWorker(do_upload)
+        w.set_cancel_hook(hard_cancel)
         worker_ref[0] = w
         self._active_transfer_worker = w
         w.progress.connect(self._progress.setValue)

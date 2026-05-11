@@ -8,13 +8,14 @@ from PyQt6.QtWidgets import (
     QSplitter, QMessageBox, QFileDialog, QMenu,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QActionGroup
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
 from config import (save_last_vault,
-                    load_ssh_start_maximized, save_ssh_start_maximized)
+                    load_ssh_start_maximized, save_ssh_start_maximized,
+                    load_hospital_sort_order, save_hospital_sort_order)
 from ui.detail_panel import DetailPanel
 from ui.vpn_panel import VpnPanel
 from ui.dialogs import (
@@ -49,6 +50,8 @@ class MainWindow(QMainWindow):
         self._search_edit = None
         self._admin_btn = None
         self._vpn_panel = None
+        self._sort_order = load_hospital_sort_order()
+        self._sort_actions = {}
 
         self._admin_lock_timer = QTimer(self)
         self._admin_lock_timer.setSingleShot(True)
@@ -208,6 +211,23 @@ class MainWindow(QMainWindow):
             act_sort_name.triggered.connect(lambda: self._vpn_panel._sort_profiles("name"))
             act_sort_prov = sort_menu.addAction("Wg providera")
             act_sort_prov.triggered.connect(lambda: self._vpn_panel._sort_profiles("provider"))
+        elif self._vault_type != "vpn":
+            sort_menu = menu.addMenu("Sortuj")
+            group = QActionGroup(self)
+            group.setExclusive(True)
+
+            options = [
+                ("none", "Bez sortowania (kolejność z vaulta)"),
+                ("asc", "Wg nazwy (A-Z)"),
+                ("desc", "Wg nazwy (Z-A)"),
+            ]
+            for key, label in options:
+                act = sort_menu.addAction(label)
+                act.setCheckable(True)
+                act.setChecked(self._sort_order == key)
+                group.addAction(act)
+                act.triggered.connect(lambda _checked, k=key: self._set_sort_order(k))
+                self._sort_actions[key] = act
 
     def _close_to_tray(self):
         """Hide window to system tray."""
@@ -237,7 +257,12 @@ class MainWindow(QMainWindow):
 
     def _filtered_hospitals(self) -> list:
         text = self._search_edit.text().lower()
-        return [h for h in self._hospitals if text in h.name.lower()]
+        result = [h for h in self._hospitals if text in h.name.lower()]
+        if self._sort_order == "asc":
+            result.sort(key=lambda h: h.name.casefold())
+        elif self._sort_order == "desc":
+            result.sort(key=lambda h: h.name.casefold(), reverse=True)
+        return result
 
     def _refresh_hospital_list(self):
         current_id = (
@@ -270,6 +295,16 @@ class MainWindow(QMainWindow):
             self._detail_panel.show_hospital(None, None)
 
     def _on_search_changed(self, _text: str):
+        self._refresh_hospital_list()
+
+    def _set_sort_order(self, order: str):
+        if order == self._sort_order:
+            return
+        self._sort_order = order
+        save_hospital_sort_order(order)
+        act = self._sort_actions.get(order)
+        if act and not act.isChecked():
+            act.setChecked(True)
         self._refresh_hospital_list()
 
     def _on_hospital_selected(self, row: int):

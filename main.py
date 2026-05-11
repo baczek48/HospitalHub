@@ -5,9 +5,64 @@ import shutil
 import sys
 import os
 import tempfile
+import traceback
+from datetime import datetime
+from pathlib import Path
 
 # Ensure vault_app directory is on the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _crash_log_path() -> Path:
+    base = os.environ.get("APPDATA") or str(Path.home())
+    d = Path(base) / "HospitalHub"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d / "crash.log"
+
+
+def _install_excepthook():
+    """Replace PyQt6's default excepthook so an uncaught exception in a slot
+    no longer aborts the process (PyQt6 ≥6.4 calls qFatal). We log the full
+    traceback and show a non-blocking dialog instead — so a single AttributeError
+    in a UI handler can't kill the app while the user has unsaved data."""
+    log_path = _crash_log_path()
+
+    def _hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            pass
+        try:
+            traceback.print_exception(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+        try:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            if QApplication.instance() is not None:
+                short = "".join(
+                    traceback.format_exception_only(exc_type, exc_value)
+                ).strip()
+                box = QMessageBox()
+                box.setWindowTitle("Błąd aplikacji")
+                box.setIcon(QMessageBox.Icon.Warning)
+                box.setText("Wystąpił nieoczekiwany błąd. Aplikacja kontynuuje pracę.")
+                box.setInformativeText(f"{short}\n\nSzczegóły zapisano w:\n{log_path}")
+                box.exec()
+        except Exception:
+            pass
+
+    sys.excepthook = _hook
+
+
+_install_excepthook()
 
 
 def _cleanup_sftp_temp():

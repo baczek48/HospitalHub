@@ -147,6 +147,22 @@ def save_ssh_start_maximized(enabled: bool) -> None:
     _save_all(data)
 
 
+def load_hospital_sort_order() -> str:
+    """Returns sort order for hospital list: 'none', 'asc' or 'desc'."""
+    order = _load_all().get("hospital_sort_order", "none")
+    if order not in ("none", "asc", "desc"):
+        return "none"
+    return order
+
+
+def save_hospital_sort_order(order: str) -> None:
+    if order not in ("none", "asc", "desc"):
+        order = "none"
+    data = _load_all()
+    data["hospital_sort_order"] = order
+    _save_all(data)
+
+
 def load_personal_vpn_vault() -> str | None:
     """Returns path to user's personal VPN vault, or None if not set."""
     path = _load_all().get("personal_vpn_vault")

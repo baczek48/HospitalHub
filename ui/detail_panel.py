@@ -5,9 +5,12 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QTextEdit, QGroupBox, QFrame, QScrollArea, QMessageBox, QApplication,
     QSplitter, QMenu, QDialog, QDialogButtonBox, QFileDialog, QLineEdit,
+    QStyledItemDelegate, QStyle, QGraphicsColorizeEffect,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent, QSize
-from PyQt6.QtGui import QFont, QBrush, QColor, QIcon, QPixmap, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import (Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent,
+                           QSize, QPropertyAnimation, QEasingCurve)
+from PyQt6.QtGui import (QFont, QBrush, QColor, QIcon, QPixmap, QPainter,
+                          QPainterPath, QPen, QPalette)
 
 
 def _make_db_connect_icon(size: int = 24) -> QIcon:
@@ -151,6 +154,87 @@ _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
 _DB_AKCJE_WIDTH = 252
 
 
+def _pulse_copy_button(btn: QPushButton) -> None:
+    """Soft green pulse: brief tint that quickly rises and slowly fades back
+    to zero. Uses a single QGraphicsColorizeEffect reused across clicks so
+    rapid re-clicks just restart the animation instead of stacking effects."""
+    effect = btn.graphicsEffect()
+    if not isinstance(effect, QGraphicsColorizeEffect):
+        effect = QGraphicsColorizeEffect(btn)
+        effect.setColor(QColor("#3fb950"))  # GitHub-success green
+        effect.setStrength(0.0)
+        btn.setGraphicsEffect(effect)
+
+    prev = getattr(btn, "_copy_pulse_anim", None)
+    if prev is not None:
+        prev.stop()
+
+    anim = QPropertyAnimation(effect, b"strength", btn)
+    anim.setDuration(380)
+    anim.setStartValue(0.0)
+    anim.setKeyValueAt(0.18, 0.45)   # quick rise
+    anim.setKeyValueAt(0.45, 0.25)   # held briefly
+    anim.setEndValue(0.0)            # gentle fade-out
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.start()
+    btn._copy_pulse_anim = anim
+
+
+class _NoSelectionDelegate(QStyledItemDelegate):
+    """Render cells as if never selected/focused. Selection still happens
+    internally so drag-and-drop reorder keeps working — only the visual
+    'whole row goes blue' from QPalette::Highlight is suppressed."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.state &= ~QStyle.StateFlag.State_Selected
+        option.state &= ~QStyle.StateFlag.State_HasFocus
+
+
+class _TruncationTooltipFilter(QObject):
+    """Show a tooltip with full cell content only when the rendered text is
+    actually being elided — i.e. the user can see ellipsis. We ask Qt for the
+    elided form (same routine the delegate uses to draw) and compare; if the
+    elided string differs from the source, the cell is cut off."""
+
+    # Stylesheet "padding: 2px 4px" + the delegate's focus-frame text margin
+    # (~3px each side). Subtracted from the cell rect to get the actual text
+    # area the painter draws into.
+    _PADDING = 14
+
+    def __init__(self, table: QTableWidget):
+        super().__init__(table)
+        self._table = table
+        table.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtWidgets import QToolTip
+        if event.type() == QEvent.Type.ToolTip and obj is self._table.viewport():
+            idx = self._table.indexAt(event.pos())
+            if not idx.isValid():
+                QToolTip.hideText()
+                return True
+            item = self._table.item(idx.row(), idx.column())
+            if item is None or not item.text():
+                QToolTip.hideText()
+                return True
+            text = item.text()
+            rect = self._table.visualRect(idx)
+            available = rect.width() - self._PADDING
+            if available <= 0:
+                QToolTip.hideText()
+                return True
+            fm = self._table.fontMetrics()
+            longest = max(text.split('\n'), key=len) if '\n' in text else text
+            if fm.elidedText(longest, Qt.TextElideMode.ElideRight, available) != longest:
+                QToolTip.showText(event.globalPos(), text,
+                                  self._table.viewport(), rect)
+            else:
+                QToolTip.hideText()
+            return True
+        return False
+
+
 def _setup_table_columns(
     table: QTableWidget,
     key: str,
@@ -188,6 +272,20 @@ def _setup_table_columns(
         hh,
         lambda: save_column_widths(key, [table.columnWidth(c) for c in interactive_cols]),
     )
+    table._truncation_tooltip_filter = _TruncationTooltipFilter(table)
+
+    delegate = _NoSelectionDelegate(table)
+    table.setItemDelegate(delegate)
+    table._no_selection_delegate = delegate
+
+    # Suppress the row-wide blue paint from QPalette.Highlight that QTableView
+    # draws under cells without items (the "Akcje" cell-widget column). Only
+    # this widget's palette is touched — QApplication palette stays intact, so
+    # nothing else in the app changes colour.
+    pal = table.palette()
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#e6edf3"))
+    table.setPalette(pal)
 
 
 class _VpnUnlockDialog(QDialog):
@@ -599,13 +697,38 @@ class DetailPanel(QWidget):
     # ------------------------------------------------------------------ #
 
     def _flash_cell(self, table: QTableWidget, row: int, col: int) -> None:
-        """Brief press-feedback: dim the cell for 130 ms, then restore."""
+        """Press-and-spring-back feedback. Cell briefly recesses: darker bg
+        plus the text shrinks ~0.7pt; then the bg fades through a midpoint
+        and the font springs back to its original size. Two-stage timing
+        (~140 ms total) gives a soft physical-press feel rather than a flat
+        on/off colour blink."""
         item = table.item(row, col)
         if not item:
             return
-        item.setBackground(QBrush(QColor("#1e3a52")))
-        orig = QColor("#1c2128") if row % 2 else QColor("#161b22")
-        QTimer.singleShot(60, lambda: item.setBackground(QBrush(orig)))
+
+        orig_bg = QColor("#1c2128") if row % 2 else QColor("#161b22")
+        pressed_bg = QColor("#0a0c10")
+        half_bg = QColor("#13171c")  # mid-fade to soften the bg release
+
+        base_font = item.font()
+        if base_font.pointSize() <= 0 and base_font.pixelSize() <= 0:
+            base_font = QFont(table.font())
+        pressed_font = QFont(base_font)
+        if base_font.pointSizeF() > 0:
+            pressed_font.setPointSizeF(max(base_font.pointSizeF() - 0.7, 6.0))
+        elif base_font.pixelSize() > 0:
+            pressed_font.setPixelSize(max(base_font.pixelSize() - 1, 8))
+
+        item.setBackground(QBrush(pressed_bg))
+        item.setFont(pressed_font)
+
+        QTimer.singleShot(70, lambda: item.setBackground(QBrush(half_bg)))
+
+        def _restore():
+            item.setBackground(QBrush(orig_bg))
+            item.setFont(base_font)
+
+        QTimer.singleShot(140, _restore)
 
     def _on_machine_cell_clicked(self, row: int, col: int):
         self._machines_table.clearSelection()
@@ -695,13 +818,11 @@ class DetailPanel(QWidget):
             self._machines_table.insertRow(i)
 
             ip_item = QTableWidgetItem(machine.ip)
-            ip_item.setToolTip("Kliknij aby skopiować")
-            ip_item.setForeground(self._machines_table.palette().highlight().color())
+            ip_item.setForeground(QBrush(QColor(0, 120, 215)))
             self._machines_table.setItem(i, 0, ip_item)
 
             for col, text in [(1, machine.name), (2, machine.description)]:
                 item = QTableWidgetItem(text)
-                item.setToolTip("Kliknij aby skopiować")
                 if machine.admin_only:
                     item.setForeground(QBrush(QColor("#c084fc")))
                 self._machines_table.setItem(i, col, item)
@@ -745,7 +866,9 @@ class DetailPanel(QWidget):
         btn_login.setStyleSheet(_cred_btn_style)
         if first_cred:
             btn_login.clicked.connect(
-                lambda _, c=first_cred: _clipboard_copy(c.password)
+                lambda _, c=first_cred, b=btn_login: (
+                    _clipboard_copy(c.password), _pulse_copy_button(b)
+                )
             )
         row.addWidget(btn_login)
 
@@ -822,7 +945,6 @@ class DetailPanel(QWidget):
             texts = [db.host, db.port, db.name, db.db_type, db.note]
             for col, text in enumerate(texts):
                 item = QTableWidgetItem(text)
-                item.setToolTip("Kliknij aby skopiować")
                 if db.admin_only:
                     item.setForeground(QBrush(QColor("#c084fc")))
                 self._db_table.setItem(i, col, item)
@@ -861,7 +983,9 @@ class DetailPanel(QWidget):
         btn_login.setStyleSheet(_cred_btn_style)
         if first_db_cred:
             btn_login.clicked.connect(
-                lambda _, c=first_db_cred: _clipboard_copy(c.password)
+                lambda _, c=first_db_cred, b=btn_login: (
+                    _clipboard_copy(c.password), _pulse_copy_button(b)
+                )
             )
         row.addWidget(btn_login)
 
