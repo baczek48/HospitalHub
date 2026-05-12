@@ -6,14 +6,6 @@ Narzędzie do zarządzania infrastrukturą IT szpitali. Przechowuje dane połąc
 
 ---
 
-## Pobieranie
-
-Gotowy plik exe (bez instalacji, bez Pythona) w zakładce [**Releases**](https://github.com/baczek48/HospitalHub/releases).
-
-> **Windows SmartScreen** może zapytać przy pierwszym uruchomieniu — kliknij **Więcej informacji → Uruchom mimo to**. Przy kolejnych uruchomieniach nie pyta.
-
----
-
 ## Funkcje
 
 ### Zaszyfrowany vault
