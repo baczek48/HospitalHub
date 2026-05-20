@@ -192,13 +192,18 @@ from PyQt6.QtWidgets import (
     QFileDialog, QProgressBar, QMenu, QInputDialog, QMessageBox,
     QLineEdit, QTabWidget, QStackedWidget, QScrollArea,
     QCheckBox, QGroupBox, QGridLayout, QFrame, QFormLayout, QSizePolicy,
-    QScrollBar, QToolButton,
+    QScrollBar, QToolButton, QToolTip,
 )
-from PyQt6.QtCore import Qt, QThread, QTimer, QSize, QEvent, pyqtSignal, QMimeData, QUrl
+from PyQt6.QtCore import (
+    Qt, QThread, QTimer, QSize, QEvent, pyqtSignal, QMimeData, QUrl,
+    QBuffer, QByteArray, QIODevice,
+)
 from PyQt6.QtGui import (
     QFont, QFontInfo, QFontMetricsF, QColor, QPainter, QKeySequence,
-    QDesktopServices, QIcon, QPixmap, QPen, QBrush, QPainterPath,
+    QDesktopServices, QIcon, QPixmap, QPen, QBrush, QPainterPath, QDrag,
 )
+
+from html import escape as _esc
 
 from ui.rdp import connect_rdp as _connect_rdp
 
@@ -841,7 +846,21 @@ class TerminalWidget(QWidget):
     def feed(self, data: str):
         self._pending_data.append(data)
         if not self._coalesce_timer.isActive():
+            # Hidden tabs: throttle pyte parse to ~4 Hz instead of 120 Hz.
+            # Without this, a heavy stream on a background tab (e.g. docker
+            # logs -f) keeps eating UI-thread CPU on pyte feed and starves
+            # keystroke handling on the *visible* tab. Repaint already short-
+            # circuits for hidden widgets, but parse does not.
+            self._coalesce_timer.setInterval(8 if self.isVisible() else 250)
             self._coalesce_timer.start()
+
+    def flush_now(self):
+        """Process any buffered chunks immediately (used when a hidden tab
+        becomes visible so the user sees fresh content right away)."""
+        if self._coalesce_timer.isActive():
+            self._coalesce_timer.stop()
+        if self._pending_data:
+            self._flush_pending()
 
     def pending_chunks(self) -> int:
         """How many received chunks are queued for pyte parsing.
@@ -1321,7 +1340,12 @@ class TerminalWidget(QWidget):
                 self._screen.resize(new_rows, new_cols)
             self._cols = new_cols
             self._rows = new_rows
-            self._scroll_offset = 0
+            # Keep the user's scroll position when they resize (e.g. drag the
+            # SFTP/terminal splitter while reading logs). Clamp to new history
+            # length — pyte.resize may have shifted the buffer.
+            if self._scroll_offset and self._screen:
+                self._scroll_offset = min(self._scroll_offset,
+                                          len(self._screen.history.top))
             self._hist_cache    = None
             self._pending_resize = None
             self.resize_pty.emit(new_cols, new_rows)
@@ -2506,6 +2530,144 @@ def _icon_for_entry(name: str, is_dir: bool) -> QIcon:
 
 # ──────────────────────────────────────── SFTP panel ─────────────────────────
 
+
+class _SftpFileTable(QTableWidget):
+    """QTableWidget with internal drag-and-drop so users can move files between
+    folders by dragging a row onto a folder row.
+
+    External drops (files from Explorer) bubble up to SftpPanel.dropEvent for
+    upload — we only accept our own mime type here and ignore everything else.
+    """
+
+    sftp_move = pyqtSignal(list, str)  # source names, destination folder name
+    _MIME = 'application/x-hh-sftp-paths'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        # Use DragOnly for outgoing + override dropEvent for incoming, so we
+        # don't get Qt's default in-table reordering behaviour (which would
+        # try to rewrite cell text on drop).
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._drag_start_pos = None
+        self._drop_target_row = -1
+
+    # ── Drag start ────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if (self._drag_start_pos is None
+                or not (e.buttons() & Qt.MouseButton.LeftButton)):
+            return super().mouseMoveEvent(e)
+        dist = (e.position().toPoint() - self._drag_start_pos).manhattanLength()
+        if dist < QApplication.startDragDistance():
+            return super().mouseMoveEvent(e)
+        # Collect distinct names from selected rows (skip the .. entry).
+        names: list[str] = []
+        seen = set()
+        for it in self.selectedItems():
+            if it.column() != 0:
+                continue
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+            name = data[0]
+            if name in seen or name == '..':
+                continue
+            seen.add(name)
+            names.append(name)
+        self._drag_start_pos = None
+        if not names:
+            return
+        mime = QMimeData()
+        mime.setData(self._MIME, '\n'.join(names).encode('utf-8'))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    # ── Drop highlighting ─────────────────────────────────────────────────
+
+    def _set_drop_target(self, row: int):
+        if row == self._drop_target_row:
+            return
+        highlight = QBrush(QColor('#1a3050'))
+        clear = QBrush()
+        if self._drop_target_row >= 0:
+            for col in range(self.columnCount()):
+                cell = self.item(self._drop_target_row, col)
+                if cell:
+                    cell.setBackground(clear)
+        if row >= 0:
+            for col in range(self.columnCount()):
+                cell = self.item(row, col)
+                if cell:
+                    cell.setBackground(highlight)
+        self._drop_target_row = row
+
+    # ── Drop acceptance ───────────────────────────────────────────────────
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(self._MIME):
+            e.acceptProposedAction()
+        else:
+            e.ignore()   # let SftpPanel handle external file drops
+
+    def dragMoveEvent(self, e):
+        if not e.mimeData().hasFormat(self._MIME):
+            e.ignore()
+            return
+        row = self.indexAt(e.position().toPoint()).row()
+        target_ok = False
+        if row >= 0:
+            it = self.item(row, 0)
+            if it:
+                data = it.data(Qt.ItemDataRole.UserRole)
+                if data and data[1]:   # is_dir
+                    src = (e.mimeData().data(self._MIME)
+                           .data().decode('utf-8').split('\n'))
+                    if data[0] not in src:
+                        target_ok = True
+        self._set_drop_target(row if target_ok else -1)
+        if target_ok:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self._set_drop_target(-1)
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        if not e.mimeData().hasFormat(self._MIME):
+            e.ignore()
+            return
+        row = self.indexAt(e.position().toPoint()).row()
+        self._set_drop_target(-1)
+        if row < 0:
+            e.ignore()
+            return
+        it = self.item(row, 0)
+        data = it.data(Qt.ItemDataRole.UserRole) if it else None
+        if not data or not data[1]:
+            e.ignore()
+            return
+        target = data[0]
+        src = (e.mimeData().data(self._MIME)
+               .data().decode('utf-8').split('\n'))
+        src = [n for n in src if n and n != target]
+        if not src:
+            e.ignore()
+            return
+        self.sftp_move.emit(src, target)
+        e.acceptProposedAction()
+
+
 class SftpPanel(QWidget):
     status_msg    = pyqtSignal(str, bool)   # text, is_error
     upload_file   = pyqtSignal(str)         # local path
@@ -2524,6 +2686,14 @@ class SftpPanel(QWidget):
         self._listing_active = False   # guard against concurrent listdir_attr
         self._rename_editor: QLineEdit | None = None
         self._rename_editor_data: dict | None = None
+        # Re-entry guard: when the conflict dialog opens it steals focus from
+        # the inline editor, which would otherwise fire FocusOut → close →
+        # the editor disappears mid-dialog and a second commit on the click
+        # that dismissed the dialog raised the warning a second time.
+        self._in_conflict_dialog = False
+        # When a rename triggers a re-list, hold (h_scroll, v_scroll) here so
+        # _on_listing can restore the view to where the user was looking.
+        self._preserve_scroll_on_next_list: tuple[int, int] | None = None
         self._transfer_queue: list = []
         self._transfer_total_count = 0
         self._transfer_done_count = 0
@@ -2563,7 +2733,8 @@ class SftpPanel(QWidget):
         self._btn_up  = self._nav_btn("↑", "Katalog wyżej", self._go_up)
         self._btn_home = self._nav_btn("⌂", "Katalog /", lambda: self._list('/'))
         self._btn_ref  = self._nav_btn("↻", "Odśwież", lambda: self._list(self._path))
-        for b in (self._btn_up, self._btn_home, self._btn_ref):
+        self._btn_mkdir = self._nav_btn("➕", "Nowy folder", self._mkdir_dialog)
+        for b in (self._btn_up, self._btn_home, self._btn_ref, self._btn_mkdir):
             b.setEnabled(False)
             nav.addWidget(b)
 
@@ -2616,7 +2787,8 @@ class SftpPanel(QWidget):
         root.addLayout(nav)
 
         # File table
-        self._table = QTableWidget(0, 4)
+        self._table = _SftpFileTable(0, 4)
+        self._table.sftp_move.connect(self._handle_drag_move)
         self._table.setHorizontalHeaderLabels(["Nazwa", "Rozmiar", "Zmodyfikowano", "Uprawnienia"])
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -2729,7 +2901,6 @@ class SftpPanel(QWidget):
         self._btn_ul.clicked.connect(self._upload_browse)
 
         self._progress = QProgressBar()
-        self._progress.setVisible(False)
         self._progress.setFixedHeight(16)
         self._progress.setTextVisible(True)
         self._progress.setFormat("%p%")
@@ -2738,9 +2909,15 @@ class SftpPanel(QWidget):
             "QProgressBar{border:none;background:#21262d;border-radius:3px;"
             "color:#c9d1d9;font-size:10px;}"
             "QProgressBar::chunk{background:#1f6feb;border-radius:3px;}")
+        # Reserve the space in the layout even while the bar is hidden — opening
+        # a remote file briefly shows/hides this row, which used to make the
+        # whole SFTP panel reflow (the visible-grow-and-shrink the user saw).
+        _sp = self._progress.sizePolicy()
+        _sp.setRetainSizeWhenHidden(True)
+        self._progress.setSizePolicy(_sp)
+        self._progress.setVisible(False)
 
         self._btn_cancel = QPushButton("✕")
-        self._btn_cancel.setVisible(False)
         self._btn_cancel.setFixedSize(20, 20)
         self._btn_cancel.setToolTip("Anuluj transfer")
         self._btn_cancel.setStyleSheet(
@@ -2748,6 +2925,10 @@ class SftpPanel(QWidget):
             "border:1px solid #5a2d2d;border-radius:4px;"
             "font-size:11px;font-weight:bold;padding:0;}"
             "QPushButton:hover{background:#5a2d2d;border-color:#f85149;}")
+        _sp = self._btn_cancel.sizePolicy()
+        _sp.setRetainSizeWhenHidden(True)
+        self._btn_cancel.setSizePolicy(_sp)
+        self._btn_cancel.setVisible(False)
         self._btn_cancel.clicked.connect(self._cancel_transfer)
         self._active_transfer_worker = None
 
@@ -2868,14 +3049,22 @@ class SftpPanel(QWidget):
         # Bulk-fill the table: pre-allocate row count and freeze repaints
         # so 500-row listings don't trigger a layout pass per cell.
         # Sorting is already disabled by _list() before the worker starts.
+        # Prepend ".." entry so the user can click their way up — same UX as
+        # WinSCP/FileZilla. `_DirFirstItem` already pins ".." to the top of any
+        # sort order, but we still need to actually inject the row.
+        show_parent = path not in ('', '/')
+        rows = entries[:]
+        if show_parent:
+            rows.insert(0, ('..', True, 0, '', ''))
+
         table = self._table
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         try:
             table.clearContents()
-            table.setRowCount(len(entries))
+            table.setRowCount(len(rows))
 
-            for i, (name, is_dir, size, mtime, perms) in enumerate(entries):
+            for i, (name, is_dir, size, mtime, perms) in enumerate(rows):
                 # Col 0: name with file-type icon (dirs-first sort)
                 ni = _DirFirstItem(name)
                 ni.setIcon(_icon_for_entry(name, is_dir))
@@ -2906,6 +3095,20 @@ class SftpPanel(QWidget):
         table.setSortingEnabled(True)
         self._btn_dl.setEnabled(False)
 
+        # If this re-list was triggered by a rename, put the viewport back
+        # where the user was — Qt otherwise scrolls horizontally to the
+        # re-sorted/refocused row.
+        preserve = self._preserve_scroll_on_next_list
+        if preserve is not None:
+            self._preserve_scroll_on_next_list = None
+            h_pos, v_pos = preserve
+            def _restore_scroll():
+                table.horizontalScrollBar().setValue(h_pos)
+                table.verticalScrollBar().setValue(v_pos)
+            # Defer one tick — Qt is still finalizing layout/scroll after
+            # setSortingEnabled(True).
+            QTimer.singleShot(0, _restore_scroll)
+
     def eventFilter(self, obj, event):
         # Path edit: Escape cancels, FocusOut returns to label
         if obj is self._path_edit:
@@ -2915,9 +3118,6 @@ class SftpPanel(QWidget):
             if event.type() == QEvent.Type.FocusOut:
                 self._end_path_edit()
         if obj == self._table.viewport() and event.type() == QEvent.Type.ToolTip:
-            from PyQt6.QtWidgets import QToolTip
-            from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
-            from html import escape as _esc
             idx = self._table.indexAt(event.pos())
             if idx.isValid():
                 row = idx.row()
@@ -2962,8 +3162,11 @@ class SftpPanel(QWidget):
             self._click_was_selected = (
                 idx.isValid() and self._table.selectionModel().isSelected(idx)
             )
-            if self._rename_editor:
-                self._commit_rename()
+            if self._rename_editor and not self._in_conflict_dialog:
+                # Click anywhere else inside the table viewport cancels the
+                # in-place rename — matches Explorer/Finder behaviour. Avoids
+                # the warning dialog firing as a side effect of clicking away.
+                self._close_rename_editor()
         if obj is self._rename_editor:
             if event.type() == QEvent.Type.KeyPress:
                 if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -2973,12 +3176,23 @@ class SftpPanel(QWidget):
                     self._close_rename_editor()
                     return True
             elif event.type() == QEvent.Type.FocusOut:
-                self._commit_rename()
+                # Focus left the field (clicked outside, switched windows).
+                # Treat that as cancel — only Enter commits. The
+                # _in_conflict_dialog flag keeps us from closing the editor
+                # while the warning dialog is briefly stealing focus.
+                if not self._in_conflict_dialog:
+                    self._close_rename_editor()
         return False
 
     def _on_item_clicked(self, item):
         row_item = self._table.item(item.row(), 0)
         if not row_item or not row_item.data(Qt.ItemDataRole.UserRole):
+            return
+        name, _, _ = row_item.data(Qt.ItemDataRole.UserRole)
+        if name == '..':
+            # ".." is a navigation shortcut, not a real file — never rename it.
+            self._rename_timer.stop()
+            self._pending_rename_item = None
             return
         if self._click_was_selected:
             self._pending_rename_item = row_item
@@ -2996,6 +3210,13 @@ class SftpPanel(QWidget):
         # Close any existing rename editor first
         self._close_rename_editor()
         name, is_dir, size = item.data(Qt.ItemDataRole.UserRole)
+        # Snapshot scroll BEFORE moving current cell / placing the editor —
+        # Qt auto-scrolls to keep the current item / focused child visible,
+        # which nudges the horizontal scrollbar a few pixels right every time
+        # the user enters rename mode.
+        hbar = self._table.horizontalScrollBar()
+        vbar = self._table.verticalScrollBar()
+        h_pos, v_pos = hbar.value(), vbar.value()
         # Position overlay QLineEdit exactly over the cell — no delegate, no crashes
         rect = self._table.visualItemRect(item)
         ed = QLineEdit(self._table.viewport())
@@ -3010,6 +3231,8 @@ class SftpPanel(QWidget):
         ed.show()
         ed.setFocus()
         ed.installEventFilter(self)
+        hbar.setValue(h_pos)
+        vbar.setValue(v_pos)
         self._rename_editor      = ed
         self._rename_editor_data = {'item': item, 'name': name,
                                     'is_dir': is_dir, 'size': size}
@@ -3020,27 +3243,141 @@ class SftpPanel(QWidget):
         if not ed or not data:
             return
         new_name = ed.text().strip()
-        self._close_rename_editor()
         item     = data['item']
         original = data['name']
         is_dir   = data['is_dir']
         size     = data['size']
         if not new_name or new_name == original:
+            self._close_rename_editor()
             return
+        # Pre-check name collision (case-sensitive — POSIX SFTP servers are too).
+        # The previous code optimistically renamed the row in the table and only
+        # discovered the conflict on the SFTP error, leaving the wrong label
+        # visible until the next directory refresh.
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, 0)
+            if not it or it is item:
+                continue
+            ex_name, _, _ = it.data(Qt.ItemDataRole.UserRole)
+            if ex_name == new_name:
+                self._in_conflict_dialog = True
+                try:
+                    QMessageBox.warning(
+                        self, "Zmiana nazwy",
+                        f"Plik lub folder o nazwie '{new_name}' już istnieje "
+                        f"w tym katalogu.\n\nWybierz inną nazwę.",
+                    )
+                finally:
+                    self._in_conflict_dialog = False
+                if self._rename_editor is ed:
+                    ed.setFocus()
+                    ed.selectAll()
+                return
+        # Snapshot scroll BEFORE closing the editor — focus moving back from
+        # the QLineEdit to the table triggers Qt's "scroll to current cell"
+        # behaviour. If the current column is e.g. "Rozmiar" (because the
+        # user clicked that header to sort), the horizontal bar jumps right.
+        hbar = self._table.horizontalScrollBar()
+        vbar = self._table.verticalScrollBar()
+        h_pos, v_pos = hbar.value(), vbar.value()
+        # Disable sorting while we mutate the row — setText with sorting on
+        # re-sorts the table, which scrolls to the moved current cell.
+        sort_was_on = self._table.isSortingEnabled()
+        self._table.setSortingEnabled(False)
+        self._close_rename_editor()
         self._table.blockSignals(True)
         item.setText(new_name)
         item.setIcon(_icon_for_entry(new_name, is_dir))
         item.setData(Qt.ItemDataRole.UserRole, (new_name, is_dir, size))
         self._table.blockSignals(False)
+        if sort_was_on:
+            self._table.setSortingEnabled(True)
+        hbar.setValue(h_pos)
+        vbar.setValue(v_pos)
+        # Defer one tick: focus moves and any pending ensureVisible() fire on
+        # the next event-loop pass — pin the scrollbar back then too.
+        QTimer.singleShot(0, lambda: (hbar.setValue(h_pos), vbar.setValue(v_pos)))
         old_remote = self._path.rstrip('/') + '/' + original
         new_remote = self._path.rstrip('/') + '/' + new_name
+        # Mark the next listing so _on_listing restores the same scroll.
+        self._preserve_scroll_on_next_list = (h_pos, v_pos)
 
         def do_rename():
             self._sftp.rename(old_remote, new_remote)
 
+        def on_error(e):
+            self.status_msg.emit(f"Zmiana nazwy: {e}", True)
+            # Re-list to revert the optimistic in-place update — the server
+            # rejected the rename, so the old name is still authoritative.
+            self._list(self._path)
+
         w = _SimpleWorker(do_rename)
         w.done.connect(lambda: self._list(self._path))
-        w.error.connect(lambda e: self.status_msg.emit(f"Zmiana nazwy: {e}", True))
+        w.error.connect(on_error)
+        w.start()
+        self._workers.append(w)
+
+    def _handle_drag_move(self, src_names: list, target_folder: str):
+        """Move dragged entries into `target_folder` (relative to current dir)."""
+        if not self._sftp or self._listing_active or not src_names:
+            return
+        base = self._path.rstrip('/')
+        if target_folder == '..':
+            parts = base.split('/')
+            target_dir = '/'.join(parts[:-1]) or '/'
+        else:
+            target_dir = (base + '/' + target_folder).rstrip('/') or '/'
+
+        moves = [((base + '/' + n) if base else '/' + n,
+                  (target_dir.rstrip('/') + '/' + n)) for n in src_names]
+
+        def do_move():
+            for old, new in moves:
+                self._sftp.rename(old, new)
+
+        def on_error(e):
+            self.status_msg.emit(f"Przenoszenie: {e}", True)
+            self._list(self._path)
+
+        w = _SimpleWorker(do_move)
+        w.done.connect(lambda: self._list(self._path))
+        w.error.connect(on_error)
+        w.start()
+        self._workers.append(w)
+
+    def _mkdir_dialog(self):
+        """Prompt for a new folder name and create it via SFTP.mkdir."""
+        if not self._sftp or self._listing_active:
+            return
+        name, ok = QInputDialog.getText(self, "Nowy folder", "Nazwa folderu:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if '/' in name or name in ('.', '..'):
+            QMessageBox.warning(self, "Nowy folder", "Nieprawidłowa nazwa folderu.")
+            return
+        for r in range(self._table.rowCount()):
+            it = self._table.item(r, 0)
+            if not it:
+                continue
+            ex_name, _, _ = it.data(Qt.ItemDataRole.UserRole)
+            if ex_name == name:
+                QMessageBox.warning(
+                    self, "Nowy folder",
+                    f"Element o nazwie '{name}' już istnieje w tym katalogu.",
+                )
+                return
+        remote = self._path.rstrip('/') + '/' + name
+
+        def do_mkdir():
+            self._sftp.mkdir(remote)
+
+        w = _SimpleWorker(do_mkdir)
+        w.done.connect(lambda: self._list(self._path))
+        w.error.connect(lambda e: self.status_msg.emit(
+            f"Tworzenie folderu: {e}", True))
         w.start()
         self._workers.append(w)
 
@@ -3062,6 +3399,9 @@ class SftpPanel(QWidget):
         if not item:
             return
         name, is_dir, _ = item.data(Qt.ItemDataRole.UserRole)
+        if name == '..':
+            self._go_up()
+            return
         if is_dir:
             parent = self._path.rstrip('/')
             self._history.append(self._path)
@@ -3107,15 +3447,25 @@ class SftpPanel(QWidget):
 
     def _context_menu(self, pos):
         item = self._table.itemAt(pos)
+        menu = QMenu(self)
         if not item:
+            # Empty area — only the directory-wide action.
+            if self._sftp:
+                menu.addAction("➕  Nowy folder", self._mkdir_dialog)
+                menu.exec(self._table.viewport().mapToGlobal(pos))
             return
         row_item = self._table.item(item.row(), 0)
         if not row_item:
             return
         name, is_dir, size = row_item.data(Qt.ItemDataRole.UserRole)
+        if name == '..':
+            # Treat ".." like an empty area — only the directory-wide action.
+            if self._sftp:
+                menu.addAction("➕  Nowy folder", self._mkdir_dialog)
+                menu.exec(self._table.viewport().mapToGlobal(pos))
+            return
         remote = self._path.rstrip('/') + '/' + name
 
-        menu = QMenu(self)
         if not is_dir:
             menu.addAction("⬇  Pobierz", self._download)
             menu.addAction("📄  Otwórz lokalnie", lambda: self._open_remote(remote, name))
@@ -3125,6 +3475,7 @@ class SftpPanel(QWidget):
         menu.addSeparator()
         menu.addAction("🔒  Uprawnienia...", lambda: self._chmod_dialog(remote, name))
         menu.addAction("✏️  Zmień nazwę", lambda ri=row_item: self._start_inline_rename(ri))
+        menu.addAction("➕  Nowy folder", self._mkdir_dialog)
         menu.addAction("🗑️  Usuń", lambda: self._delete(remote, is_dir, name))
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
@@ -3320,7 +3671,6 @@ class SftpPanel(QWidget):
         # Warn about potentially dangerous file types
         ext = os.path.splitext(name)[1].lower()
         if ext in self._DANGEROUS_EXT:
-            from PyQt6.QtWidgets import QMessageBox
             r = QMessageBox.warning(
                 self, "Ostrzeżenie",
                 f"Plik \"{name}\" ma potencjalnie niebezpieczne rozszerzenie "
@@ -3808,7 +4158,8 @@ class SftpPanel(QWidget):
         self._ssh_client  = ssh_client
         self._history     = restore_history if restore_history is not None else []
         connected = bool(sftp and ssh_client)
-        for b in (self._btn_up, self._btn_home, self._btn_ref, self._btn_ul):
+        for b in (self._btn_up, self._btn_home, self._btn_ref,
+                  self._btn_mkdir, self._btn_ul):
             b.setEnabled(connected)
         if connected:
             self._list(restore_path)
@@ -4358,11 +4709,9 @@ class _AddSessionDialog(QDialog):
 
     def _accept(self):
         if not self._ip_edit.text().strip():
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Błąd", "Podaj adres IP lub hostname.")
             return
         if not self._user_edit.text().strip():
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Błąd", "Podaj login.")
             return
         self.accept()
@@ -4430,11 +4779,9 @@ def _ensure_close_icons():
     normal = os.path.join(d, 'tab_close.png')
     hover  = os.path.join(d, 'tab_close_h.png')
     if not os.path.exists(normal) or not os.path.exists(hover):
-        from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor
-        from PyQt6.QtCore import Qt as _Qt
         for path, color in [(normal, '#8b949e'), (hover, '#e6edf3')]:
             px = QPixmap(16, 16)
-            px.fill(_Qt.GlobalColor.transparent)
+            px.fill(Qt.GlobalColor.transparent)
             p = QPainter(px)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setPen(QPen(QColor(color), 1.8))
@@ -4626,7 +4973,6 @@ class SshDialog(QDialog):
         left_tabs.addTab(self._env_panel, "🖥  Środowisko")
 
         self._left_tabs = left_tabs
-        from PyQt6.QtWidgets import QSizePolicy
         left_tabs.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         splitter.addWidget(left_tabs)
         splitter.setCollapsible(0, True)
@@ -4679,6 +5025,10 @@ class SshDialog(QDialog):
         self._tab_widget.tabCloseRequested.connect(self._close_session)
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
         self._tab_widget.tabBar().tabMoved.connect(self._on_tab_moved)
+        # Right-click on a tab → context menu with "Duplikuj" / "Zamknij".
+        tab_bar = self._tab_widget.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
         self._mode_stack.addWidget(self._tab_widget)
 
         self._grid_container = QWidget()
@@ -4992,6 +5342,65 @@ class SshDialog(QDialog):
             # Update last_tab_idx to follow the moved tab
             self._last_tab_idx = self._tab_widget.currentIndex()
 
+    def _on_tab_context_menu(self, pos):
+        """Right-click on a tab — show actions for that tab."""
+        tab_bar = self._tab_widget.tabBar()
+        idx = tab_bar.tabAt(pos)
+        if idx < 0 or idx >= len(self._sessions):
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#1a1d28; color:#e1e4eb; border:1px solid #2a2d3a;"
+            " border-radius:10px; padding:6px; }"
+            "QMenu::item { padding:8px 16px; border-radius:6px; font-size:12px; }"
+            "QMenu::item:selected { background:#4a5adf; color:#fff; }"
+            "QMenu::separator { height:1px; background:#2a2d3a; margin:4px 10px; }"
+        )
+        act_dup = menu.addAction("Duplikuj")
+        menu.addSeparator()
+        act_close = menu.addAction("Zamknij")
+        chosen = menu.exec(tab_bar.mapToGlobal(pos))
+        if chosen is act_dup:
+            self._duplicate_session(idx)
+        elif chosen is act_close:
+            self._close_session(idx)
+
+    def _duplicate_session(self, idx: int):
+        """Open a new tab using the same host/user/password/port as session `idx`.
+
+        Creates a fully independent SSH connection; the original tab is
+        untouched. Credentials are read from the source session's worker.
+        """
+        if idx < 0 or idx >= len(self._sessions):
+            return
+        if self._multiexec:
+            return
+        src = self._sessions[idx]
+        w = src.worker
+        host = getattr(w, '_host', '')
+        user = getattr(w, '_user', '')
+        pw = getattr(w, '_pw', '')
+        port = getattr(w, '_port', 22)
+        if not host:
+            return
+        # Match the original label and tag the copy so duplicated tabs
+        # don't all share an identical name.
+        base = src.label or host
+        # Strip an existing "(kopia N)" suffix when re-duplicating a copy
+        # so we don't accumulate "(kopia) (kopia) (kopia)" chains.
+        import re as _re
+        m = _re.match(r"^(.*?)\s*\(kopia(?:\s+(\d+))?\)\s*$", base)
+        root = m.group(1) if m else base
+        # Find an unused suffix
+        existing = {s.label for s in self._sessions}
+        candidate = f"{root} (kopia)"
+        n = 2
+        while candidate in existing:
+            candidate = f"{root} (kopia {n})"
+            n += 1
+        self._add_session(label=candidate, ip=host, user=user,
+                          password=pw, port=port)
+
     # Color used to mark inactive tabs that received new output.
     _UNREAD_TAB_COLOR = QColor('#1abc9c')   # morski (teal)
 
@@ -5057,6 +5466,9 @@ class SshDialog(QDialog):
             self._sftp_panel.switch_sftp(None, None)
             return
         s = self._sessions[idx]
+        # Drain anything that buffered while this tab was hidden (throttled
+        # feed in TerminalWidget) so the user sees current state immediately.
+        s.pane.term.flush_now()
         self._env_panel.set_active(s.worker._host)
         self._sftp_panel.switch_sftp(s.sftp, s.sftp_client, s.sftp_path,
                                      s.sftp_history)
@@ -5406,7 +5818,15 @@ class SshDialog(QDialog):
     def _active_session(self) -> '_Session | None':
         if self._multiexec:
             return self._sessions[0] if self._sessions else None
-        idx = self._tab_widget.currentIndex()
+        # Stats workers can fire after the SSH panel has been torn down
+        # (e.g. user closed the window before the QThread drained); the
+        # underlying QTabWidget C++ object is gone but the Python proxy
+        # is still alive in the lambda holding `self`. Guard so we don't
+        # crash with "wrapped C/C++ object … has been deleted".
+        try:
+            idx = self._tab_widget.currentIndex()
+        except RuntimeError:
+            return None
         if 0 <= idx < len(self._sessions):
             return self._sessions[idx]
         return None

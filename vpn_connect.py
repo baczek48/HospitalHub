@@ -4,7 +4,30 @@ import os
 import re
 import subprocess
 import threading
+import time
 import winreg
+
+def _validate_exe(exe):
+    """Sanity check executable path before launching. Returns (ok, error_msg)."""
+    if not exe:
+        return False, "Nie podano ścieżki do executable."
+    if not os.path.exists(exe):
+        return False, f"Plik nie istnieje: {exe}"
+    if os.path.isdir(exe):
+        return False, f"Ścieżka wskazuje na katalog, nie plik: {exe}"
+    if not os.path.isfile(exe):
+        return False, f"Ścieżka nie jest zwykłym plikiem: {exe}"
+    return True, ""
+
+
+def _wait_for_process(exe_name: str, timeout: float = 3.0) -> bool:
+    """Poll tasklist until `exe_name` is present or timeout elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_process_running(exe_name):
+            return True
+        time.sleep(0.25)
+    return False
 
 # Patterns that indicate a 2FA/OTP prompt in process stdout
 _2FA_PATTERNS = re.compile(
@@ -14,10 +37,8 @@ _2FA_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-
 def is_2fa_prompt(line: str) -> bool:
     return bool(_2FA_PATTERNS.search(line))
-
 
 def _hidden_startupinfo():
     si = subprocess.STARTUPINFO()
@@ -25,9 +46,53 @@ def _hidden_startupinfo():
     si.wShowWindow = 0
     return si
 
-
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
+def _clean_pyinstaller_env() -> dict:
+    """Return os.environ with PyInstaller bootloader vars stripped.
+    Electron apps (FortiClient) crash when inheriting _MEIPASS-tainted env —
+    their Logger fails with 'Cannot read properties of null (reading TraceLog)'.
+    Strip _MEI* / _PYI* so child processes see a clean shell-like environment."""
+    env = os.environ.copy()
+    for k in list(env.keys()):
+        if k.startswith("_MEI") or k.startswith("_PYI"):
+            env.pop(k, None)
+    return env
+
+_SHELLEXEC_ERRORS = {
+    0: "SE_ERR_OOM (out of memory)",
+    2: "ERROR_FILE_NOT_FOUND",
+    3: "ERROR_PATH_NOT_FOUND",
+    5: "ERROR_ACCESS_DENIED",
+    8: "SE_ERR_OOM (insufficient memory)",
+    11: "ERROR_BAD_FORMAT",
+    26: "SE_ERR_SHARE",
+    27: "SE_ERR_ASSOCINCOMPLETE",
+    28: "SE_ERR_DDETIMEOUT",
+    29: "SE_ERR_DDEFAIL",
+    30: "SE_ERR_DDEBUSY",
+    31: "SE_ERR_NOASSOC (no application associated)",
+    32: "SE_ERR_DLLNOTFOUND",
+}
+
+def _shell_launch(exe: str, cwd: str = "", provider: str = "") -> tuple[bool, str]:
+    """Launch an exe via ShellExecuteW 'open' — handles UAC elevation prompts
+    when the target has a requireAdministrator manifest (Stormshield SN VPN,
+    Hillstone Secure Connect). Plain subprocess.Popen fails silently with
+    ERROR_ELEVATION_REQUIRED on those when caller is non-admin."""
+    import ctypes
+    if not cwd:
+        cwd = os.path.dirname(exe) or None
+    try:
+        # ShellExecuteW returns an HINSTANCE > 32 on success
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "open", exe, None, cwd, 1)
+        if rc > 32:
+            return True, ""
+        err_name = _SHELLEXEC_ERRORS.get(rc, f"unknown rc={rc}")
+        err = f"ShellExecuteW rc={rc} ({err_name})"
+        return False, err
+    except Exception as e:
+        return False, str(e)
 
 def _find_python_exe() -> list[str]:
     """Return list of candidate python executables, best first.
@@ -57,7 +122,6 @@ def _find_python_exe() -> list[str]:
                 break
     return candidates
 
-
 def _forti_install_dir() -> str | None:
     """Return FortiClient installation directory from registry."""
     try:
@@ -73,7 +137,6 @@ def _forti_install_dir() -> str | None:
         if os.path.isdir(d):
             return d
     return None
-
 
 # ------------------------------------------------------------------ #
 # Provider paths                                                      #
@@ -114,13 +177,11 @@ _SSLVPN_LOG_PATHS = [
     r"C:\Program Files (x86)\Fortinet\FortiClient\logs\trace\sslvpndaemon_1.log",
 ]
 
-
 def find_executable(provider: str) -> str | None:
     for path in _PATHS.get(provider, []):
         if os.path.isfile(path):
             return path
     return None
-
 
 def _find_fortivpn(app_path: str = "") -> str | None:
     if app_path:
@@ -131,7 +192,6 @@ def _find_fortivpn(app_path: str = "") -> str | None:
         if os.path.isfile(path):
             return path
     return None
-
 
 def _find_forticlient_gui(app_path: str = "") -> str | None:
     """Find FortiClient.exe GUI executable."""
@@ -151,7 +211,6 @@ def _find_forticlient_gui(app_path: str = "") -> str | None:
         if os.path.isfile(path):
             return path
     return None
-
 
 # ------------------------------------------------------------------ #
 # Registry: auto-detect FortiClient tunnels                           #
@@ -197,7 +256,6 @@ def get_forti_tunnels_from_registry() -> list[dict]:
         winreg.CloseKey(key)
     return tunnels
 
-
 def is_forticlient_installed() -> bool:
     """Check if FortiClient is installed."""
     try:
@@ -207,7 +265,6 @@ def is_forticlient_installed() -> bool:
         return True
     except OSError:
         return False
-
 
 # ------------------------------------------------------------------ #
 # FortiClient edition detection                                        #
@@ -248,12 +305,15 @@ def _is_forti_free_edition() -> bool:
         pass
     return False
 
-
 _cli_supported_cache: dict[str, bool] = {}
-# Per-provider last connected profile tracking (avoids cross-provider interference)
+# Per-provider last connected profile tracking (avoids cross-provider interference).
+# _last_connected holds the legacy single string used by FortiClient and others;
+# _last_connected_meta tracks BOTH server and profile_name so that get_status() can
+# correctly light up the same logical profile in a different vault that may carry
+# only one of those fields (e.g. main vault knows the profile_name but has no server).
 _last_connected: dict[str, str] = {}  # provider -> profile_name
+_last_connected_meta: dict[str, dict] = {}  # provider -> {"server": str, "profile_name": str}
 _state_lock = threading.Lock()  # guards _last_connected, _adapter_cache, _server_ip_cache
-
 
 def _is_fortivpn_cli_supported(app_path: str = "") -> bool:
     """Check if FortiVPN.exe supports --cli flag (EMS/ZTNA editions only).
@@ -282,7 +342,6 @@ def _is_fortivpn_cli_supported(app_path: str = "") -> bool:
     _cli_supported_cache[fortivpn] = supported
     return supported
 
-
 # ------------------------------------------------------------------ #
 # Status from daemon log (works for ALL FortiClient editions)         #
 # ------------------------------------------------------------------ #
@@ -304,7 +363,6 @@ def _find_sslvpn_log() -> str | None:
             return path
     return None
 
-
 def _read_log_tail(size: int = 8192) -> str | None:
     """Read last N bytes of sslvpndaemon log."""
     log_path = _find_sslvpn_log()
@@ -319,9 +377,7 @@ def _read_log_tail(size: int = 8192) -> str | None:
     except Exception:
         return None
 
-
 _gp_log_cache: dict = {"path": None, "mtime": 0.0, "status": None}
-
 
 def _get_globalprotect_status_from_log(gp_dir: str = "") -> str | None:
     """Parse PanGPS.log tail for tunnel state. Cached by mtime."""
@@ -365,7 +421,6 @@ def _get_globalprotect_status_from_log(gp_dir: str = "") -> str | None:
     _gp_log_cache.update(path=log_path, mtime=mtime, status=status)
     return status
 
-
 def _get_status_from_log() -> str | None:
     """Parse log for VPN status. Returns 'Disconnected', 'Connecting', or None."""
     tail = _read_log_tail()
@@ -387,9 +442,7 @@ def _get_status_from_log() -> str | None:
             return "Connecting"
     return None
 
-
 _server_ip_cache: dict[str, str] = {}
-
 
 def _resolve_server(host: str) -> str:
     """Resolve hostname to IP. Cached. Returns original string on failure."""
@@ -412,13 +465,11 @@ def _resolve_server(host: str) -> str:
             _server_ip_cache[host] = host
         return host
 
-
 def _servers_match(a: str, b: str) -> bool:
     """Check if two server addresses refer to the same host (handles hostname vs IP)."""
     if a == b:
         return True
     return _resolve_server(a) == _resolve_server(b)
-
 
 def _get_last_connected_server() -> str | None:
     """Get the server IP/hostname from the last SSLVPN_REQ_CONNECT in the log.
@@ -439,7 +490,6 @@ def _get_last_connected_server() -> str | None:
             except (IndexError, KeyError):
                 pass
     return last_server
-
 
 def _get_vpn_connected_server_ip(process_name: str) -> str | None:
     """Get the remote server IP that a VPN daemon process is connected to via netstat.
@@ -478,7 +528,6 @@ def _get_vpn_connected_server_ip(process_name: str) -> str | None:
         pass
     return None
 
-
 def _has_visible_window(title_keyword: str) -> bool:
     """Return True if any *visible* top-level window's title contains keyword."""
     try:
@@ -494,7 +543,6 @@ def _has_visible_window(title_keyword: str) -> bool:
         return found[0]
     except Exception:
         return False
-
 
 def _show_existing_window(title_keyword: str) -> bool:
     """Find a window by title keyword (including hidden/tray windows), restore and bring to front.
@@ -525,141 +573,164 @@ def _show_existing_window(title_keyword: str) -> bool:
         pass
     return False
 
-
 def _restore_tray_window(title_keyword: str) -> bool:
-    """Restore a Qt tray window using a separate python.exe process.
-    Must be a different process — PostMessage from same process freezes Qt windows."""
-    script = (
-        "import win32gui,win32con,sys\n"
-        f"kw={title_keyword!r}\n"
-        "found=[]\n"
-        "win32gui.EnumWindows(lambda h,_: found.append(h)"
-        " if win32gui.GetWindowText(h) and kw in win32gui.GetWindowText(h).lower()"
-        " else None, None)\n"
-        "if not found: sys.exit(1)\n"
-        "win32gui.PostMessage(found[0], win32con.WM_SYSCOMMAND, win32con.SC_RESTORE, 0)\n"
-    )
-    # Find python.exe — try common locations
-    for py in _find_python_exe():
-        try:
-            result = subprocess.run(
-                [py, "-c", script],
-                capture_output=True, timeout=5,
-                creationflags=_NO_WINDOW,
-            )
-            return result.returncode == 0
-        except FileNotFoundError:
-            continue
-        except Exception:
-            return False
-    return False
+    """Restore a Qt tray window — IN-PROCESS via pywin32.
 
+    Target window lives in a different process, so PostMessage is async
+    and cannot freeze our Qt loop. The previous variant shelled out to
+    python.exe, which fails on frozen-build deployments (no Python on
+    end-user machines → cmd rc=9009)."""
+    try:
+        import win32gui, win32con
+    except ImportError as e:
+        return False
+    try:
+        kw = title_keyword.lower()
+        found: list[int] = []
+
+        def _cb(hwnd, _):
+            t = win32gui.GetWindowText(hwnd)
+            if t and kw in t.lower():
+                found.append(hwnd)
+            return True
+
+        win32gui.EnumWindows(_cb, None)
+        if not found:
+            return False
+        win32gui.PostMessage(found[0], win32con.WM_SYSCOMMAND,
+                             win32con.SC_RESTORE, 0)
+        return True
+    except Exception as e:
+        return False
 
 def _restore_tray_by_process(exe_name: str) -> bool:
-    """Restore a tray window by finding ALL windows (including hidden) owned by
-    the process exe_name. Runs from a SEPARATE python.exe process to avoid
-    freezing Qt apps. Tries SC_RESTORE, ShowWindow, and tray icon activation."""
-    script = (
-        "import win32gui,win32con,win32process,subprocess,sys,time\n"
-        f"exe={exe_name.lower()!r}\n"
-        "r=subprocess.run(['tasklist','/FI','IMAGENAME eq '+exe,'/NH','/FO','CSV'],"
-        "capture_output=True,text=True,timeout=5)\n"
-        "pids=set()\n"
-        "for l in (r.stdout or '').strip().split('\\n'):\n"
-        "  p=l.strip().strip('\"').split('\",\"')\n"
-        "  if len(p)>=2 and p[0].lower()==exe:\n"
-        "    try: pids.add(int(p[1]))\n"
-        "    except: pass\n"
-        "if not pids: sys.exit(1)\n"
-        "wins=[]\n"
-        "def cb(h,_):\n"
-        "  _,pid=win32process.GetWindowThreadProcessId(h)\n"
-        "  if pid in pids: wins.append(h)\n"
-        "  return True\n"
-        "win32gui.EnumWindows(cb,None)\n"
-        "if not wins: sys.exit(2)\n"
-        # Try each window: SC_RESTORE from separate process, then ShowWindow
-        "ok=False\n"
-        "for h in wins:\n"
-        "  try:\n"
-        "    cl=win32gui.GetClassName(h)\n"
-        "    if 'TrayIcon' in cl or 'tooltip' in cl.lower(): continue\n"
-        "    win32gui.PostMessage(h,win32con.WM_SYSCOMMAND,win32con.SC_RESTORE,0)\n"
-        "    ok=True; break\n"
-        "  except: pass\n"
-        "if not ok: sys.exit(3)\n"
-        "time.sleep(0.5)\n"
-        # Bring to front
-        "for h in wins:\n"
-        "  try:\n"
-        "    if win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h):\n"
-        "      win32gui.SetForegroundWindow(h)\n"
-        "      break\n"
-        "  except: pass\n"
-    )
-    for py in _find_python_exe():
-        try:
-            result = subprocess.run(
-                [py, "-c", script],
-                capture_output=True, timeout=8,
-                creationflags=_NO_WINDOW,
-            )
-            _dbg(f"_restore_tray_by_process({exe_name}): rc={result.returncode} "
-                 f"stderr={result.stderr[:200] if result.stderr else ''}")
-            return result.returncode == 0
-        except FileNotFoundError:
-            continue
-        except Exception:
-            return False
-    return False
+    """Restore a tray window owned by `exe_name` — IN-PROCESS via pywin32.
 
+    Skips TrayIcon-message and tooltip helper windows; targets the first
+    real top-level window. Sends SC_RESTORE and then attempts to raise it.
+    Same rationale as _activate_qt_tray_icon: PostMessage across processes
+    is async, so no Qt loop is starved."""
+    try:
+        import win32gui, win32con, win32process
+    except ImportError as e:
+        return False
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=5,
+            startupinfo=_hidden_startupinfo(),
+            creationflags=_NO_WINDOW,
+        )
+        pids: set[int] = set()
+        for line in (r.stdout or "").strip().split("\n"):
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2 and parts[0].lower() == exe_name.lower():
+                try:
+                    pids.add(int(parts[1]))
+                except ValueError:
+                    pass
+        if not pids:
+            return False
+        wins: list[int] = []
+
+        def _cb(hwnd, _):
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid in pids:
+                    wins.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(_cb, None)
+        if not wins:
+            return False
+        target = None
+        for h in wins:
+            try:
+                cls = win32gui.GetClassName(h)
+                if "TrayIcon" in cls or "tooltip" in cls.lower():
+                    continue
+                win32gui.PostMessage(h, win32con.WM_SYSCOMMAND,
+                                     win32con.SC_RESTORE, 0)
+                target = h
+                break
+            except Exception:
+                pass
+        if target is None:
+            return False
+        import time as _time
+        _time.sleep(0.5)
+        for h in wins:
+            try:
+                if win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h):
+                    win32gui.SetForegroundWindow(h)
+                    break
+            except Exception:
+                pass
+        return True
+    except Exception as e:
+        return False
 
 def _activate_qt_tray_icon(exe_name: str) -> bool:
-    """Simulate double-click on a Qt5 system tray icon to restore the app.
-    Finds the TrayIcon callback window owned by the process and sends the
-    Qt5 tray icon callback (WM_APP+101) with WM_LBUTTONDBLCLK.
-    Class name varies by Qt build: 'QTrayIconMessageWindow' or
-    'Qt5158TrayIconMessageWindowClass' etc — we match 'TrayIcon' substring."""
-    script = (
-        "import win32gui,win32process,sys\n"
-        f"exe={exe_name.lower()!r}\n"
-        "import subprocess\n"
-        "r=subprocess.run(['tasklist','/FI','IMAGENAME eq '+exe,'/NH','/FO','CSV'],"
-        "capture_output=True,text=True,timeout=5)\n"
-        "pids=set()\n"
-        "for l in (r.stdout or '').strip().split('\\n'):\n"
-        "  p=l.strip().strip('\"').split('\",\"')\n"
-        "  if len(p)>=2 and p[0].lower()==exe:\n"
-        "    try: pids.add(int(p[1]))\n"
-        "    except: pass\n"
-        "if not pids: sys.exit(1)\n"
-        "found=[]\n"
-        "def cb(h,_):\n"
-        "  _,pid=win32process.GetWindowThreadProcessId(h)\n"
-        "  if pid in pids and 'TrayIcon' in win32gui.GetClassName(h):\n"
-        "    found.append(h)\n"
-        "  return True\n"
-        "win32gui.EnumWindows(cb,None)\n"
-        "if not found: sys.exit(2)\n"
-        "MYWM=0x8000+101\n"  # WM_APP+101 = Qt5 tray callback
-        "WM_LBUTTONDBLCLK=0x0203\n"
-        "win32gui.PostMessage(found[0],MYWM,0,WM_LBUTTONDBLCLK)\n"
-    )
-    for py in _find_python_exe():
-        try:
-            result = subprocess.run(
-                [py, "-c", script],
-                capture_output=True, timeout=5,
-                creationflags=_NO_WINDOW,
-            )
-            _dbg(f"_activate_qt_tray_icon({exe_name}): rc={result.returncode}")
-            return result.returncode == 0
-        except FileNotFoundError:
-            continue
-        except Exception:
-            return False
-    return False
+    """Simulate double-click on a Qt5 system tray icon — IN-PROCESS via pywin32.
 
+    The target tray window is in a different process (Hillstone, Stormshield,
+    NetExtender …), so PostMessage is fully async and cannot freeze our own
+    Qt event loop. Earlier versions shelled out to a separate python.exe to
+    avoid same-process PostMessage freezes — but that path fails on machines
+    without a Python interpreter (CMD returns rc=9009 = command not found),
+    which is the situation on every end-user laptop running the frozen build.
+
+    Matches both classic 'QTrayIconMessageWindow' and the Qt5-versioned
+    'Qt5158TrayIconMessageWindowClass' by substring 'TrayIcon'.
+    """
+    try:
+        import win32gui, win32process
+    except ImportError as e:
+        return False
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=5,
+            startupinfo=_hidden_startupinfo(),
+            creationflags=_NO_WINDOW,
+        )
+        pids: set[int] = set()
+        for line in (r.stdout or "").strip().split("\n"):
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2 and parts[0].lower() == exe_name.lower():
+                try:
+                    pids.add(int(parts[1]))
+                except ValueError:
+                    pass
+        if not pids:
+            _dbg(f"_activate_qt_tray_icon({exe_name}): no PIDs in tasklist")
+            return False
+        found: list[int] = []
+
+        def _cb(hwnd, _):
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid in pids and "TrayIcon" in win32gui.GetClassName(hwnd):
+                    found.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(_cb, None)
+        if not found:
+            _dbg(f"_activate_qt_tray_icon({exe_name}): no TrayIcon window "
+                 f"for pids={sorted(pids)}")
+            return False
+        MYWM = 0x8000 + 101            # WM_APP+101 = Qt5 tray callback
+        WM_LBUTTONDBLCLK = 0x0203
+        win32gui.PostMessage(found[0], MYWM, 0, WM_LBUTTONDBLCLK)
+        _dbg(f"_activate_qt_tray_icon({exe_name}): posted to hwnd={found[0]} "
+             f"pids={sorted(pids)}")
+        return True
+    except Exception as e:
+        return False
 
 def _show_window_by_process(exe_name: str) -> bool:
     """Find a window owned by a process with given exe name and restore it."""
@@ -701,7 +772,6 @@ def _show_window_by_process(exe_name: str) -> bool:
         pass
     return False
 
-
 def _bring_window_to_front(title_keyword: str, force_show: bool = False) -> bool:
     """Find window by title keyword and bring to front using TOPMOST trick.
     If force_show=True, also calls ShowWindow (use only when window was never shown).
@@ -732,7 +802,6 @@ def _bring_window_to_front(title_keyword: str, force_show: bool = False) -> bool
     except Exception:
         return False
 
-
 def _find_hillstone_exe() -> str | None:
     """Auto-detect Hillstone Secure Connect GUI executable."""
     for base in (os.environ.get("PROGRAMFILES(X86)", ""), os.environ.get("PROGRAMFILES", "")):
@@ -742,7 +811,6 @@ def _find_hillstone_exe() -> str | None:
         if os.path.isfile(candidate):
             return candidate
     return None
-
 
 def _find_netextender_cli(app_path: str) -> str | None:
     """Find nxcli.exe or NECLI.exe near the given NetExtender app_path."""
@@ -764,7 +832,6 @@ def _find_netextender_cli(app_path: str) -> str | None:
         return app_path
     _dbg("  CLI not found!")
     return None
-
 
 def _focus_pid_window(pid: int) -> bool:
     """Find a visible window belonging to given PID and bring it to foreground."""
@@ -793,7 +860,6 @@ def _focus_pid_window(pid: int) -> bool:
         return True
     except Exception:
         return False
-
 
 def _nxcli_pty_run(cli: str, args: list[str], auto_answers: dict[str, str] = None,
                    timeout: int = 20) -> tuple[bool, str]:
@@ -845,7 +911,6 @@ def _nxcli_pty_run(cli: str, args: list[str], auto_answers: dict[str, str] = Non
         _dbg(f"_nxcli_pty_run error: {e}")
         return False, str(e)
 
-
 def _find_netextender_gui(app_path: str) -> str | None:
     """Find NetExtender.exe (GUI) — never returns nxcli/NECLI."""
     dirs = set()
@@ -860,12 +925,10 @@ def _find_netextender_gui(app_path: str) -> str | None:
             return gui
     return None
 
-
 _cli_valid_cache: dict[str, bool] = {}
 
 # NT status codes indicating broken exe (DLL init / DLL not found)
 _BAD_EXIT_CODES = {-1073741502, -1073741515}  # 0xC0000142, 0xC0000135
-
 
 def _validate_cli(cli: str) -> bool:
     """Check if a CLI exe can run by executing 'cli status' with suppressed error dialogs.
@@ -919,7 +982,6 @@ def _validate_cli(cli: str) -> bool:
     finally:
         ctypes.windll.kernel32.SetErrorMode(old_mode)
 
-
 def _is_process_running(exe_name: str) -> bool:
     """Check if a process with given exe name is running.
     Uses /FO CSV to avoid tasklist truncating long exe names."""
@@ -933,7 +995,6 @@ def _is_process_running(exe_name: str) -> bool:
     except Exception:
         return False
 
-
 # ====================================================================== #
 # Native Windows API: GetAdaptersAddresses                                 #
 # ====================================================================== #
@@ -943,7 +1004,6 @@ def _is_process_running(exe_name: str) -> bool:
 
 _ADAPTERS_CACHE: tuple[float, list] = (0.0, [])  # (ts, list[dict])
 _ADAPTERS_CACHE_TTL = 2.0  # API call jest szybkie, krótki cache OK
-
 
 def _build_winapi_structs():
     """Lazy build of GetAdaptersAddresses ctypes structs (called once)."""
@@ -1029,7 +1089,6 @@ def _build_winapi_structs():
 
     return IP_ADAPTER_ADDRESSES, IP_ADAPTER_UNICAST_ADDRESS
 
-
 # Windows constants
 _AF_INET = 2
 _AF_UNSPEC = 0
@@ -1041,7 +1100,6 @@ _GAA_FLAG_SKIP_DNS_SERVER = 0x0008
 _IF_OPER_STATUS_UP = 1
 
 _winapi_cached_structs = None
-
 
 def _enumerate_adapters_winapi() -> list:
     """Return [{description, friendly_name, ipv4_addresses, oper_status_up}].
@@ -1115,7 +1173,6 @@ def _enumerate_adapters_winapi() -> list:
     except Exception:
         return []
 
-
 def _get_adapters() -> list:
     """Cached adapter list via Windows API."""
     global _ADAPTERS_CACHE
@@ -1131,7 +1188,6 @@ def _get_adapters() -> list:
         _ADAPTERS_CACHE = (now, adapters)
     return adapters
 
-
 def invalidate_adapter_cache() -> None:
     """Wymuś świeży odczyt adapterów przy najbliższym _check_adapter_status.
 
@@ -1144,14 +1200,12 @@ def invalidate_adapter_cache() -> None:
         _ADAPTERS_CACHE = (0.0, [])
         _adapter_cache = (0.0, "", "")
 
-
 # ---------------------------------------------------------------------- #
 # Fallback: subprocess-based (gdy WinAPI zawiedzie — rzadkie)              #
 # ---------------------------------------------------------------------- #
 
 _adapter_cache: tuple[float, str, str] = (0.0, "", "")  # (ts, ipconfig, netsh)
 _ADAPTER_CACHE_TTL = 4.0  # seconds
-
 
 def _get_adapter_outputs() -> tuple[str, str]:
     """Fallback: ipconfig+netsh subprocess. Wywoływane tylko gdy WinAPI zwróci pusto."""
@@ -1181,7 +1235,6 @@ def _get_adapter_outputs() -> tuple[str, str]:
     with _state_lock:
         _adapter_cache = (now, ipconfig_out, netsh_out)
     return ipconfig_out, netsh_out
-
 
 def _check_adapter_status(*keywords: str) -> str | None:
     """Check adapter status using native Windows API (GetAdaptersAddresses).
@@ -1256,7 +1309,6 @@ def _check_adapter_status(*keywords: str) -> str | None:
             return "Disconnected"
     return None
 
-
 def _is_forti_tunnel_active() -> bool:
     """Check if FortiClient VPN adapter has an IP address (= tunnel is up).
     Uses cached ipconfig /all output.
@@ -1271,47 +1323,80 @@ def _is_forti_tunnel_active() -> bool:
     status = _check_adapter_status("fortinet ssl", "fortissl", "fortinet virtual")
     return status == "Connected"
 
-
 # ------------------------------------------------------------------ #
 # Open FortiClient GUI (simple — no GUI automation)                    #
 # ------------------------------------------------------------------ #
 
 _FORTI_LNK = r"C:\Users\Public\Desktop\FortiClient VPN.lnk"
 
-
 def _open_forticlient_gui(app_path: str = "") -> tuple[bool, str]:
-    """Open FortiClient GUI via desktop shortcut through explorer.exe.
-    explorer.exe = clean process, no inherited PyInstaller env."""
+    """Open FortiClient GUI with a clean (PyInstaller-free) environment.
+
+    Two-stage strategy:
+
+    1. **Primary**: `explorer.exe <FortiClient VPN.lnk>` — re-parents the launch
+       to the shell, so FortiClient inherits explorer's env (not HospitalHub's
+       _MEIPASS-tainted env). This is the only way to make .lnk activation work
+       AND avoid the Electron `Logger TraceLog` crash. Works on every machine
+       where the .lnk file exists and has not been hijacked.
+
+    2. **Fallback** (no .lnk, or explorer launch raised): direct `Popen` on the
+       .exe with PyInstaller env stripped + cwd set to install dir + DETACHED
+       process group. Used when the public-desktop .lnk is missing or when its
+       shell association has been hijacked (WinRAR/7-Zip), which on that one
+       machine made `explorer.exe foo.lnk` open the user's "Dokumenty" folder
+       instead of activating the shortcut.
+
+    Note: `explorer.exe <exe>` (without .lnk) does NOT launch the exe — it
+    fallbacks to opening the profile folder. Hence the explicit Popen fallback.
+    """
     _dbg(f"_open_forticlient_gui(app_path={app_path!r}) lnk_exists={os.path.isfile(_FORTI_LNK)}")
-    # Prefer desktop shortcut, fallback to exe — both via explorer.exe for clean env
-    target = None
+
+    # Stage 1: explorer.exe <lnk>. Verify that FortiClient actually started —
+    # if .lnk association is hijacked (WinRAR/7-Zip), explorer opens the user's
+    # "Dokumenty" folder instead. Detect that and fall through to Popen.
     if os.path.isfile(_FORTI_LNK):
-        target = _FORTI_LNK
-    else:
-        forti_gui = _find_forticlient_gui(app_path)
-        if forti_gui:
-            target = forti_gui
-    if target:
-        try:
-            subprocess.Popen(["explorer.exe", target])
-            _dbg(f"  -> explorer.exe {target} OK")
-            return True, "Otwarto FortiClient — połącz się w oknie klienta."
-        except Exception as e:
-            _dbg(f"  -> explorer.exe {target} FAIL: {e}")
-            return False, f"Błąd uruchamiania FortiClient:\n{e}"
-    # Fallback: direct exe
-    import ctypes
+        ok_v, err_v = _validate_exe(_FORTI_LNK)
+        if ok_v:
+            popen_err = None
+            try:
+                subprocess.Popen(["explorer.exe", _FORTI_LNK])
+                _dbg(f"  -> explorer.exe {_FORTI_LNK} Popen OK")
+            except Exception as e:
+                popen_err = e
+                _dbg(f"  -> explorer.exe {_FORTI_LNK} FAIL: {e}")
+            if popen_err is None:
+                started = _wait_for_process("FortiClient.exe", timeout=4.0)
+                if started:
+                    return True, "Otwarto FortiClient — połącz się w oknie klienta."
+                # explorer didn't spawn FortiClient — .lnk association hijacked.
+                _dbg("  -> explorer.exe did NOT spawn FortiClient.exe (likely "
+                     ".lnk association hijacked); falling back to direct Popen.")
+
+    # Stage 2 (fallback): direct exe with clean env + correct CWD + detached.
     forti_gui = _find_forticlient_gui(app_path)
     forti_dir = _forti_install_dir()
     if not forti_gui:
         return False, "Nie znaleziono FortiClient.\nUruchom klienta VPN ręcznie."
+    ok_v, err_v = _validate_exe(forti_gui)
+    if not ok_v:
+        return False, f"Błąd uruchamiania FortiClient:\n{err_v}"
     cwd = forti_dir or os.path.dirname(forti_gui)
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     try:
-        ctypes.windll.shell32.ShellExecuteW(None, "open", forti_gui, None, cwd, 1)
+        proc = subprocess.Popen(
+            [forti_gui],
+            env=_clean_pyinstaller_env(),
+            cwd=cwd,
+            creationflags=flags,
+            close_fds=True,
+        )
+        _dbg(f"  -> Popen(clean env) {forti_gui} cwd={cwd} pid={proc.pid} OK")
+        _wait_for_process("FortiClient.exe", timeout=3.0)
         return True, "Otwarto FortiClient — połącz się w oknie klienta."
     except Exception as e:
+        _dbg(f"  -> Popen(clean env) {forti_gui} FAIL: {e}")
         return False, f"Błąd uruchamiania FortiClient:\n{e}"
-
 
 # ------------------------------------------------------------------ #
 # Keyboard simulation for Chromium-based FortiClient (SendInput)       #
@@ -1321,28 +1406,23 @@ def _open_forticlient_gui(app_path: str = "") -> tuple[bool, str]:
 import ctypes as _ct
 from ctypes import wintypes as _wt
 
-
 class _MOUSEINPUT(_ct.Structure):
     _fields_ = [("dx", _ct.c_long), ("dy", _ct.c_long),
                 ("mouseData", _wt.DWORD), ("dwFlags", _wt.DWORD),
                 ("time", _wt.DWORD), ("dwExtraInfo", _ct.POINTER(_ct.c_ulong))]
-
 
 class _KEYBDINPUT(_ct.Structure):
     _fields_ = [("wVk", _wt.WORD), ("wScan", _wt.WORD),
                 ("dwFlags", _wt.DWORD), ("time", _wt.DWORD),
                 ("dwExtraInfo", _ct.POINTER(_ct.c_ulong))]
 
-
 class _HARDWAREINPUT(_ct.Structure):
     _fields_ = [("uMsg", _wt.DWORD), ("wParamL", _wt.WORD), ("wParamH", _wt.WORD)]
-
 
 class _INPUT(_ct.Structure):
     class _U(_ct.Union):
         _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
     _fields_ = [("type", _wt.DWORD), ("u", _U)]
-
 
 def _send_input_key(vk: int = 0, scan: int = 0, flags: int = 0):
     """Send a single keyboard input event via SendInput."""
@@ -1354,7 +1434,6 @@ def _send_input_key(vk: int = 0, scan: int = 0, flags: int = 0):
     inp.u.ki.dwExtraInfo = None
     _ct.windll.user32.SendInput(1, _ct.byref(inp), _ct.sizeof(_INPUT))
 
-
 def _type_text(text: str):
     """Type text via SendInput unicode events."""
     import time
@@ -1364,7 +1443,6 @@ def _type_text(text: str):
         _send_input_key(scan=code, flags=0x0004 | 0x0002)  # + KEYEVENTF_KEYUP
         time.sleep(0.01)
 
-
 def _press_key(vk: int):
     """Press and release a virtual key."""
     import time
@@ -1372,7 +1450,6 @@ def _press_key(vk: int):
     time.sleep(0.03)
     _send_input_key(vk=vk, flags=0x0002)
     time.sleep(0.05)
-
 
 def _press_combo(vk_modifier: int, vk_key: int):
     """Press modifier+key combo (e.g. Ctrl+A)."""
@@ -1385,7 +1462,6 @@ def _press_combo(vk_modifier: int, vk_key: int):
     time.sleep(0.02)
     _send_input_key(vk=vk_modifier, flags=0x0002)
     time.sleep(0.05)
-
 
 def _click_at(x: int, y: int):
     """Click at absolute screen coordinates using SendInput."""
@@ -1407,7 +1483,6 @@ def _click_at(x: int, y: int):
     inp.u.mi.dwFlags = 0x0001 | 0x8000 | 0x0004  # MOVE|ABSOLUTE|LEFTUP
     _ct.windll.user32.SendInput(1, _ct.byref(inp), _ct.sizeof(_INPUT))
     time.sleep(0.1)
-
 
 def _wait_forticlient_window(timeout: float = 10.0):
     """Wait for visible FortiClient window. Returns hwnd or None."""
@@ -1437,7 +1512,6 @@ def _wait_forticlient_window(timeout: float = 10.0):
         time.sleep(0.5)
     return None
 
-
 def _autofill_forticlient(login: str, password: str, profile_name: str = ""):
     """Auto-fill FortiClient Free GUI fields via keyboard simulation.
     Runs in a background thread so it doesn't block UI.
@@ -1458,76 +1532,76 @@ def _autofill_forticlient(login: str, password: str, profile_name: str = ""):
             _dbg("_autofill: window not found, aborting")
             return
 
+        import win32gui
+        import win32process
+        import win32api
+
+        fc_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+        our_tid = win32api.GetCurrentThreadId()
+        attached = False
         try:
-            import win32gui
-            import win32process
-            import win32api
+            try:
+                _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, True)
+                attached = True
+                win32gui.ShowWindow(hwnd, 9)  # SW_RESTORE
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception as e:
+                _dbg(f"_autofill: focus error: {e}")
 
-            # Attach thread input for proper keyboard focus
-            fc_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
-            our_tid = win32api.GetCurrentThreadId()
-            _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, True)
+            time.sleep(1.5)  # let FC render fully
 
-            win32gui.ShowWindow(hwnd, 9)  # SW_RESTORE
-            win32gui.SetForegroundWindow(hwnd)
-        except Exception as e:
-            _dbg(f"_autofill: focus error: {e}")
+            _dbg("_autofill: starting keyboard input")
 
-        time.sleep(1.5)  # let FC render fully
-
-        _dbg("_autofill: starting keyboard input")
-
-        # Click on VPN Name dropdown area — press Tab to focus it first
-        _press_key(VK_TAB)
-        time.sleep(0.3)
-
-        # Type profile name to search/select in dropdown
-        if profile_name:
-            # Open dropdown, type to filter
-            _press_key(0x20)  # VK_SPACE to open dropdown
-            time.sleep(0.5)
-            _type_text(profile_name)
-            time.sleep(0.3)
-            _press_key(VK_RETURN)  # Select
-            time.sleep(0.5)
-
-        # Tab twice — first Tab hits hamburger menu, second reaches Username
-        _press_key(VK_TAB)
-        time.sleep(0.2)
-        _press_key(VK_TAB)
-        time.sleep(0.3)
-
-        # Select all + type login (handles case when login is pre-filled)
-        if login:
-            _press_combo(VK_CONTROL, ord('A'))
-            time.sleep(0.1)
-            _type_text(login)
+            # Click on VPN Name dropdown area — press Tab to focus it first
+            _press_key(VK_TAB)
             time.sleep(0.3)
 
-        # Tab to Password field
-        _press_key(VK_TAB)
-        time.sleep(0.3)
+            # Type profile name to search/select in dropdown
+            if profile_name:
+                # Open dropdown, type to filter
+                _press_key(0x20)  # VK_SPACE to open dropdown
+                time.sleep(0.5)
+                _type_text(profile_name)
+                time.sleep(0.3)
+                _press_key(VK_RETURN)  # Select
+                time.sleep(0.5)
 
-        # Type password
-        if password:
-            _type_text(password)
+            # Tab twice — first Tab hits hamburger menu, second reaches Username
+            _press_key(VK_TAB)
+            time.sleep(0.2)
+            _press_key(VK_TAB)
             time.sleep(0.3)
 
-        # Enter to Connect
-        _press_key(VK_RETURN)
-        _dbg("_autofill: pressed Connect")
+            # Select all + type login (handles case when login is pre-filled)
+            if login:
+                _press_combo(VK_CONTROL, ord('A'))
+                time.sleep(0.1)
+                _type_text(login)
+                time.sleep(0.3)
 
-        # Detach thread
-        try:
-            _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, False)
-        except Exception:
-            pass
+            # Tab to Password field
+            _press_key(VK_TAB)
+            time.sleep(0.3)
+
+            # Type password
+            if password:
+                _type_text(password)
+                time.sleep(0.3)
+
+            # Enter to Connect
+            _press_key(VK_RETURN)
+            _dbg("_autofill: pressed Connect")
+        finally:
+            if attached:
+                try:
+                    _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, False)
+                except Exception:
+                    pass
 
         _dbg("_autofill: done")
 
     t = threading.Thread(target=_fill, daemon=True)
     t.start()
-
 
 def _auto_disconnect_forticlient():
     """Auto-click Disconnect in FortiClient GUI and close the window.
@@ -1548,122 +1622,138 @@ def _auto_disconnect_forticlient():
             _dbg("_auto_disconnect: window not found")
             return
 
+        import win32gui
+        import win32process
+        import win32api
+
+        fc_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+        our_tid = win32api.GetCurrentThreadId()
+        attached = False
+        try:
+            try:
+                _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, True)
+                attached = True
+                win32gui.ShowWindow(hwnd, 9)
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception as e:
+                _dbg(f"_auto_disconnect: focus error: {e}")
+
+            time.sleep(1.5)
+
+            # Tab once to Disconnect button
+            _press_key(VK_TAB)
+            time.sleep(0.3)
+
+            # Press Enter on Disconnect
+            _press_key(VK_RETURN)
+            _dbg("_auto_disconnect: pressed Disconnect")
+
+            # Wait for disconnect to process, then close window
+            time.sleep(2.0)
+            _press_combo(VK_ALT, VK_F4)
+            _dbg("_auto_disconnect: closed window")
+        finally:
+            if attached:
+                try:
+                    _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, False)
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+
+def _autofill_stormshield(server: str, port: str, login: str, password: str):
+    """Auto-fill Stormshield SSL VPN Client (Qt5).
+    Focus starts on Password field. Shift+Tab x2 to Address, then type forward.
+    Runs on a background thread so AttachThreadInput is scoped to a short-lived
+    thread — even if cleanup is missed, the OS releases the attachment when the
+    thread terminates (cf. _autofill_forticlient)."""
+    import threading
+
+    def _do():
+        import time
         try:
             import win32gui
             import win32process
             import win32api
 
-            fc_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+            # Wait for window to appear — retry up to 10s
+            hwnd = None
+            def cb(h, _):
+                nonlocal hwnd
+                title = win32gui.GetWindowText(h)
+                if "stormshield" in title.lower():
+                    hwnd = h
+                    return False
+                return True
+            for _ in range(20):
+                hwnd = None
+                win32gui.EnumWindows(cb, None)
+                if hwnd and win32gui.IsWindowVisible(hwnd):
+                    break
+                hwnd = None
+                time.sleep(0.5)
+            if not hwnd:
+                _dbg("_autofill_stormshield: window not found")
+                return
+
+            _dbg(f"_autofill_stormshield: found hwnd={hwnd}")
+
+            tid, _ = win32process.GetWindowThreadProcessId(hwnd)
             our_tid = win32api.GetCurrentThreadId()
-            _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, True)
-            win32gui.ShowWindow(hwnd, 9)
-            win32gui.SetForegroundWindow(hwnd)
+            attached = False
+            try:
+                _ct.windll.user32.AttachThreadInput(our_tid, tid, True)
+                attached = True
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                time.sleep(1.5)  # wait for window to fully render
+
+                addr = f"{server}:{port}" if port else server
+
+                # Cursor starts on Password. Shift+Tab x2 → Address field
+                for _ in range(2):
+                    _send_input_key(vk=0x10)       # Shift down
+                    time.sleep(0.03)
+                    _send_input_key(vk=0x09)       # Tab down
+                    time.sleep(0.03)
+                    _send_input_key(vk=0x09, flags=0x0002)  # Tab up
+                    time.sleep(0.03)
+                    _send_input_key(vk=0x10, flags=0x0002)  # Shift up
+                    time.sleep(0.1)
+
+                # Now on Address field
+                if addr:
+                    _press_combo(0x11, 0x41)  # Ctrl+A
+                    time.sleep(0.05)
+                    _type_text(addr)
+                    time.sleep(0.15)
+
+                _press_key(0x09)  # Tab → Login
+                time.sleep(0.15)
+                if login:
+                    _press_combo(0x11, 0x41)  # Ctrl+A
+                    time.sleep(0.05)
+                    _type_text(login)
+                    time.sleep(0.15)
+
+                _press_key(0x09)  # Tab → Password
+                time.sleep(0.15)
+                if password:
+                    _type_text(password)
+            finally:
+                if attached:
+                    try:
+                        _ct.windll.user32.AttachThreadInput(our_tid, tid, False)
+                    except Exception:
+                        pass
+            _dbg("_autofill_stormshield: done")
         except Exception as e:
-            _dbg(f"_auto_disconnect: focus error: {e}")
+            _dbg(f"_autofill_stormshield error: {e}")
 
-        time.sleep(1.5)
-
-        # Tab once to Disconnect button
-        _press_key(VK_TAB)
-        time.sleep(0.3)
-
-        # Press Enter on Disconnect
-        _press_key(VK_RETURN)
-        _dbg("_auto_disconnect: pressed Disconnect")
-
-        # Wait for disconnect to process, then close window
-        time.sleep(2.0)
-        _press_combo(VK_ALT, VK_F4)
-        _dbg("_auto_disconnect: closed window")
-
-        try:
-            _ct.windll.user32.AttachThreadInput(our_tid, fc_tid, False)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=_do, daemon=True)
-    t.start()
-
-
-def _autofill_stormshield(server: str, port: str, login: str, password: str):
-    """Auto-fill Stormshield SSL VPN Client (Qt5).
-    Focus starts on Password field. Shift+Tab x2 to Address, then type forward."""
-    import time
-    try:
-        import win32gui
-        import win32process
-        import win32api
-
-        # Wait for window to appear — retry up to 10s
-        hwnd = None
-        def cb(h, _):
-            nonlocal hwnd
-            title = win32gui.GetWindowText(h)
-            if "stormshield" in title.lower():
-                hwnd = h
-                return False
-            return True
-        for _ in range(20):
-            hwnd = None
-            win32gui.EnumWindows(cb, None)
-            if hwnd and win32gui.IsWindowVisible(hwnd):
-                break
-            hwnd = None
-            time.sleep(0.5)
-        if not hwnd:
-            _dbg("_autofill_stormshield: window not found")
-            return
-
-        _dbg(f"_autofill_stormshield: found hwnd={hwnd}")
-
-        # Activate window and attach input
-        tid, _ = win32process.GetWindowThreadProcessId(hwnd)
-        our_tid = win32api.GetCurrentThreadId()
-        _ct.windll.user32.AttachThreadInput(our_tid, tid, True)
-        try:
-            win32gui.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
-        time.sleep(1.5)  # wait for window to fully render
-
-        addr = f"{server}:{port}" if port else server
-
-        # Cursor starts on Password. Shift+Tab x2 → Address field
-        for _ in range(2):
-            _send_input_key(vk=0x10)       # Shift down
-            time.sleep(0.03)
-            _send_input_key(vk=0x09)       # Tab down
-            time.sleep(0.03)
-            _send_input_key(vk=0x09, flags=0x0002)  # Tab up
-            time.sleep(0.03)
-            _send_input_key(vk=0x10, flags=0x0002)  # Shift up
-            time.sleep(0.1)
-
-        # Now on Address field
-        if addr:
-            _press_combo(0x11, 0x41)  # Ctrl+A
-            time.sleep(0.05)
-            _type_text(addr)
-            time.sleep(0.15)
-
-        _press_key(0x09)  # Tab → Login
-        time.sleep(0.15)
-        if login:
-            _press_combo(0x11, 0x41)  # Ctrl+A
-            time.sleep(0.05)
-            _type_text(login)
-            time.sleep(0.15)
-
-        _press_key(0x09)  # Tab → Password
-        time.sleep(0.15)
-        if password:
-            _type_text(password)
-
-        _ct.windll.user32.AttachThreadInput(our_tid, tid, False)
-        _dbg("_autofill_stormshield: done")
-    except Exception as e:
-        _dbg(f"_autofill_stormshield error: {e}")
-
+    threading.Thread(target=_do, daemon=True).start()
 
 def _autofill_native_vpn_window(login: str, password: str, exe_name: str = ""):
     """Auto-fill username/password in a native/modern VPN app.
@@ -1825,7 +1915,6 @@ def _autofill_native_vpn_window(login: str, password: str, exe_name: str = ""):
     t = threading.Thread(target=_do, daemon=True)
     t.start()
 
-
 def _copy_to_clipboard(text: str) -> bool:
     """Copy text to clipboard. Returns True on success."""
     try:
@@ -1837,7 +1926,6 @@ def _copy_to_clipboard(text: str) -> bool:
         return True
     except Exception:
         return False
-
 
 def _autofill_globalprotect(login: str, password: str, portal: str = ""):
     """Auto-fill GlobalProtect two-step flow:
@@ -1959,7 +2047,6 @@ def _autofill_globalprotect(login: str, password: str, portal: str = ""):
     t = threading.Thread(target=_do, daemon=True)
     t.start()
 
-
 # ------------------------------------------------------------------ #
 # EMS edition: WinForms auth window (WM_SETTEXT — no pyautogui)       #
 # ------------------------------------------------------------------ #
@@ -2011,7 +2098,6 @@ def _find_forti_auth_window(timeout: float = 3.0):
 
     return None, [], []
 
-
 def _fill_forti_auth_window(login: str, password: str, timeout: float = 3.0) -> tuple[bool, str]:
     """Try to fill FortiClient EMS authentication window via WM_SETTEXT."""
     try:
@@ -2031,7 +2117,6 @@ def _fill_forti_auth_window(login: str, password: str, timeout: float = 3.0) -> 
             win32gui.SendMessage(btn_hwnd, win32con.BM_CLICK, 0, 0)
             return True, "Łączenie przez FortiClient..."
     return True, "Dane wpisane — kliknij Connect ręcznie."
-
 
 def fill_forticlient_token(token: str, timeout: float = 15.0) -> tuple[bool, str]:
     """Fill FortiClient GUI Token field (EMS edition, WinForms window)."""
@@ -2055,18 +2140,16 @@ def fill_forticlient_token(token: str, timeout: float = 15.0) -> tuple[bool, str
             return True, "Token wpisany, kliknięto Connect."
     return True, "Token wpisany — kliknij Connect ręcznie."
 
-
 # ------------------------------------------------------------------ #
 # Connect / disconnect                                                 #
 # ------------------------------------------------------------------ #
 
 _DEBUG_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vpn_debug.log")
 
-
 _DBG_MAX_SIZE = 1_000_000  # 1 MB
 
-
 def _dbg(msg: str):
+    """Legacy debug logger — vpn_debug.log w katalogu instalacji (best effort)."""
     import datetime
     try:
         if os.path.exists(_DEBUG_LOG) and os.path.getsize(_DEBUG_LOG) > _DBG_MAX_SIZE:
@@ -2076,7 +2159,6 @@ def _dbg(msg: str):
     except Exception:
         pass
 
-
 def connect(provider: str, server: str, port: str, login: str, password: str,
             group: str = "", domain: str = "",
             app_path: str = "", profile_name: str = "",
@@ -2085,6 +2167,8 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
     _dbg(f"connect() provider={provider} app_path={app_path!r} profile={profile_name!r} autofill={autofill}")
 
     _last_connected[provider] = profile_name or ""
+    _last_connected_meta[provider] = {"server": server or "",
+                                      "profile_name": profile_name or ""}
     _dbg(f"  _last_connected[{provider}] set to {_last_connected[provider]!r}")
 
     # Autofill OFF: copy password to clipboard once, up-front, so the user can paste
@@ -2247,7 +2331,13 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
     elif provider == "Hillstone Secure Connect":
         exe = app_path if (app_path and os.path.isfile(app_path)) else _find_hillstone_exe()
         exe_name = os.path.basename(exe) if exe else "HillstoneSecureConnect.exe"
-        if exe_name and _is_process_running(exe_name):
+        running = _is_process_running(exe_name) if exe_name else False
+        _dbg(f"Hillstone connect: exe={exe!r} exe_name={exe_name!r} running={running}")
+        if app_path:
+            _validate_exe(app_path)
+        elif exe:
+            _validate_exe(exe)
+        if exe_name and running:
             # Qt app in tray — simulate tray icon double-click (goes through
             # Qt event loop, won't freeze). SC_RESTORE causes frozen windows.
             if _activate_qt_tray_icon(exe_name):
@@ -2255,19 +2345,36 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
                 return True, "Przywrócono okno Hillstone."
             # All restore methods failed — do NOT launch second instance
             return True, "Hillstone działa w trayu — kliknij ikonę w zasobniku."
-        # Not running — launch exe
+        # Not running — launch via ShellExecuteW (handles UAC elevation that
+        # Hillstone's manifest requires; plain Popen would fail silently).
         if exe:
-            try:
-                os.startfile(exe)
+            ok, err = _shell_launch(exe, provider="Hillstone Secure Connect")
+            _dbg(f"Hillstone launch via _shell_launch: ok={ok} err={err}")
+            if ok:
+                _wait_for_process(exe_name, timeout=4.0)
                 return True, "Uruchomiono Hillstone Secure Connect."
-            except Exception as e:
-                return False, f"Błąd uruchamiania:\n{e}"
+            # ShellExecuteW failed — try Popen fallback so we can capture stderr
+            try:
+                proc = subprocess.Popen(
+                    [exe],
+                    env=_clean_pyinstaller_env(),
+                    cwd=os.path.dirname(exe) or None,
+                    creationflags=subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP,
+                    close_fds=True,
+                )
+                _wait_for_process(exe_name, timeout=4.0)
+                return True, "Uruchomiono Hillstone Secure Connect."
+            except Exception as pe:
+                return False, f"Błąd uruchamiania Hillstone:\n{err}\n{pe}"
         return False, "Hillstone — uruchom klienta ręcznie."
 
     elif provider == "Stormshield":
         _last_connected[provider] = server or profile_name or ""
         exe = app_path if (app_path and os.path.isfile(app_path)) else None
         exe_name = os.path.basename(exe) if exe else "sslvpn_client.exe"
+        if app_path:
+            _validate_exe(app_path)
 
         def _storm_show_and_fill():
             """Activate tray icon (Qt5 shows window itself) then bring to front."""
@@ -2319,23 +2426,36 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
         # Process not running — launch, wait for tray icon, then activate it.
         # NEVER use ShowWindow on Qt5 — causes white/blank window.
         # Let Qt show the window itself via tray icon double-click simulation.
-        # Use subprocess.Popen instead of os.startfile — startfile may open the
-        # parent folder instead of running the exe (Windows shell association quirk).
+        # Use ShellExecuteW (via _shell_launch) — Stormshield SN VPN Client has
+        # a requireAdministrator manifest; plain subprocess.Popen fails silently
+        # with ERROR_ELEVATION_REQUIRED on non-admin accounts (i.e. colleagues'
+        # machines). ShellExecuteW shows the UAC prompt automatically.
         if exe:
-            try:
-                subprocess.Popen([exe],
-                                 startupinfo=_hidden_startupinfo(),
-                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-                import time; time.sleep(4)
-                if _storm_show_and_fill():
-                    return True, "Uruchomiono Stormshield."
-                # Tray activation failed — window might need more time
-                time.sleep(2)
-                if _storm_show_and_fill():
-                    return True, "Uruchomiono Stormshield."
-                return True, "Stormshield uruchomiony — kliknij ikonę w trayu."
-            except Exception as e:
-                return False, f"Błąd uruchamiania:\n{e}"
+            ok, err = _shell_launch(exe, provider="Stormshield")
+            _dbg(f"Stormshield launch via _shell_launch: ok={ok} err={err}")
+            if not ok:
+                # Fallback: Popen with clean env in case ShellExecuteW failed
+                # (e.g. UAC denied, association issue). Log the fallback path.
+                try:
+                    proc = subprocess.Popen(
+                        [exe],
+                        env=_clean_pyinstaller_env(),
+                        cwd=os.path.dirname(exe) or None,
+                        creationflags=subprocess.DETACHED_PROCESS
+                        | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        close_fds=True,
+                    )
+                except Exception as pe:
+                    return False, f"Błąd uruchamiania Stormshield:\n{err}\n{pe}"
+            import time; time.sleep(4)
+            _wait_for_process(exe_name, timeout=2.0)
+            if _storm_show_and_fill():
+                return True, "Uruchomiono Stormshield."
+            # Tray activation failed — window might need more time
+            time.sleep(2)
+            if _storm_show_and_fill():
+                return True, "Uruchomiono Stormshield."
+            return True, "Stormshield uruchomiony — kliknij ikonę w trayu."
         return False, "Stormshield — uruchom klienta ręcznie."
 
     elif provider == "Barracuda":
@@ -2380,12 +2500,12 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
 
     return False, f"Nieobsługiwany provider: {provider}"
 
-
 def disconnect(provider: str, server: str = "",
                app_path: str = "", profile_name: str = "") -> tuple[bool, str]:
 
     if provider == "FortiClient":
         _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
         if _is_fortivpn_cli_supported(app_path):
             fortivpn = _find_fortivpn(app_path)
             cmd = [fortivpn, "--cli", "--disconnect"]
@@ -2416,10 +2536,12 @@ def disconnect(provider: str, server: str = "",
 
     elif provider == "SonicWall NetExtender":
         _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
         return True, "Rozłącz ręcznie w kliencie NetExtender."
 
     elif provider == "GlobalProtect":
         _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
         exe = app_path if (app_path and os.path.isfile(app_path)) else find_executable(provider)
         gp_dir = os.path.dirname(exe) if exe else ""
         gp_cli = os.path.join(gp_dir, "globalprotect.exe") if gp_dir else ""
@@ -2436,6 +2558,7 @@ def disconnect(provider: str, server: str = "",
 
     elif provider == "Stormshield":
         _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
         exe = app_path if (app_path and os.path.isfile(app_path)) else None
         exe_name = os.path.basename(exe) if exe else "sslvpn_client.exe"
         # Check if window is already visible — just bring to front
@@ -2472,16 +2595,18 @@ def disconnect(provider: str, server: str = "",
 
     elif provider == "Hillstone Secure Connect":
         _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
         return True, "Rozłącz ręcznie w aplikacji Hillstone Secure Connect."
 
     elif provider == "Barracuda":
         _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
         return True, "Rozłącz ręcznie w kliencie Barracuda."
 
     # Generic custom provider
     _last_connected.pop(provider, None)
+    _last_connected_meta.pop(provider, None)
     return True, f"Rozłącz ręcznie w kliencie {provider}."
-
 
 # ------------------------------------------------------------------ #
 # Status                                                               #
@@ -2612,18 +2737,29 @@ def get_status(provider: str, app_path: str = "",
 
     elif provider == "Stormshield":
         # Stormshield tunnels via TAP driver — no TCP connections visible in netstat.
-        # Check "stormshield-tap" adapter state + _last_connected (stores server)
-        # to distinguish which profile is actually connected.
+        # Check "stormshield-tap" adapter state + _last_connected to distinguish
+        # which profile is actually connected. We also peek at _last_connected_meta
+        # so that the same logical profile in a *different* vault (e.g. main vault
+        # carries profile_name but blank server, while the VPN vault has the server)
+        # still lights up green — without it, a missing field on either side made
+        # the comparison fall through to Disconnected.
         last = _last_connected.get("Stormshield", "")
+        meta = _last_connected_meta.get("Stormshield") or {}
         profile_key = server or profile_name or ""
         status = _check_adapter_status("stormshield-tap")
         if not status or status == "Disconnected":
             status = _check_adapter_status("stormshield ssl vpn")
         if status == "Connected":
             if not last:
-                # Connected externally (not via HospitalHub) — can't tell which profile
-                return None
-            if profile_key and profile_key != last:
+                return None  # connected outside HospitalHub — can't pin a profile
+            meta_srv = meta.get("server", "")
+            meta_prof = meta.get("profile_name", "")
+            matches = (
+                (profile_key and profile_key == last)
+                or (server and meta_srv and server == meta_srv)
+                or (profile_name and meta_prof and profile_name == meta_prof)
+            )
+            if profile_key and not matches:
                 return "Disconnected"
             return "Connected"
         if status == "Disconnected":
@@ -2654,7 +2790,6 @@ def get_status(provider: str, app_path: str = "",
         return "Disconnected"
 
     return None
-
 
 # ------------------------------------------------------------------ #
 # Monitored connect (for 2FA stdout detection)                        #
@@ -2706,7 +2841,6 @@ def connect_monitored(provider: str, server: str, port: str, login: str, passwor
                       app_path, profile_name, autofill=autofill)
     return ok, msg, None
 
-
 # ------------------------------------------------------------------ #
 # Launch VPN client app                                                #
 # ------------------------------------------------------------------ #
@@ -2715,8 +2849,9 @@ def launch_app(app_path: str) -> tuple[bool, str]:
     _dbg(f"launch_app(app_path={app_path!r})")
     if not app_path:
         return False, "Nie podano ścieżki do aplikacji."
-    if not os.path.isfile(app_path):
-        return False, f"Nie znaleziono pliku:\n{app_path}"
+    ok_v, err_v = _validate_exe(app_path)
+    if not ok_v:
+        return False, err_v
     try:
         app_name = os.path.basename(app_path).lower()
         if "forticlient" in app_name:
@@ -2726,6 +2861,7 @@ def launch_app(app_path: str) -> tuple[bool, str]:
             gui = os.path.join(os.path.dirname(app_path), "NetExtender.exe")
             if os.path.isfile(gui):
                 os.startfile(gui)
+                _wait_for_process("NetExtender.exe", timeout=3.0)
                 return True, "Uruchomiono NetExtender."
             return False, "Nie znaleziono NetExtender.exe obok nxcli."
         os.startfile(app_path)
