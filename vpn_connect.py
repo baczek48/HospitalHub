@@ -1486,22 +1486,64 @@ def _click_at(x: int, y: int):
     _ct.windll.user32.SendInput(1, _ct.byref(inp), _ct.sizeof(_INPUT))
     time.sleep(0.1)
 
+def _forticlient_pids() -> set[int]:
+    """PIDs of running Fortinet processes (image name starting with 'Forti').
+
+    Used to verify a window really belongs to FortiClient — a title-substring
+    match alone is unsafe (e.g. a browser tab whose title contains the word
+    'FortiClient' would otherwise be picked up, and credentials pasted into it).
+    """
+    pids: set[int] = set()
+    try:
+        result = subprocess.run(
+            ["tasklist", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=5,
+            startupinfo=_hidden_startupinfo(),
+            creationflags=_NO_WINDOW)
+        for line in (result.stdout or "").strip().split("\n"):
+            parts = line.strip().strip('"').split('","')
+            if len(parts) >= 2 and parts[0].lower().startswith("forti"):
+                try:
+                    pids.add(int(parts[1]))
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return pids
+
 def _wait_forticlient_window(timeout: float = 10.0):
-    """Wait for visible FortiClient window. Returns hwnd or None."""
+    """Wait for visible FortiClient window. Returns hwnd or None.
+
+    Requires BOTH a 'FortiClient' title and that the window is owned by a
+    Fortinet process — otherwise an unrelated window (e.g. a browser page
+    mentioning FortiClient) would be matched and focused/typed into.
+    """
     import time
     try:
         import win32gui
+        import win32process
     except ImportError:
         return None
 
     deadline = time.time() + timeout
     while time.time() < deadline:
+        forti_pids = _forticlient_pids()
+        if not forti_pids:
+            # No Fortinet process at all → no real FortiClient window can exist.
+            time.sleep(0.5)
+            continue
         result = [None]
         def cb(hwnd, _):
             if not win32gui.IsWindowVisible(hwnd):
                 return True
             title = win32gui.GetWindowText(hwnd)
-            if title and "FortiClient" in title and "Authentication" not in title:
+            if not (title and "FortiClient" in title and "Authentication" not in title):
+                return True
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                return True
+            if pid in forti_pids:
                 result[0] = hwnd
                 return False
             return True
