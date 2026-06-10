@@ -2113,32 +2113,56 @@ class _SshWorker(QThread):
                     return
                 self._user = login.strip()
 
-            # ── Authentication ─────────────────────────────────────────
-            if self._pw:
-                self._client = _make_client(
-                    self._host, self._user, self._pw, self._port)
-            else:
-                # Try key-based / agent auth first
-                key_ok = False
+            # ── Authentication (re-prompt for password on failure) ─────
+            # Like MobaXterm: when credentials are wrong we DON'T kill the
+            # session and make the user press 'R' (which would just retry the
+            # same bad password). Instead we ask for the password again right
+            # here in the terminal and try once more with the new value.
+            _MAX_PW_ATTEMPTS = 5
+            _pw_attempt = 0
+            while True:
                 try:
-                    self._client = _make_client(
-                        self._host, self._user, '', self._port)
-                    key_ok = True
-                except OSError:
-                    raise   # network error — let outer handler deal with it
-                except Exception:
-                    pass    # auth failed (any reason) — fall through
+                    if self._pw:
+                        self._client = _make_client(
+                            self._host, self._user, self._pw, self._port)
+                    else:
+                        # Try key-based / agent auth first
+                        key_ok = False
+                        try:
+                            self._client = _make_client(
+                                self._host, self._user, '', self._port)
+                            key_ok = True
+                        except OSError:
+                            raise   # network error — let outer handler deal with it
+                        except Exception:
+                            pass    # auth failed (any reason) — fall through
 
-                if not key_ok:
-                    # No keys worked → ask for password in terminal
-                    self.output.emit("Password: ")
+                        if not key_ok:
+                            # No keys worked → ask for password in terminal
+                            self.output.emit("Password: ")
+                            pw = self._read_interactive_line(echo=False)
+                            if not pw:
+                                self.error.emit("Anulowano logowanie.")
+                                return
+                            self._pw = pw
+                            self._client = _make_client(
+                                self._host, self._user, self._pw, self._port)
+                    break   # authenticated successfully
+                except paramiko.AuthenticationException:
+                    _pw_attempt += 1
+                    if _pw_attempt >= _MAX_PW_ATTEMPTS:
+                        self.error.emit("Błąd autentykacji — sprawdź login i hasło.")
+                        return
+                    # Wrong login/password → re-prompt for the password in the
+                    # terminal and retry with the freshly typed value.
+                    self.output.emit(
+                        "\r\n\x1b[91mBłędny login lub hasło.\x1b[0m "
+                        f"Wpisz hasło ponownie (login: {self._user}).\r\nPassword: ")
                     pw = self._read_interactive_line(echo=False)
                     if not pw:
                         self.error.emit("Anulowano logowanie.")
                         return
-                    self._pw = pw
-                    self._client = _make_client(
-                        self._host, self._user, pw, self._port)
+                    self._pw = pw   # retry loop picks this up via `if self._pw`
 
             # Open session manually so we can attempt X11 forwarding before
             # invoking the shell (invoke_shell() doesn't expose this).
