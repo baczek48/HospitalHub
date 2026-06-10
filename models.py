@@ -54,6 +54,7 @@ VPN_PROVIDERS_BUILTIN = [
     "Barracuda",
     "SonicWall NetExtender",
     "Hillstone Secure Connect",
+    "Windows VPN",
 ]
 
 VPN_PROVIDERS = list(VPN_PROVIDERS_BUILTIN)

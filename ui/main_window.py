@@ -15,7 +15,8 @@ from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
 from config import (save_last_vault,
                     load_ssh_start_maximized, save_ssh_start_maximized,
-                    load_hospital_sort_order, save_hospital_sort_order)
+                    load_hospital_sort_order, save_hospital_sort_order,
+                    load_theme, save_theme)
 from ui.detail_panel import DetailPanel
 from ui.vpn_panel import VpnPanel
 from ui.dialogs import (
@@ -80,11 +81,27 @@ class MainWindow(QMainWindow):
 
         if self._vault_type == "vpn":
             self.setMinimumSize(360, 300)
-            self.resize(420, 400)
+            self.resize(420, 700)
             self._vpn_panel = VpnPanel(self._hospitals)
             self._vpn_panel.data_changed.connect(self._on_data_changed)
             main_layout.addWidget(self._vpn_panel)
             return
+
+        # Modern slim scrollbars for the whole main vault (replaces the chunky
+        # default Fusion ones — the "Windows 98" look). Cascades to every child:
+        # machines/DB tables, hospital list, notes — vertical and horizontal
+        # alike (up to ~5 at once). Themed via the light-mode remap (handle
+        # #30363d -> border grey). Arrow step-buttons removed.
+        central.setStyleSheet("""
+            QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+            QScrollBar::handle:vertical { background: #30363d; border-radius: 5px; min-height: 28px; }
+            QScrollBar::handle:vertical:hover { background: #484f58; }
+            QScrollBar:horizontal { background: transparent; height: 10px; margin: 0; }
+            QScrollBar::handle:horizontal { background: #30363d; border-radius: 5px; min-width: 28px; }
+            QScrollBar::handle:horizontal:hover { background: #484f58; }
+            QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: none; border: none; }
+            QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+        """)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(splitter)
@@ -204,6 +221,12 @@ class MainWindow(QMainWindow):
 
         act_exit = file_menu.addAction("Zamknij całkowicie")
         act_exit.triggered.connect(self._force_close)
+
+        view_menu = menu.addMenu("Widok")
+        act_light = view_menu.addAction("Jasny motyw")
+        act_light.setCheckable(True)
+        act_light.setChecked(load_theme() == "light")
+        act_light.toggled.connect(self._toggle_theme)
 
         if self._vault_type == "vpn" and self._vpn_panel:
             sort_menu = menu.addMenu("Sortuj")
@@ -460,6 +483,14 @@ class MainWindow(QMainWindow):
         else:
             self._unlock_admin()
 
+    def _toggle_theme(self, light: bool):
+        save_theme("light" if light else "dark")
+        QMessageBox.information(
+            self, "Motyw",
+            "Motyw zostanie zastosowany po ponownym uruchomieniu aplikacji.\n"
+            "Terminal SSH pozostaje w ciemnych odcieniach.",
+        )
+
     def _unlock_admin(self):
         if not self._admin_hash:
             QMessageBox.information(
@@ -483,7 +514,8 @@ class MainWindow(QMainWindow):
         )
         if self._detail_panel:
             self._detail_panel.set_admin_mode(True)
-        self._admin_lock_timer.start()
+        # Admin stays unlocked for the whole session — no auto-lock timer.
+        # The user re-locks manually by clicking the 🔓 Admin button.
 
     def _lock_admin(self):
         self._admin_unlocked = False

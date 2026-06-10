@@ -460,7 +460,7 @@ def _icons():
 
 
 # Compact list window size vs edit window size
-_LIST_SIZE = (420, 400)
+_LIST_SIZE = (420, 700)
 _EDIT_SIZE = (520, 560)
 
 
@@ -897,30 +897,44 @@ class VpnPanel(QWidget):
             det_lbl.setStyleSheet("color: #8b949e; font-size: 10px; border: none;")
         info.addWidget(det_lbl)
 
-        # Status label — under info, not squeezed between buttons
-        status_lbl = QLabel("")
-        status_lbl.setStyleSheet("color: #8b949e; font-size: 10px; border: none;")
-        info.addWidget(status_lbl)
-        self._status_labels[idx] = status_lbl
+        # Windows VPN: brak headless connect (modern Settings store nie
+        # udostępnia creds rasdial/rasphone). Pokazujemy tylko hint o ręcznym
+        # połączeniu — bez przycisku Połącz i bez status labela
+        # (rasdial enumeration nie odzwierciedla połączeń odpalanych z flyoutu).
+        is_windows_vpn = p.provider == "Windows VPN"
+        if is_windows_vpn:
+            hint_lbl = QLabel("↗ Połącz ręcznie z listy VPN w Windowsie")
+            hint_lbl.setStyleSheet(
+                "color: #d29922; font-size: 10px; border: none; font-style: italic;"
+            )
+            info.addWidget(hint_lbl)
+        else:
+            # Status label — under info, not squeezed between buttons
+            status_lbl = QLabel("")
+            status_lbl.setStyleSheet("color: #8b949e; font-size: 10px; border: none;")
+            info.addWidget(status_lbl)
+            self._status_labels[idx] = status_lbl
 
         lay.addLayout(info, 1)
 
-        # Toggle connect/disconnect button — single button that swaps icon
-        icon_conn, icon_disc = _icons()
-        btn_toggle = QPushButton()
-        btn_toggle.setFixedSize(30, 30)
-        btn_toggle.setIcon(icon_conn)
-        btn_toggle.setIconSize(QSize(18, 18))
-        btn_toggle.setToolTip("Połącz")
-        btn_toggle.setStyleSheet(
-            "QPushButton { background: #21262d; border: 1px solid #30363d; border-radius: 6px; }"
-            "QPushButton:hover { background: rgba(35,134,54,0.15); border: 1px solid #238636; }"
-            "QPushButton:pressed { background: rgba(35,134,54,0.30); border: 1px solid #2ea043; }"
-        )
-        btn_toggle.clicked.connect(lambda _, i=idx: self._toggle_connection(i))
-        lay.addWidget(btn_toggle)
-        self._toggle_btns[idx] = btn_toggle
-        self._card_states[idx] = "disconnected"
+        # Toggle connect/disconnect button — single button that swaps icon.
+        # Skipped for Windows VPN (no reliable headless connect path).
+        if not is_windows_vpn:
+            icon_conn, icon_disc = _icons()
+            btn_toggle = QPushButton()
+            btn_toggle.setFixedSize(30, 30)
+            btn_toggle.setIcon(icon_conn)
+            btn_toggle.setIconSize(QSize(18, 18))
+            btn_toggle.setToolTip("Połącz")
+            btn_toggle.setStyleSheet(
+                "QPushButton { background: #21262d; border: 1px solid #30363d; border-radius: 6px; }"
+                "QPushButton:hover { background: rgba(35,134,54,0.15); border: 1px solid #238636; }"
+                "QPushButton:pressed { background: rgba(35,134,54,0.30); border: 1px solid #2ea043; }"
+            )
+            btn_toggle.clicked.connect(lambda _, i=idx: self._toggle_connection(i))
+            lay.addWidget(btn_toggle)
+            self._toggle_btns[idx] = btn_toggle
+            self._card_states[idx] = "disconnected"
 
         # Copy login button
         if p.login:
@@ -1096,10 +1110,19 @@ class VpnPanel(QWidget):
                 lbl.setText("Brak konfig.")
             return
 
+        autofill_on = load_vpn_autofill_enabled()
+        if autofill_on and getattr(self, "_status_timer", None) is not None:
+            # Pause status polling during the autofill window — its netstat
+            # subprocesses (one per profile, every 5s) steal CPU and jitter the
+            # keyboard timing into FortiClient's Chromium UI, which made paste/
+            # Enter fire before fields were focused (empty username at gateway).
+            self._status_timer.stop()
+            QTimer.singleShot(14000, lambda: self._status_timer.start(5000))
+
         ok, msg, process = vpn_connect.connect_monitored(
             p.provider, p.server, p.port, p.login, p.password, p.group, p.domain,
             app_path, p.profile_name,
-            autofill=load_vpn_autofill_enabled(),
+            autofill=autofill_on,
         )
         if lbl:
             color = "#58a6ff" if ok else "#f85149"
@@ -1114,7 +1137,9 @@ class VpnPanel(QWidget):
             # Invalidate adapter cache — następny poll musi widzieć świeży stan
             # adapterów, nie odpowiedź sprzed connectu (cache trzyma do 15s).
             vpn_connect.invalidate_adapter_cache()
-            QTimer.singleShot(2000, self._poll_status)
+            # When autofilling, defer the post-connect poll past the autofill
+            # window so it doesn't reintroduce netstat contention mid-fill.
+            QTimer.singleShot(15000 if autofill_on else 2000, self._poll_status)
 
     def _start_monitor(self, idx: int, process):
         # Stop any previous worker for this idx

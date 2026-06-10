@@ -163,6 +163,18 @@ def save_hospital_sort_order(order: str) -> None:
     _save_all(data)
 
 
+def load_theme() -> str:
+    """Returns the UI theme: 'dark' (default) or 'light'."""
+    theme = _load_all().get("theme", "dark")
+    return "light" if theme == "light" else "dark"
+
+
+def save_theme(theme: str) -> None:
+    data = _load_all()
+    data["theme"] = "light" if theme == "light" else "dark"
+    _save_all(data)
+
+
 def load_personal_vpn_vault() -> str | None:
     """Returns path to user's personal VPN vault, or None if not set."""
     path = _load_all().get("personal_vpn_vault")

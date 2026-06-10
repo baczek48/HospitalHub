@@ -1199,6 +1199,8 @@ def invalidate_adapter_cache() -> None:
     with _state_lock:
         _ADAPTERS_CACHE = (0.0, [])
         _adapter_cache = (0.0, "", "")
+        _rasdial_cache["ts"] = 0.0
+        _rasdial_cache["active"] = set()
 
 # ---------------------------------------------------------------------- #
 # Fallback: subprocess-based (gdy WinAPI zawiedzie — rzadkie)              #
@@ -1572,25 +1574,58 @@ def _autofill_forticlient(login: str, password: str, profile_name: str = ""):
             _press_key(VK_TAB)
             time.sleep(0.3)
 
-            # Select all + type login (handles case when login is pre-filled)
+            # Remember the user's clipboard up front (before we hijack it for
+            # login/password paste); restored after the form is submitted.
+            prev_clip = _get_clipboard_text()
+
+            # Select all + PASTE login (handles case when login is pre-filled).
+            # Pasted, not typed: synthetic typing into the Chromium UI sometimes
+            # drops every char → username reaches the gateway empty.
             if login:
                 _press_combo(VK_CONTROL, ord('A'))
-                time.sleep(0.1)
-                _type_text(login)
-                time.sleep(0.3)
+                time.sleep(0.2)
+                _press_key(0x2E)                  # VK_DELETE — clear field
+                time.sleep(0.2)
+                _copy_to_clipboard(login)
+                time.sleep(0.2)
+                _press_combo(VK_CONTROL, ord('V'))
+                time.sleep(0.5)
 
             # Tab to Password field
             _press_key(VK_TAB)
-            time.sleep(0.3)
+            time.sleep(0.5)
 
-            # Type password
+            # Fill password by PASTING, not typing. Synthetic KEYEVENTF_UNICODE
+            # keystrokes are dropped/mangled by FortiClient's Chromium UI, so a
+            # typed password reaches the gateway subtly wrong → 'Permission denied'
+            # even though the same password pasted by hand connects fine.
+            # We keep the password on the clipboard for the whole submit and only
+            # restore it AFTER Connect, so there is no clipboard-restore race that
+            # could make Ctrl+V paste stale contents.
             if password:
-                _type_text(password)
-                time.sleep(0.3)
+                _press_combo(VK_CONTROL, ord('A'))   # select any prefilled value
+                time.sleep(0.2)
+                _press_key(0x2E)                      # VK_DELETE — clear field
+                time.sleep(0.2)
+                _copy_to_clipboard(password)
+                time.sleep(0.2)
+                _press_combo(VK_CONTROL, ord('V'))    # paste
+                time.sleep(0.9)                       # let Chromium commit paste
 
-            # Enter to Connect
+            # Settle before submit — do NOT press Enter the instant paste fires,
+            # the field needs a beat to register the value first.
+            time.sleep(0.6)
+
+            # Enter (from inside the password field) submits the FortiClient form.
             _press_key(VK_RETURN)
             _dbg("_autofill: pressed Connect")
+
+            # Restore the user's clipboard only after the form was submitted.
+            time.sleep(1.5)
+            try:
+                _copy_to_clipboard(prev_clip if prev_clip is not None else "")
+            except Exception:
+                pass
         finally:
             if attached:
                 try:
@@ -1927,6 +1962,20 @@ def _copy_to_clipboard(text: str) -> bool:
     except Exception:
         return False
 
+def _get_clipboard_text():
+    """Read current clipboard text (CF_UNICODETEXT), or None."""
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        except Exception:
+            data = None
+        win32clipboard.CloseClipboard()
+        return data
+    except Exception:
+        return None
+
 def _autofill_globalprotect(login: str, password: str, portal: str = ""):
     """Auto-fill GlobalProtect two-step flow:
     Step 1: Portal/profile selection → click Connect
@@ -2141,23 +2190,212 @@ def fill_forticlient_token(token: str, timeout: float = 15.0) -> tuple[bool, str
     return True, "Token wpisany — kliknij Connect ręcznie."
 
 # ------------------------------------------------------------------ #
+# Windows built-in VPN (rasdial / phonebook)                          #
+# ------------------------------------------------------------------ #
+# Wbudowany w Windows klient VPN. Profil musi być wcześniej utworzony
+# w Settings → VPN (lub Network Connections) z zaznaczonym "Zapamiętaj
+# moje dane logowania" — wtedy rasdial łączy się headless.
+#
+# CLI: rasdial.exe "Nazwa profilu"            -> connect
+#      rasdial.exe "Nazwa profilu" /DISCONNECT -> disconnect
+#      rasdial.exe                              -> lista aktywnych
+#
+# Status: parsowanie rasdial (bez argów). Aktywne profile są wcięte
+# w stdout, więc filtrujemy po startswith(' '|'\t') — niezależnie od
+# języka systemu (PL/EN/itd.).
+
+_rasdial_cache: dict = {"ts": 0.0, "active": set()}
+_RASDIAL_CACHE_TTL = 3.0
+
+def _rasdial_active_connections() -> set[str]:
+    """Return set of active VPN connection names (per `rasdial` no-args).
+    Cached for _RASDIAL_CACHE_TTL seconds to keep status polls cheap."""
+    import time
+    now = time.monotonic()
+    with _state_lock:
+        if now - _rasdial_cache["ts"] < _RASDIAL_CACHE_TTL:
+            return _rasdial_cache["active"]
+    active: set[str] = set()
+    try:
+        r = subprocess.run(
+            ["rasdial"], capture_output=True, timeout=5,
+            startupinfo=_hidden_startupinfo(), creationflags=_NO_WINDOW,
+        )
+        # rasdial uses Windows ANSI (mbcs) — Polish chars may appear in names.
+        output = (r.stdout or b"").decode("mbcs", errors="replace")
+        # Active profile lines are indented (tab or spaces). Header / trailer
+        # lines start at column 0. Language-agnostic.
+        for line in output.splitlines():
+            if line.startswith((" ", "\t")):
+                name = line.strip()
+                if name:
+                    active.add(name)
+    except Exception:
+        pass
+    with _state_lock:
+        _rasdial_cache["ts"] = now
+        _rasdial_cache["active"] = active
+    return active
+
+def _invalidate_rasdial_cache() -> None:
+    with _state_lock:
+        _rasdial_cache["ts"] = 0.0
+        _rasdial_cache["active"] = set()
+
+def _resolve_rasdial() -> str:
+    """Locate rasdial.exe explicitly — PyInstaller-stripped env may hide
+    System32 PATH on some setups; absolute path is bulletproof."""
+    for base in (os.environ.get("SystemRoot", r"C:\Windows"),
+                 r"C:\Windows", r"C:\WINNT"):
+        p = os.path.join(base, "System32", "rasdial.exe")
+        if os.path.isfile(p):
+            return p
+        p2 = os.path.join(base, "Sysnative", "rasdial.exe")  # WOW64 case
+        if os.path.isfile(p2):
+            return p2
+    return "rasdial.exe"  # fallback to PATH
+
+def _run_rasdial_async(args: list[str], action: str, profile_name: str) -> None:
+    """Run rasdial in a background thread, capture stdout/stderr + return
+    code, log everything to vpn_debug.log. Status poll then reflects the
+    actual outcome within the cache TTL."""
+    import threading
+
+    def _do():
+        exe = _resolve_rasdial()
+        cmd = [exe] + args
+        _dbg(f"rasdial {action} '{profile_name}': cmd={cmd}")
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, timeout=90,
+                startupinfo=_hidden_startupinfo(),
+                creationflags=_NO_WINDOW,
+            )
+            out = (r.stdout or b"").decode("mbcs", errors="replace").strip()
+            err = (r.stderr or b"").decode("mbcs", errors="replace").strip()
+            _dbg(f"rasdial {action} '{profile_name}' rc={r.returncode} "
+                 f"out={out!r} err={err!r}")
+        except subprocess.TimeoutExpired:
+            _dbg(f"rasdial {action} '{profile_name}' TIMEOUT (90s)")
+        except FileNotFoundError as e:
+            _dbg(f"rasdial {action} '{profile_name}' FileNotFound: {e}")
+        except Exception as e:
+            _dbg(f"rasdial {action} '{profile_name}' EXC: {e}")
+        finally:
+            _invalidate_rasdial_cache()
+
+    threading.Thread(target=_do, daemon=True).start()
+
+def _resolve_rasphone() -> str:
+    """Locate rasphone.exe (classic dial UI)."""
+    for base in (os.environ.get("SystemRoot", r"C:\Windows"),
+                 r"C:\Windows", r"C:\WINNT"):
+        p = os.path.join(base, "System32", "rasphone.exe")
+        if os.path.isfile(p):
+            return p
+    return "rasphone.exe"
+
+def _open_rasphone_dial(profile_name: str) -> bool:
+    """Open the classic Windows dial dialog for `profile_name`.
+
+    Used as a fallback when rasdial.exe fails to find stored credentials
+    (common for VPN profiles created via the modern Settings UI on Win10/11:
+    creds are stored in a Credential Manager target that rasdial doesn't
+    consult, but rasphone's dialog displays them pre-filled — user clicks
+    Connect once).
+
+    Spawned via ShellExecuteW (open verb, SW_SHOWNORMAL) — NOT subprocess
+    with _hidden_startupinfo, which sets wShowWindow=SW_HIDE and silently
+    hides the dialog (process runs, no window visible — confirmed bug)."""
+    import ctypes
+    exe = _resolve_rasphone()
+    try:
+        # ShellExecuteW: lpVerb='open', nShowCmd=SW_SHOWNORMAL(1)
+        # Parameters string must escape profile name for spaces/quotes.
+        params = f'-d "{profile_name}"'
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "open", exe, params, None, 1)
+        _dbg(f"rasphone -d '{profile_name}' ShellExecuteW rc={rc}")
+        return rc > 32
+    except Exception as e:
+        _dbg(f"rasphone -d '{profile_name}' EXC: {e}")
+        return False
+
+def _run_rasdial_with_fallback_async(profile_name: str) -> None:
+    """Try `rasdial entryname` headless first. On non-zero exit (e.g. 691
+    when modern-Settings creds aren't visible to rasdial), open the classic
+    rasphone dial dialog so the user can confirm with one click."""
+    import threading
+
+    def _do():
+        exe = _resolve_rasdial()
+        cmd = [exe, profile_name]
+        _dbg(f"rasdial connect '{profile_name}': cmd={cmd}")
+        rc = -1
+        out = ""
+        err = ""
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, timeout=90,
+                startupinfo=_hidden_startupinfo(),
+                creationflags=_NO_WINDOW,
+            )
+            rc = r.returncode
+            out = (r.stdout or b"").decode("mbcs", errors="replace").strip()
+            err = (r.stderr or b"").decode("mbcs", errors="replace").strip()
+            _dbg(f"rasdial connect '{profile_name}' rc={rc} out={out!r} err={err!r}")
+        except subprocess.TimeoutExpired:
+            _dbg(f"rasdial connect '{profile_name}' TIMEOUT (90s)")
+        except Exception as e:
+            _dbg(f"rasdial connect '{profile_name}' EXC: {e}")
+        finally:
+            _invalidate_rasdial_cache()
+
+        if rc != 0:
+            _dbg(f"rasdial failed → opening rasphone dial dialog for '{profile_name}'")
+            ok = _open_rasphone_dial(profile_name)
+            _dbg(f"rasphone fallback opened={ok}")
+
+    threading.Thread(target=_do, daemon=True).start()
+
+def _windows_vpn_connect(profile_name: str) -> tuple[bool, str]:
+    """Connect: rasdial headless first; if it fails (e.g. 691 because the
+    modern Settings store hides creds from rasdial), open the classic
+    rasphone dial dialog where Windows pre-fills the saved username/password
+    — user clicks Connect once. See vpn_debug.log for the rasdial rc."""
+    if not profile_name:
+        return False, "Podaj nazwę profilu Windows VPN."
+    _run_rasdial_with_fallback_async(profile_name)
+    return True, f"Łączenie z '{profile_name}'..."
+
+def _windows_vpn_disconnect(profile_name: str) -> tuple[bool, str]:
+    """Disconnect via rasdial /DISCONNECT — needs no credentials, always works."""
+    if not profile_name:
+        return False, "Podaj nazwę profilu Windows VPN."
+    _run_rasdial_async([profile_name, "/DISCONNECT"], "disconnect", profile_name)
+    return True, f"Rozłączanie '{profile_name}'..."
+
+# ------------------------------------------------------------------ #
 # Connect / disconnect                                                 #
 # ------------------------------------------------------------------ #
 
-_DEBUG_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vpn_debug.log")
+def _resolve_log_dir() -> str:
+    """Persistent log dir. For PyInstaller --onefile, __file__ lives in
+    _MEIPASS (temp, deleted on exit) — use sys.executable instead so
+    vpn_debug.log lands next to HospitalHub.exe and survives restarts."""
+    import sys
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+_DEBUG_LOG = os.path.join(_resolve_log_dir(), "vpn_debug.log")
 
 _DBG_MAX_SIZE = 1_000_000  # 1 MB
 
 def _dbg(msg: str):
-    """Legacy debug logger — vpn_debug.log w katalogu instalacji (best effort)."""
-    import datetime
-    try:
-        if os.path.exists(_DEBUG_LOG) and os.path.getsize(_DEBUG_LOG) > _DBG_MAX_SIZE:
-            os.replace(_DEBUG_LOG, _DEBUG_LOG + ".old")
-        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.datetime.now()} {msg}\n")
-    except Exception:
-        pass
+    """No-op — debug logging wyłączone na życzenie usera (2026-05-28).
+    Call sites zostawione, żeby było łatwo wpiąć z powrotem przez przywrócenie
+    poprzedniej implementacji (file write do _DEBUG_LOG)."""
+    pass
 
 def connect(provider: str, server: str, port: str, login: str, password: str,
             group: str = "", domain: str = "",
@@ -2487,6 +2725,17 @@ def connect(provider: str, server: str, port: str, login: str, password: str,
                 return False, f"Błąd:\n{e}"
         return False, "Podaj ścieżkę do klienta VPN lub nazwę połączenia."
 
+    elif provider == "Windows VPN":
+        # Wbudowany klient VPN Windows — rasdial używa nazwy profilu z
+        # rasphone.pbk. Credentiale muszą być zapisane w profilu
+        # ("Zapamiętaj moje dane logowania") — nie przekazujemy ich z
+        # HospitalHub, żeby nie obejść intencji użytkownika.
+        conn_name = profile_name or server
+        _last_connected[provider] = conn_name or ""
+        _last_connected_meta[provider] = {"server": server or "",
+                                          "profile_name": conn_name or ""}
+        return _windows_vpn_connect(conn_name)
+
     # Generic handler for custom providers — just launch the exe
     exe = app_path if (app_path and os.path.isfile(app_path)) else None
     if exe:
@@ -2602,6 +2851,12 @@ def disconnect(provider: str, server: str = "",
         _last_connected.pop(provider, None)
         _last_connected_meta.pop(provider, None)
         return True, "Rozłącz ręcznie w kliencie Barracuda."
+
+    elif provider == "Windows VPN":
+        conn_name = profile_name or server
+        _last_connected.pop(provider, None)
+        _last_connected_meta.pop(provider, None)
+        return _windows_vpn_disconnect(conn_name)
 
     # Generic custom provider
     _last_connected.pop(provider, None)
@@ -2772,6 +3027,12 @@ def get_status(provider: str, app_path: str = "",
         if status:
             return status
         return "Disconnected"
+
+    elif provider == "Windows VPN":
+        # Status nie pollowany — rasdial enumeration nie pokrywa połączeń
+        # odpalanych z modern Settings flyout. UI dla tego providera nie ma
+        # status label, więc None tu jest spójne z brakiem renderowania.
+        return None
 
     # Remote desktop tools — always running in background, status not meaningful
     _REMOTE_DESKTOP_KEYWORDS = ("anydesk", "teamviewer", "rustdesk", "supremo",

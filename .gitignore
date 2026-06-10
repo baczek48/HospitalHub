@@ -4,9 +4,9 @@ __pycache__/
 
 # PyInstaller build artifacts
 build/
-dist/HospitalHub/
-dist/HospitalHub.zip
-dist/security_info.txt
+dist/
+dist_installer/
+*.exe
 
 # Test / scratch files
 _test_tmp.py
@@ -16,8 +16,17 @@ test_terminal_history.py
 # Vault data files (user data, never commit)
 *.vault
 
-# Config (local user settings)
-# config.json is stored in %APPDATA%\HospitalHub, not here
+# Config / local user settings (never commit — może zawierać poświadczenia)
+config.json
+
+# Logi diagnostyczne
+*.log
+Seba J HH/
+zrzuty_debug/
+
+# Transkrypty sesji i zrzuty ekranu (robocze)
+20[0-9][0-9]-[0-9]*.txt
+*.png
 
 # OS
 .DS_Store

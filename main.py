@@ -444,6 +444,16 @@ def _try_activate_existing() -> bool:
 
 
 def main():
+    # Must be set BEFORE QApplication() to take effect. PassThrough lets Qt
+    # use the system's fractional DPI scaling (125% / 150% / 175%) verbatim
+    # instead of rounding to the nearest integer (the Qt6 default). On
+    # external monitors with fractional Windows scaling this stops Qt from
+    # operating on an over-scaled coordinate space — without it each paint
+    # in the terminal widget had to cover more logical pixels than the
+    # screen actually has, which manifested as sluggish redraws.
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     app.setApplicationName("HospitalHub")
 
@@ -452,7 +462,18 @@ def main():
         sys.exit(0)
 
     app.setApplicationDisplayName("")
-    apply_dark_theme(app)
+    # Theme: dark (default) keeps apply_dark_theme; light installs the warm-ivory
+    # palette + the stylesheet remap (must run before any window is built).
+    try:
+        from config import load_theme
+        from ui import theme as _theme
+        _chosen = load_theme()
+    except Exception:
+        _chosen = "dark"
+    if _chosen == "light":
+        _theme.install(app, "light")
+    else:
+        apply_dark_theme(app)
     app.setWindowIcon(make_icon())
 
     manager = AppManager(app)

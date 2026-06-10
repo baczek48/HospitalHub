@@ -1,5 +1,6 @@
 # Copyright © 2026 Sebastian Bąk. All rights reserved.
 
+import base64
 import hashlib
 import json
 import math
@@ -195,7 +196,7 @@ from PyQt6.QtWidgets import (
     QScrollBar, QToolButton, QToolTip,
 )
 from PyQt6.QtCore import (
-    Qt, QThread, QTimer, QSize, QEvent, pyqtSignal, QMimeData, QUrl,
+    Qt, QThread, QTimer, QSize, QEvent, QObject, pyqtSignal, QMimeData, QUrl,
     QBuffer, QByteArray, QIODevice,
 )
 from PyQt6.QtGui import (
@@ -206,6 +207,7 @@ from PyQt6.QtGui import (
 from html import escape as _esc
 
 from ui.rdp import connect_rdp as _connect_rdp
+from ui import theme
 
 try:
     import pyte
@@ -762,6 +764,16 @@ class TerminalWidget(QWidget):
         Qt.Key.Key_F9:  b'\x1b[20~', Qt.Key.Key_F10: b'\x1b[21~',
         Qt.Key.Key_F11: b'\x1b[23~', Qt.Key.Key_F12: b'\x1b[24~',
     }
+    # DECCKM (application cursor keys) — vim/less/mc set private mode 1
+    # after entering alt-screen and then expect \x1bOA-D for arrow keys
+    # instead of the default \x1b[A-D. Without this map vim's normal-mode
+    # navigation via arrows does nothing.
+    _APP_CURSOR_MAP = {
+        Qt.Key.Key_Up:    b'\x1bOA',
+        Qt.Key.Key_Down:  b'\x1bOB',
+        Qt.Key.Key_Right: b'\x1bOC',
+        Qt.Key.Key_Left:  b'\x1bOD',
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -883,12 +895,21 @@ class TerminalWidget(QWidget):
         """
         if not self._pending_data:
             return
+        import time as _t
         if self._stream:
-            import time as _t
             # Tight timeslice — keeps the UI thread returning to its event
             # loop fast enough that key presses (esp. Ctrl+C) don't get
             # stuck behind a long flush of buffered chunks.
-            deadline = _t.monotonic() + 0.010   # ~10 ms per pass
+            # In alt-screen mode (top/htop/vim/less/mc) a full-screen app
+            # emits a complete frame every cycle. If we tear that frame by
+            # breaking mid-flush, the user sees half the previous frame and
+            # half the new one for ~8 ms (visible as duplicated/jumping rows
+            # in `top`). Frames are small (~5-10 KB across a handful of
+            # chunks), so a 30 ms budget lets them land atomically while
+            # still leaving the UI responsive to Ctrl+C on pathological
+            # alt-screen streams (`yes | less`).
+            in_alt = self._screen._in_alt_screen() if self._screen else False
+            deadline = _t.monotonic() + (0.030 if in_alt else 0.010)
             n = len(self._pending_data)
             i = 0
             while i < n:
@@ -918,7 +939,17 @@ class TerminalWidget(QWidget):
         self._hist_cache    = None  # new rows may have scrolled into history
         self._cur_vis = True
         self._blink.start(530)
-        self.update()
+        # Frame skip during a backlog: heavy log streams (docker logs -f, tail -f)
+        # emit dozens of chunks back-to-back. Each flush would otherwise repaint
+        # the full visible buffer (~10k cells), but the next flush 8 ms later
+        # overwrites that paint immediately — pure wasted work. Skip the paint
+        # if data is still queued, except we force one every 50 ms so the user
+        # still sees live progress (~20 fps minimum during sustained streams).
+        now = _t.monotonic()
+        last_paint = getattr(self, '_last_paint_t', 0.0)
+        if not self._pending_data or (now - last_paint) > 0.050:
+            self.update()
+            self._last_paint_t = now
         self._emit_scroll()
         # If the timeslice expired with leftover work, schedule another pass.
         if self._pending_data and not self._coalesce_timer.isActive():
@@ -1426,7 +1457,16 @@ class TerminalWidget(QWidget):
         if ctrl and not shift:
             data = self._CTRL_MAP.get(key)
         else:
-            data = self._SPECIAL_MAP.get(key)
+            # DECCKM check: pyte stores private modes shifted by 5, so mode 1
+            # (application cursor keys) appears in screen.mode as 32. When set,
+            # arrows must use \x1bOA-D instead of \x1b[A-D — otherwise vim's
+            # cursor navigation in normal mode looks dead.
+            if (self._screen
+                    and key in self._APP_CURSOR_MAP
+                    and 32 in self._screen.mode):
+                data = self._APP_CURSOR_MAP[key]
+            else:
+                data = self._SPECIAL_MAP.get(key)
             if data is None and event.text():
                 data = event.text().encode('utf-8')
 
@@ -1668,8 +1708,207 @@ def _x11_handler(channel, info):
     threading.Thread(target=_pipe, args=(sock, channel), daemon=True).start()
 
 
+def _count_dir_with_cap(listdir_attr_fn, root: str, cap: int) -> dict:
+    """Iteratively count files & subdirs below `root`, stopping early when
+    the total exceeds `cap`.
+
+    Pulled out as a pure function (taking a listdir-attr callable, not a
+    paramiko client) so it can be unit-tested without an SSH server. The
+    real call site passes `sftp.listdir_attr`; tests pass a closure over
+    a fixture tree. Iterative on purpose — recursion would hit Python's
+    default 1000-frame limit on the kind of pathological tree that makes
+    this scan worth doing in the first place.
+
+    Returns a dict {'files': int, 'dirs': int, 'capped': bool,
+    'error': str|None}. `error` is set when the root itself cannot be
+    listed — subdir read failures are silently skipped because partial
+    counts are still informative.
+    """
+    result = {'files': 0, 'dirs': 0, 'capped': False, 'error': None}
+    stack = [root]
+    is_root = True
+    while stack:
+        if result['files'] + result['dirs'] > cap:
+            result['capped'] = True
+            return result
+        p = stack.pop()
+        try:
+            entries = listdir_attr_fn(p)
+        except IOError as e:
+            if is_root:
+                result['error'] = str(e)
+                return result
+            is_root = False
+            continue
+        is_root = False
+        for a in entries:
+            sub = p.rstrip('/') + '/' + a.filename
+            if stat.S_ISDIR(a.st_mode or 0):
+                result['dirs'] += 1
+                stack.append(sub)
+            else:
+                result['files'] += 1
+            if result['files'] + result['dirs'] > cap:
+                result['capped'] = True
+                return result
+    return result
+
+
+def _pl_pl(n: int, sg: str, pl_few: str, pl_many: str) -> str:
+    """Render '{n} {noun}' with correct Polish declension.
+
+    1 → singular; 2-4 (but not 12-14) → 'pliki/katalogi'-form; rest → genitive
+    plural ('plików/katalogów'). Mirrors how the language actually counts.
+    """
+    if n == 1:
+        return f"{n} {sg}"
+    last2 = n % 100
+    if 11 <= last2 <= 14:
+        return f"{n} {pl_many}"
+    if 2 <= n % 10 <= 4:
+        return f"{n} {pl_few}"
+    return f"{n} {pl_many}"
+
+
+def _ssh_fingerprint(key) -> tuple[str, str]:
+    """Return (storage_hex, display_openssh) fingerprints for a paramiko key.
+
+    storage_hex is what we persist (back-compat with the old format).
+    display_openssh matches `ssh-keygen -lf` so the user can copy-verify it
+    against the server admin's known good value (`SHA256:abc...XYZ`).
+    """
+    raw = key.asbytes()
+    h = hashlib.sha256(raw).digest()
+    return (
+        hashlib.sha256(raw).hexdigest(),
+        "SHA256:" + base64.b64encode(h).decode('ascii').rstrip('='),
+    )
+
+
+class _HostKeyPrompt(QObject):
+    """Bridge between paramiko's blocking missing_host_key() callback (worker
+    thread) and the Qt modal dialog (GUI thread).
+
+    paramiko invokes the policy synchronously during connect, so we have
+    to block the worker until the user picks. Qt signals are queued
+    cross-thread, so we emit and wait on a threading.Event the GUI
+    handler sets when it's done.
+
+    Must be instantiated on the GUI thread (do it from SshDialog.__init__
+    before any worker is started) so the slot runs on that thread.
+    """
+    _ask_first   = pyqtSignal(str, str, str, object)         # host, key_type, fp, ev
+    _ask_changed = pyqtSignal(str, str, str, str, object)    # host, key_type, old_fp, new_fp, ev
+
+    def __init__(self):
+        super().__init__()
+        self._results: dict[int, bool] = {}
+        self._ask_first.connect(self._on_first, Qt.ConnectionType.QueuedConnection)
+        self._ask_changed.connect(self._on_changed, Qt.ConnectionType.QueuedConnection)
+
+    def _on_first(self, host, key_type, fp, ev):
+        try:
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Nieznany host SSH")
+            box.setText(f"Łączysz się po raz pierwszy z hostem '{host}'.")
+            box.setInformativeText(
+                f"Typ klucza:   {key_type}\n"
+                f"Fingerprint:  {fp}\n\n"
+                "Sprawdź ten fingerprint u administratora serwera. "
+                "Zaakceptuj tylko jeśli się zgadza — w przeciwnym razie "
+                "możesz paść ofiarą ataku MitM."
+            )
+            btn_y = box.addButton("Zaufaj i połącz", QMessageBox.ButtonRole.AcceptRole)
+            btn_n = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(btn_n)
+            box.exec()
+            self._results[id(ev)] = (box.clickedButton() is btn_y)
+        finally:
+            ev.set()
+
+    def _on_changed(self, host, key_type, old_fp, new_fp, ev):
+        try:
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("UWAGA: zmienił się klucz hosta")
+            box.setText(
+                f"Klucz hosta '{host}' jest INNY niż zapamiętany.\n\n"
+                "To może oznaczać atak MitM lub reinstalację serwera. "
+                "Zweryfikuj zanim klikniesz cokolwiek."
+            )
+            box.setInformativeText(
+                f"Typ klucza:        {key_type}\n"
+                f"Zapamiętany:       SHA256(hex)={old_fp[:16]}…\n"
+                f"Nowy fingerprint:  {new_fp}"
+            )
+            btn_cancel = box.addButton("Anuluj (zalecane)", QMessageBox.ButtonRole.RejectRole)
+            btn_accept = box.addButton(
+                "Zaakceptuj nowy klucz", QMessageBox.ButtonRole.DestructiveRole)
+            box.setDefaultButton(btn_cancel)
+            box.exec()
+            self._results[id(ev)] = (box.clickedButton() is btn_accept)
+        finally:
+            ev.set()
+
+    def ask_first(self, host: str, key_type: str, fp: str) -> bool:
+        ev = threading.Event()
+        self._ask_first.emit(host, key_type, fp, ev)
+        ev.wait()
+        return self._results.pop(id(ev), False)
+
+    def ask_changed(self, host: str, key_type: str, old_fp: str, new_fp: str) -> bool:
+        ev = threading.Event()
+        self._ask_changed.emit(host, key_type, old_fp, new_fp, ev)
+        ev.wait()
+        return self._results.pop(id(ev), False)
+
+
+_host_key_prompt: '_HostKeyPrompt | None' = None
+
+
+def _get_host_key_prompt() -> '_HostKeyPrompt | None':
+    """Return the GUI bridge for host-key prompts (lazy singleton).
+
+    Must be called from the GUI thread the first time so the QObject
+    binds its signals to that thread's event loop. Subsequent calls
+    return the existing instance. Returns None if no QApplication is
+    running yet — caller should fall back to legacy silent TOFU.
+    """
+    global _host_key_prompt
+    if _host_key_prompt is None:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return None
+        _host_key_prompt = _HostKeyPrompt()
+        # Defensive: if a worker thread accidentally created us, snap
+        # affinity back to the GUI thread so queued signals dispatch there.
+        if _host_key_prompt.thread() is not app.thread():
+            _host_key_prompt.moveToThread(app.thread())
+    return _host_key_prompt
+
+
 class _TofuHostKeyPolicy(paramiko.MissingHostKeyPolicy):
-    """Trust-On-First-Use: stores fingerprint on first connect, rejects mismatches."""
+    """Trust-On-First-Use with a real user prompt.
+
+    Old behaviour: silently stored whatever fingerprint the server presented
+    on the first connect — the user had no chance to verify and was
+    vulnerable to a first-time MitM. Old mismatch behaviour: hard-raise
+    BadHostKeyException with no escape hatch, so a legitimate server-key
+    rotation required hand-editing ~/.hospitalhub_known_hosts.
+
+    New behaviour:
+      • First connect → modal showing the OpenSSH-style fingerprint
+        (SHA256:base64). User accepts → stored; rejects → SSHException.
+      • Mismatch → loud security modal with both fingerprints. User
+        either cancels (raise BadHostKeyException) or explicitly
+        accepts the new key (store + proceed).
+
+    Falls back to legacy silent-TOFU only when no GUI is available
+    (running headless or before QApplication exists). Don't depend on
+    that path in production — it's a footgun.
+    """
 
     _KEYS_FILE = os.path.join(os.path.expanduser('~'), '.hospitalhub_known_hosts')
     _cache: dict | None = None
@@ -1695,18 +1934,38 @@ class _TofuHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     def missing_host_key(self, client, hostname: str, key) -> None:
         known    = self._load()
         key_type = key.get_name()
-        fp       = hashlib.sha256(key.asbytes()).hexdigest()
+        fp_hex, fp_display = _ssh_fingerprint(key)
 
         stored = known.get(hostname, {})
         if key_type in stored:
-            if stored[key_type] != fp:
+            if stored[key_type] == fp_hex:
+                return                 # known good — silent allow
+            # Mismatch — possible MitM or legit rotation.
+            prompt = _get_host_key_prompt()
+            if prompt is None or not prompt.ask_changed(
+                    hostname, key_type, stored[key_type], fp_display):
                 raise paramiko.BadHostKeyException(hostname, key, key)
-            # Key matches — allow silently
-        else:
-            # First connection — store fingerprint (TOFU)
-            stored[key_type] = fp
+            # User accepted — record new key and continue.
+            stored[key_type] = fp_hex
             known[hostname]  = stored
             self._save()
+            return
+
+        # First connection — ask before trusting.
+        prompt = _get_host_key_prompt()
+        if prompt is None:
+            # No GUI available (headless / very early startup). Legacy
+            # silent-TOFU keeps the app usable; not a security claim.
+            stored[key_type] = fp_hex
+            known[hostname]  = stored
+            self._save()
+            return
+        if not prompt.ask_first(hostname, key_type, fp_display):
+            raise paramiko.SSHException(
+                f"Klucz hosta {hostname} odrzucony przez użytkownika")
+        stored[key_type] = fp_hex
+        known[hostname]  = stored
+        self._save()
 
 
 def _make_client(host: str, user: str, password: str, port: int = 22) -> 'paramiko.SSHClient':
@@ -1956,12 +2215,20 @@ class _SshWorker(QThread):
         except paramiko.AuthenticationException:
             self.error.emit("Błąd autentykacji — sprawdź login i hasło.")
         except paramiko.BadHostKeyException as e:
+            # The TOFU policy now handles mismatches with an explicit modal
+            # and a user-driven accept-or-cancel choice. Reaching this
+            # except means the user cancelled or no GUI prompt was
+            # available — surface the rejection plainly.
             self.error.emit(
-                f"Ostrzeżenie: klucz hosta {e.hostname!r} zmienił się!\n"
-                "Możliwy atak MitM. Zweryfikuj serwer ręcznie."
+                f"Połączenie odrzucone — klucz hosta {e.hostname!r} nie zgadza się "
+                "z zapisanym. Możliwy atak MitM."
             )
         except paramiko.SSHException as e:
-            self.error.emit(f"Błąd SSH: {type(e).__name__}")
+            # Preserve the original message (was hidden behind type name —
+            # the TOFU prompt's user-rejected message would otherwise look
+            # like a generic "Błąd SSH: SSHException").
+            msg = str(e) or type(e).__name__
+            self.error.emit(f"Błąd SSH: {msg}")
         except OSError as e:
             self.error.emit(f"Błąd sieci: {e.strerror or type(e).__name__}")
         except Exception as e:
@@ -2084,10 +2351,15 @@ class _SftpConnectWorker(QThread):
         except paramiko.AuthenticationException:
             self.error.emit("Błąd autentykacji — sprawdź login i hasło.")
         except paramiko.BadHostKeyException as e:
+            # TOFU policy already showed the security modal; reaching
+            # here means the user picked Cancel (or no GUI was up).
             self.error.emit(
-                f"Ostrzeżenie: klucz hosta {e.hostname!r} zmienił się!\n"
-                "Możliwy atak MitM. Zweryfikuj serwer ręcznie."
+                f"Połączenie odrzucone — klucz hosta {e.hostname!r} nie zgadza się "
+                "z zapisanym. Możliwy atak MitM."
             )
+        except paramiko.SSHException as e:
+            msg = str(e) or type(e).__name__
+            self.error.emit(f"Błąd SSH: {msg}")
         except Exception as e:
             self.error.emit(f"Błąd połączenia: {type(e).__name__}")
 
@@ -2672,7 +2944,7 @@ class SftpPanel(QWidget):
     status_msg    = pyqtSignal(str, bool)   # text, is_error
     upload_file   = pyqtSignal(str)         # local path
     _open_local   = pyqtSignal(str)         # path → open in main thread
-    _watch_file_sig = pyqtSignal(str, str, int)  # local_path, remote_path, orig_size → watch in main thread
+    _watch_file_sig = pyqtSignal(str, str, int, bool, int, int)  # local_path, remote_path, orig_size, readonly, server_mtime, server_size
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2824,33 +3096,33 @@ class SftpPanel(QWidget):
         self._table.itemSelectionChanged.connect(self._on_sel_change)
         self._table.setStyleSheet("""
             QTableWidget {
-                background: #0d1117;
-                alternate-background-color: #111820;
+                background: #161b22;
+                alternate-background-color: #1c2128;
                 color: #e6edf3;
-                border: 1px solid #21262d;
+                border: 1px solid #30363d;
                 border-radius: 6px;
                 gridline-color: transparent;
+                outline: none;
                 selection-background-color: #1a2540;
                 selection-color: #c0d0f0;
             }
             QTableWidget::item {
-                padding: 2px 4px;
-                border-bottom: 1px solid #161b22;
+                padding: 5px 6px;
+                border: none;
             }
             QTableWidget::item:selected {
                 background: #1a2540;
                 color: #c0d0f0;
-                border-radius: 3px;
             }
             QTableWidget::item:hover:!selected {
-                background: #131920;
+                background: #1c2433;
             }
             QHeaderView::section {
-                background: #0d1117;
+                background: #161b22;
                 color: #7d8590;
                 border: none;
-                border-bottom: 2px solid #21262d;
-                padding: 5px 8px;
+                border-bottom: 1px solid #30363d;
+                padding: 6px 8px;
                 font-size: 10px;
                 font-weight: 600;
                 text-transform: uppercase;
@@ -3070,7 +3342,10 @@ class SftpPanel(QWidget):
                 ni.setIcon(_icon_for_entry(name, is_dir))
                 ni.setData(Qt.ItemDataRole.UserRole, (name, is_dir, size))
                 if is_dir:
-                    ni.setForeground(QColor("#e6edf3"))
+                    # Folders blue for clear distinction; strong blue on the
+                    # light theme's white list, original bright on dark.
+                    dir_c = "#0a52c0" if theme.active() == theme.LIGHT else "#e6edf3"
+                    ni.setForeground(QColor(dir_c))
                 table.setItem(i, 0, ni)
 
                 # Col 1: size (numeric sort)
@@ -3254,25 +3529,45 @@ class SftpPanel(QWidget):
         # The previous code optimistically renamed the row in the table and only
         # discovered the conflict on the SFTP error, leaving the wrong label
         # visible until the next directory refresh.
+        new_remote = self._path.rstrip('/') + '/' + new_name
+        conflict_found = False
         for r in range(self._table.rowCount()):
             it = self._table.item(r, 0)
             if not it or it is item:
                 continue
             ex_name, _, _ = it.data(Qt.ItemDataRole.UserRole)
             if ex_name == new_name:
-                self._in_conflict_dialog = True
-                try:
-                    QMessageBox.warning(
-                        self, "Zmiana nazwy",
-                        f"Plik lub folder o nazwie '{new_name}' już istnieje "
-                        f"w tym katalogu.\n\nWybierz inną nazwę.",
-                    )
-                finally:
-                    self._in_conflict_dialog = False
-                if self._rename_editor is ed:
-                    ed.setFocus()
-                    ed.selectAll()
-                return
+                conflict_found = True
+                break
+        # Belt + suspenders: the in-memory check above only sees the rows
+        # we listed. Hidden entries (the listing filtered out) and races
+        # with another client (a parallel SFTP session creating the file
+        # between our listdir and our rename) would slip past. On
+        # OpenSSH-style servers sftp.rename uses POSIX rename(2)
+        # semantics → silent clobber. One extra stat() roundtrip closes
+        # the window in the common case.
+        if not conflict_found and self._sftp:
+            try:
+                self._sftp.stat(new_remote)
+                conflict_found = True
+            except IOError:
+                pass        # doesn't exist on server — proceed
+            except Exception:
+                pass        # stat failed for unrelated reason — let rename try
+        if conflict_found:
+            self._in_conflict_dialog = True
+            try:
+                QMessageBox.warning(
+                    self, "Zmiana nazwy",
+                    f"Plik lub folder o nazwie '{new_name}' już istnieje "
+                    f"w tym katalogu.\n\nWybierz inną nazwę.",
+                )
+            finally:
+                self._in_conflict_dialog = False
+            if self._rename_editor is ed:
+                ed.setFocus()
+                ed.selectAll()
+            return
         # Snapshot scroll BEFORE closing the editor — focus moving back from
         # the QLineEdit to the table triggers Qt's "scroll to current cell"
         # behaviour. If the current column is e.g. "Rozmiar" (because the
@@ -3318,7 +3613,13 @@ class SftpPanel(QWidget):
         self._workers.append(w)
 
     def _handle_drag_move(self, src_names: list, target_folder: str):
-        """Move dragged entries into `target_folder` (relative to current dir)."""
+        """Move dragged entries into `target_folder` (relative to current dir).
+
+        sftp.rename() on POSIX-like servers silently clobbers an existing
+        destination — drag-dropping a file into a folder that already
+        has one of the same name used to wipe the target. We now stat()
+        each destination first and ask before overwriting.
+        """
         if not self._sftp or self._listing_active or not src_names:
             return
         base = self._path.rstrip('/')
@@ -3331,9 +3632,81 @@ class SftpPanel(QWidget):
         moves = [((base + '/' + n) if base else '/' + n,
                   (target_dir.rstrip('/') + '/' + n)) for n in src_names]
 
+        # Filter out trivial moves where source == destination (e.g.
+        # dropping a row onto itself). Server would error out anyway.
+        moves = [(old, new) for (old, new) in moves if old != new]
+        if not moves:
+            return
+
+        def after_scan(conflicts: list[str]):
+            chosen = moves
+            overwrite_set: set[str] = set()
+            if conflicts:
+                action = self._ask_overwrite(conflicts)
+                if action == 'cancel':
+                    return
+                if action == 'skip':
+                    skip_set = set(conflicts)
+                    chosen = [m for m in moves if m[1] not in skip_set]
+                    if not chosen:
+                        self.status_msg.emit(
+                            "Wszystkie cele istnieją — przeniesienie pominięte", False)
+                        return
+                else:
+                    overwrite_set = set(conflicts)
+            self._start_moves(chosen, overwrite_set)
+
+        self._scan_move_conflicts_async(moves, after_scan)
+
+    def _scan_move_conflicts_async(self, moves, on_done):
+        """Find destinations that already exist; same channel-discipline
+        as the upload scan (fresh open_sftp under lock, dedicated channel
+        per scan)."""
+        ssh_client = self._ssh_client
+        lock = self._sftp_open_lock
+        conflicts: list[str] = []
+
+        def scan():
+            with lock:
+                sftp = ssh_client.open_sftp()
+            try:
+                for old, new in moves:
+                    try:
+                        sftp.stat(new)
+                        conflicts.append(new)
+                    except IOError:
+                        continue
+                    except Exception:
+                        continue
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        w = _SimpleWorker(scan)
+        w.done.connect(lambda: on_done(conflicts))
+        w.error.connect(lambda e: self.status_msg.emit(
+            f"Skan kolizji: {e}", True))
+        w.start()
+        self._workers.append(w)
+
+    def _start_moves(self, moves: list[tuple[str, str]],
+                     overwrite_set: set[str]):
+        """Execute the (old, new) renames; for items in overwrite_set, remove
+        the destination first so sftp.rename() can complete cleanly."""
+        sftp = self._sftp
+
         def do_move():
             for old, new in moves:
-                self._sftp.rename(old, new)
+                if new in overwrite_set:
+                    try:
+                        sftp.remove(new)
+                    except IOError:
+                        pass            # gone in the meantime — rename will decide
+                    except Exception:
+                        pass
+                sftp.rename(old, new)
 
         def on_error(e):
             self.status_msg.emit(f"Przenoszenie: {e}", True)
@@ -3358,18 +3731,31 @@ class SftpPanel(QWidget):
         if '/' in name or name in ('.', '..'):
             QMessageBox.warning(self, "Nowy folder", "Nieprawidłowa nazwa folderu.")
             return
+        conflict = False
         for r in range(self._table.rowCount()):
             it = self._table.item(r, 0)
             if not it:
                 continue
             ex_name, _, _ = it.data(Qt.ItemDataRole.UserRole)
             if ex_name == name:
-                QMessageBox.warning(
-                    self, "Nowy folder",
-                    f"Element o nazwie '{name}' już istnieje w tym katalogu.",
-                )
-                return
+                conflict = True
+                break
         remote = self._path.rstrip('/') + '/' + name
+        # Belt + suspenders — see _commit_rename for the same pattern.
+        if not conflict and self._sftp:
+            try:
+                self._sftp.stat(remote)
+                conflict = True
+            except IOError:
+                pass
+            except Exception:
+                pass
+        if conflict:
+            QMessageBox.warning(
+                self, "Nowy folder",
+                f"Element o nazwie '{name}' już istnieje w tym katalogu.",
+            )
+            return
 
         def do_mkdir():
             self._sftp.mkdir(remote)
@@ -3526,28 +3912,153 @@ class SftpPanel(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, "Wybierz pliki do wgrania")
         if not paths or not self._sftp:
             return
-        if len(paths) == 1:
-            self._upload_file(paths[0])
-        else:
-            queue = []
-            for p in paths:
-                if not os.path.isfile(p):
-                    continue
-                fname = os.path.basename(p)
-                remote = self._path.rstrip('/') + '/' + fname
-                queue.append(('put', remote, p, os.path.getsize(p)))
-            if queue:
-                self._transfer_queue = queue
-                self._transfer_total_count = len(queue)
-                self._transfer_done_count = 0
-                self._run_next_queued_transfer()
+        self._begin_uploads(paths)
 
     def _upload_file(self, local: str):
+        # Kept as a compat shim — every caller (drag-drop, single-file
+        # upload) now flows through _begin_uploads so the same overwrite
+        # check runs regardless of entry point.
         if not self._sftp or not os.path.isfile(local):
             return
-        fname  = os.path.basename(local)
-        remote = self._path.rstrip('/') + '/' + fname
-        self._run_transfer('put', remote, local, os.path.getsize(local))
+        self._begin_uploads([local])
+
+    def _begin_uploads(self, locals_list: list[str]):
+        """Pre-scan target dir for name conflicts, ask the user, then start.
+
+        Plain sftp.put() always clobbers an existing remote file with no
+        warning — drag-dropping a file whose name matches one on the
+        server silently destroys the original. We stat() each target on
+        a fresh SFTP channel (so concurrent listings/transfers on the
+        nav channel aren't perturbed), then surface a single dialog with
+        the conflicting names and let the user choose: overwrite / skip
+        existing / cancel.
+        """
+        if not self._sftp or not self._ssh_client or not locals_list:
+            return
+        items: list[tuple[str, str, int]] = []
+        seen_remotes: set[str] = set()
+        for p in locals_list:
+            if not os.path.isfile(p):
+                continue
+            fname = os.path.basename(p)
+            if not fname:
+                continue
+            remote = self._path.rstrip('/') + '/' + fname
+            if remote in seen_remotes:
+                continue                       # de-dup if user picked the same file twice
+            seen_remotes.add(remote)
+            try:
+                sz = os.path.getsize(p)
+            except OSError:
+                continue
+            items.append((remote, p, sz))
+        if not items:
+            return
+
+        def after_scan(conflicts: list[tuple[str, str, int]]):
+            chosen = items
+            if conflicts:
+                action = self._ask_overwrite([c[0] for c in conflicts])
+                if action == 'cancel':
+                    return
+                if action == 'skip':
+                    skip_set = {c[0] for c in conflicts}
+                    chosen = [it for it in items if it[0] not in skip_set]
+                    if not chosen:
+                        self.status_msg.emit(
+                            "Wszystkie pliki istnieją — pominięto", False)
+                        return
+            self._start_uploads(chosen)
+
+        self._scan_conflicts_async(items, after_scan)
+
+    def _scan_conflicts_async(self, items, on_done):
+        """Stat() each remote on a fresh channel; report which already exist.
+
+        paramiko's SFTPClient is not safe for concurrent calls on one
+        channel — this avoids racing the nav channel against an
+        in-flight listdir/edit. The open is serialised through
+        _sftp_open_lock to match the rest of the codebase.
+        """
+        ssh_client = self._ssh_client
+        lock = self._sftp_open_lock
+        conflicts: list[tuple] = []
+
+        def scan():
+            with lock:
+                sftp = ssh_client.open_sftp()
+            try:
+                for it in items:
+                    try:
+                        sftp.stat(it[0])
+                        conflicts.append(it)
+                    except IOError:
+                        continue          # not-exists is the happy case
+                    except Exception:
+                        continue          # treat unknown errors as "no conflict"
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        w = _SimpleWorker(scan)
+        w.done.connect(lambda: on_done(conflicts))
+        w.error.connect(lambda e: self.status_msg.emit(
+            f"Skan kolizji: {e}", True))
+        w.start()
+        self._workers.append(w)
+
+    def _start_uploads(self, items: list[tuple[str, str, int]]):
+        """Kick off transfer(s) once conflicts are resolved."""
+        if not items:
+            return
+        if len(items) == 1:
+            remote, local, size = items[0]
+            self._run_transfer('put', remote, local, size)
+        else:
+            queue = [('put', r, l, s) for (r, l, s) in items]
+            self._transfer_queue = queue
+            self._transfer_total_count = len(queue)
+            self._transfer_done_count = 0
+            self._run_next_queued_transfer()
+
+    def _ask_overwrite(self, conflict_paths: list[str]) -> str:
+        """Modal for name conflicts (upload or move). Returns
+        'overwrite'/'skip'/'cancel'. Shared by uploads, drag-moves and
+        any future op that lands on an existing remote path."""
+        n = len(conflict_paths)
+        # Polish noun declension: 1 → plik, 2-4 → pliki, 5+ → plików;
+        # teens (11-14) take the genitive plural too.
+        last = n % 100
+        if 11 <= last <= 14:
+            word = "plików"
+        elif n == 1:
+            word = "plik"
+        elif 2 <= last % 10 <= 4:
+            word = "pliki"
+        else:
+            word = "plików"
+        preview_n = 10
+        names = "\n".join(f"  • {os.path.basename(p)}" for p in conflict_paths[:preview_n])
+        if n > preview_n:
+            names += f"\n  …+{n - preview_n} więcej"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Pliki już istnieją")
+        box.setText(f"{n} {word} już istnieje na serwerze:")
+        box.setInformativeText(names + "\n\nCo zrobić?")
+        btn_ow = box.addButton("Nadpisz wszystkie", QMessageBox.ButtonRole.AcceptRole)
+        btn_sk = box.addButton("Pomiń istniejące", QMessageBox.ButtonRole.DestructiveRole)
+        btn_ca = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_ca)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_ow:
+            return 'overwrite'
+        if clicked is btn_sk:
+            return 'skip'
+        return 'cancel'
 
     def _run_transfer(self, mode, remote, local, size):
         self._transfer_queue = []
@@ -3562,7 +4073,8 @@ class SftpPanel(QWidget):
         self._start_single_transfer(mode, remote, local, size)
 
     def _start_single_transfer(self, mode, remote, local, size):
-        self._transfer_current_mode = mode
+        self._transfer_current_mode   = mode
+        self._transfer_current_remote = remote
         total = self._transfer_total_count
         done_n = self._transfer_done_count
         if total > 1:
@@ -3587,6 +4099,11 @@ class SftpPanel(QWidget):
         self._workers.append(w)
 
     def _transfer_done(self, msg: str):
+        # Po udanym uploadzie unieważnij cache tmp-pliku dla tego remote,
+        # żeby kolejny double-click pobrał świeżą zawartość zamiast pokazywać
+        # starą lokalną kopię (np. po podmianie certyfikatu o tej samej nazwie).
+        if self._transfer_current_mode == 'put':
+            self._invalidate_open_remote_cache(self._transfer_current_remote)
         self._transfer_done_count += 1
         total = self._transfer_total_count
         if self._transfer_queue:
@@ -3614,11 +4131,13 @@ class SftpPanel(QWidget):
     def _transfer_cancelled(self, partial_file: str = None, remote_partial: str = None):
         self._transfer_queue = []
         self._transfer_finished_cleanup()
+        local_cleanup_err: str | None = None
         if partial_file and os.path.exists(partial_file):
             try:
                 os.remove(partial_file)
-            except OSError:
-                pass
+            except OSError as e:
+                local_cleanup_err = str(e)
+        remote_cleanup_err: str | None = None
         if remote_partial and self._sftp:
             # Upload was hard-cancelled — its private SFTP channel is gone.
             # Reuse the navigation channel (self._sftp) to drop the partial
@@ -3626,11 +4145,27 @@ class SftpPanel(QWidget):
             # channel from a side thread proved fragile under rapid cancel.
             try:
                 self._sftp.remove(remote_partial)
-            except Exception:
-                pass
+            except Exception as e:
+                # Previously this was a bare 'except: pass' — a partial
+                # upload that we couldn't clean up was indistinguishable
+                # from a clean cancel, so the user had no idea half a
+                # gigabyte sat on the server. Surface it.
+                remote_cleanup_err = str(e)
             if self._path:
                 self._list(self._path)
-        self.status_msg.emit("Transfer anulowany", False)
+        if local_cleanup_err or remote_cleanup_err:
+            bits = ["Transfer anulowany, ale cleanup się nie powiódł:"]
+            if remote_cleanup_err:
+                bits.append(
+                    f"  • plik fragmentu na serwerze "
+                    f"'{os.path.basename(remote_partial)}': {remote_cleanup_err}")
+            if local_cleanup_err:
+                bits.append(
+                    f"  • lokalny fragment "
+                    f"'{os.path.basename(partial_file)}': {local_cleanup_err}")
+            self.status_msg.emit("\n".join(bits), True)
+        else:
+            self.status_msg.emit("Transfer anulowany", False)
 
     def _transfer_finished_cleanup(self):
         self._progress.setRange(0, 100)
@@ -3664,6 +4199,90 @@ class SftpPanel(QWidget):
         '.jar', '.iso', '.img', '.hta', '.cpl', '.inf', '.reg',
     })
 
+    def _invalidate_open_remote_cache(self, remote: str):
+        """Drop the _watched_files entry for `remote` so the next _open_remote
+        re-downloads instead of opening the stale tmp copy.
+
+        Tmp path is derived solely from basename (see _open_remote), so we
+        match by basename — same logic as the cache lookup. The tmp file on
+        disk is left in place; sftp.get() opens its local target with 'wb'
+        and overwrites on the next download. Removing it eagerly could fail
+        when an external viewer still holds the handle.
+        """
+        safe_name = os.path.basename(remote) or 'file'
+        tmp_dir   = os.path.join(tempfile.gettempdir(),
+                                 f'HospitalHub_{os.getpid()}')
+        tmp_path  = os.path.join(tmp_dir, safe_name)
+        self._watched_files.pop(tmp_path, None)
+
+    # Files larger than this trigger a "do you really want to download?"
+    # prompt before "Otwórz lokalnie" / "Otwórz za pomocą…" pulls them
+    # into %TEMP%. Stops accidental clicks on multi-gig logs from
+    # filling the disk.
+    _LARGE_FILE_THRESHOLD = 500 * 1024 * 1024     # 500 MB
+
+    def _confirm_large_file(self, name: str, size_bytes: int) -> bool:
+        """Ask before downloading files above _LARGE_FILE_THRESHOLD.
+
+        Returns True if the user wants to proceed. Sizes are shown in
+        MB/GB rather than raw bytes because the threshold makes "MB"
+        the natural unit and humans recognise it faster than 10-digit
+        byte counts.
+        """
+        if size_bytes < 1024 * 1024 * 1024:
+            human = f"{size_bytes / (1024 * 1024):.0f} MB"
+        else:
+            human = f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+        ans = QMessageBox.question(
+            self, "Duży plik",
+            f"Plik '{name}' ma {human}.\n\n"
+            "Pobranie zajmie miejsce w %TEMP% i może chwilę potrwać.\n"
+            "Kontynuować?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return ans == QMessageBox.StandardButton.Yes
+
+    def _probe_writable(self, remote: str) -> bool:
+        """Probe whether the SFTP user can write to `remote` (one tiny roundtrip).
+
+        Returns True if writable, False if the server rejects write access.
+        Opening with 'r+' attempts read+write without truncating — paramiko
+        forwards the server's permission decision as IOError. Any other
+        exception (network blip, missing file) returns True so we don't
+        block the user on transient or unrelated failures.
+        """
+        if not self._sftp:
+            return True
+        try:
+            fh = self._sftp.open(remote, 'r+')
+            try:
+                fh.close()
+            except Exception:
+                pass
+            return True
+        except IOError:
+            return False
+        except Exception:
+            return True
+
+    def _confirm_readonly_open(self, name: str) -> bool:
+        """Modal: file is read-only on the server. Open in view-only mode?
+
+        Returning True opens the file without registering a watcher, so the
+        local edit never triggers an auto-upload that would silently fail.
+        Returning False cancels the open entirely.
+        """
+        ans = QMessageBox.warning(
+            self, "Plik tylko do odczytu",
+            f"Brak praw zapisu do '{name}' na serwerze.\n\n"
+            "Zmiany zapisane w edytorze NIE zostaną wgrane.\n"
+            "Otworzyć w trybie podglądu?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return ans == QMessageBox.StandardButton.Yes
+
     def _open_remote(self, remote: str, name: str):
         """Download to temp file, open with default app, watch for changes → auto-upload."""
         if not self._ssh_client:
@@ -3687,10 +4306,59 @@ class SftpPanel(QWidget):
         safe_name = os.path.basename(name) or 'file'   # strip any path components
         tmp_path  = os.path.join(tmp_dir, safe_name)
 
-        # If already open/watched, just re-open in editor without re-downloading
+        # If already open/watched, check if the server-side file has
+        # changed since our last download (e.g. user vim'd it in the
+        # terminal) — if so, drop the stale temp and re-download.
+        # Otherwise just open the cached local copy.
         if tmp_path in self._watched_files:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(tmp_path))
-            return
+            info = self._watched_files[tmp_path]
+            server_changed = False
+            if self._sftp:
+                try:
+                    st = self._sftp.stat(remote)
+                    srv_mtime = int(st.st_mtime or 0)
+                    srv_size  = st.st_size or 0
+                    last_mtime = int(info.get('server_mtime', 0))
+                    last_size  = info.get('server_size', None)
+                    if last_mtime and srv_mtime > last_mtime:
+                        server_changed = True
+                    elif last_size is not None and srv_size != last_size:
+                        server_changed = True
+                except Exception:
+                    pass    # probe failure → fall back to cache
+            if not server_changed:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(tmp_path))
+                return
+            # Server has newer content — wipe cache and fall through to
+            # the fresh download path below.
+            self._watched_files.pop(tmp_path, None)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+        # Size guard — bail before any download if the file is huge.
+        # The stat is one nav-channel roundtrip; tolerable to do on the
+        # UI thread because anything past ~100 MB is going to be a
+        # multi-second download anyway.
+        if self._sftp:
+            try:
+                sz = self._sftp.stat(remote).st_size or 0
+                if sz >= self._LARGE_FILE_THRESHOLD:
+                    if not self._confirm_large_file(name, sz):
+                        return
+            except Exception:
+                pass    # stat failure → just attempt the download
+
+        # Probe write access BEFORE downloading. If the file is read-only,
+        # the auto-upload watcher would later fail silently — by asking up
+        # front we either skip the watcher (view-only) or cancel cleanly.
+        watch_for_upload = True
+        if not self._probe_writable(remote):
+            if not self._confirm_readonly_open(name):
+                return
+            watch_for_upload = False
 
         ssh_client = self._ssh_client   # capture — each worker gets its own channel
 
@@ -3708,9 +4376,14 @@ class SftpPanel(QWidget):
             with lock:                          # serialize channel opens
                 sftp = ssh_client.open_sftp()
             sftp_ref[0] = sftp
+            srv_mtime = 0
+            srv_size  = 0
             try:
                 try:
-                    total = sftp.stat(remote).st_size or 1
+                    st = sftp.stat(remote)
+                    srv_mtime = int(st.st_mtime or 0)
+                    srv_size  = st.st_size or 0
+                    total     = srv_size or 1
                 except Exception:
                     total = 1
                 def cb(done, t):
@@ -3726,7 +4399,13 @@ class SftpPanel(QWidget):
                     pass
             self._open_local.emit(tmp_path)
             size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-            self._watch_file_sig.emit(tmp_path, remote, size)
+            # Always register the watcher — even in view-only mode — so a
+            # write to a read-only file produces an explicit "permission
+            # denied" status instead of silence (the editor's own
+            # confirmation can look indistinguishable from a real save).
+            self._watch_file_sig.emit(tmp_path, remote, size,
+                                       not watch_for_upload,
+                                       srv_mtime, srv_size)
 
         def hard_cancel():
             s = sftp_ref[0]
@@ -3757,6 +4436,27 @@ class SftpPanel(QWidget):
         os.makedirs(tmp_dir, exist_ok=True)
         safe_name = os.path.basename(name) or 'file'
         tmp_path = os.path.join(tmp_dir, safe_name)
+
+        # Same size guard as _open_remote — large files routinely show
+        # up in /var/log; one wrong click would otherwise dump a 5 GB
+        # journal into %TEMP%.
+        if self._sftp:
+            try:
+                sz = self._sftp.stat(remote).st_size or 0
+                if sz >= self._LARGE_FILE_THRESHOLD:
+                    if not self._confirm_large_file(name, sz):
+                        return
+            except Exception:
+                pass
+
+        # See _open_remote — same read-only probe so we don't pretend an
+        # edit made via "Open with…" will round-trip back to the server.
+        watch_for_upload = True
+        if not self._probe_writable(remote):
+            if not self._confirm_readonly_open(name):
+                return
+            watch_for_upload = False
+
         ssh_client = self._ssh_client
         lock = self._sftp_open_lock
 
@@ -3768,13 +4468,18 @@ class SftpPanel(QWidget):
         worker_ref = [None]
         sftp_ref = [None]
 
+        srv_meta = {'mtime': 0, 'size': 0}
+
         def do_download():
             with lock:
                 sftp = ssh_client.open_sftp()
             sftp_ref[0] = sftp
             try:
                 try:
-                    total = sftp.stat(remote).st_size or 1
+                    st = sftp.stat(remote)
+                    srv_meta['mtime'] = int(st.st_mtime or 0)
+                    srv_meta['size']  = st.st_size or 0
+                    total = srv_meta['size'] or 1
                 except Exception:
                     total = 1
                 def cb(done, t):
@@ -3807,7 +4512,12 @@ class SftpPanel(QWidget):
             else:
                 subprocess.Popen(['xdg-open', tmp_path])
             size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-            self._watch_file_sig.emit(tmp_path, remote, size)
+            # Same reasoning as _open_remote — always watch, flag
+            # readonly so the poller surfaces "permission denied"
+            # instead of attempting (and silently dropping) an upload.
+            self._watch_file_sig.emit(tmp_path, remote, size,
+                                       not watch_for_upload,
+                                       srv_meta['mtime'], srv_meta['size'])
 
         w = _SimpleWorker(do_download)
         w.set_cancel_hook(hard_cancel)
@@ -3927,15 +4637,21 @@ class SftpPanel(QWidget):
 
     # ── Auto-upload (mtime polling) ────────────────────────────────────────
 
-    def _watch_file(self, local_path: str, remote_path: str, orig_size: int = 0):
+    def _watch_file(self, local_path: str, remote_path: str,
+                    orig_size: int = 0, readonly: bool = False,
+                    server_mtime: int = 0, server_size: int = 0):
         try:
             mtime = os.path.getmtime(local_path) if os.path.exists(local_path) else 0
         except OSError:
             mtime = 0
         self._watched_files[local_path] = {
-            'remote':    remote_path,
-            'orig_size': orig_size,
-            'mtime':     mtime,
+            'remote':       remote_path,
+            'orig_size':    orig_size,
+            'mtime':        mtime,
+            'dirty':        False,   # last upload failed → local is ahead of remote
+            'readonly':     readonly,  # remote rejected the write probe — no upload attempts
+            'server_mtime': server_mtime,  # for stale-cache detection on re-open
+            'server_size':  server_size,
         }
         if not self._watch_poll.isActive():
             self._watch_poll.start()
@@ -3956,14 +4672,54 @@ class SftpPanel(QWidget):
             if mtime <= info['mtime']:
                 continue                          # file not modified since last check
             orig_size = info['orig_size']
-            if size == 0 or (orig_size > 512 and size < orig_size * 0.10):
-                self.status_msg.emit(
-                    f"Auto-upload pominięty — plik pusty lub uszkodzony "
-                    f"({size} B, było {orig_size} B)", True)
-                info['mtime'] = mtime             # don't warn again for same write
-                continue
+            # Defence against editor crashes / antivirus quarantine
+            # truncating the temp file to 0 B or a sliver of its
+            # original size. Originally a silent skip — but legitimate
+            # cases (user emptying a small config file) were getting
+            # blocked too. Now we ask. The mtime is bumped before the
+            # prompt so a "No" doesn't loop on the same write.
+            suspicious_empty  = size == 0 and orig_size > 0
+            suspicious_shrink = orig_size > 512 and size < orig_size * 0.10
+            if suspicious_empty or suspicious_shrink:
+                info['mtime'] = mtime
+                name = os.path.basename(local_path)
+                if suspicious_empty:
+                    q = (f"Plik '{name}' jest pusty (poprzednio {orig_size} B).\n\n"
+                         "Czy na pewno wgrać pusty plik na serwer?\n"
+                         "(„Nie” jeśli to był wypadek — np. crash edytora.)")
+                else:
+                    q = (f"Plik '{name}' skurczył się drastycznie: "
+                         f"{size} B zamiast {orig_size} B.\n\n"
+                         "Czy na pewno wgrać tak okrojoną wersję?\n"
+                         "(„Nie” jeśli to nie była zamierzona zmiana.)")
+                ans = QMessageBox.question(
+                    self, "Podejrzanie mały plik", q,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if ans != QMessageBox.StandardButton.Yes:
+                    self.status_msg.emit(
+                        f"Auto-upload pominięty — '{name}' "
+                        f"({size} B, było {orig_size} B)", False)
+                    continue
+                info['orig_size'] = size           # accept new baseline
             info['mtime']     = mtime
             info['orig_size'] = size
+            if info.get('readonly'):
+                # Read-only mode: pre-flight write probe already said the
+                # server will reject this. Surface "permission denied"
+                # explicitly so the user gets the same feedback they'd
+                # get from any normal editor → SFTP combo, without
+                # actually round-tripping a doomed upload. Refresh the
+                # listing so the user can see the server-side mtime is
+                # unchanged — confirms visually that the save didn't take.
+                info['dirty'] = True
+                name = os.path.basename(local_path)
+                self.status_msg.emit(
+                    f"Permission denied: '{name}' tylko do odczytu — "
+                    "zmiany NIE zostały wgrane na serwer.", True)
+                self._list(self._path)
+                continue
             self._upload_changed_file(local_path, info['remote'])
 
     def _upload_changed_file(self, local: str, remote: str):
@@ -3995,7 +4751,22 @@ class SftpPanel(QWidget):
                     if worker_ref[0]._cancel:
                         raise _CancelledError()
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
+                # paramiko's put(confirm=True) already stat()s after upload and
+                # raises on size mismatch — but only when the server reports
+                # an honest size. Re-verify explicitly so a quota/permission
+                # quirk that silently drops bytes can't masquerade as success.
                 sftp.put(local, remote, callback=cb)
+                try:
+                    local_size  = os.path.getsize(local)
+                    remote_size = sftp.stat(remote).st_size or 0
+                except Exception:
+                    local_size = remote_size = None
+                if (local_size is not None
+                        and remote_size is not None
+                        and local_size != remote_size):
+                    raise IOError(
+                        f"weryfikacja po zapisie: rozmiar zdalny {remote_size} B "
+                        f"!= lokalny {local_size} B")
             finally:
                 sftp_ref[0] = None
                 try:
@@ -4014,6 +4785,20 @@ class SftpPanel(QWidget):
         def on_done(_=None):
             self._upload_active.discard(local)
             self._transfer_finished_cleanup()
+            # Local is now in sync with server — clear any dirty flag
+            # set by a previous failed upload of the same file. Also
+            # refresh the stored server metadata so the next re-open
+            # doesn't see our own upload as "someone vim'd it externally".
+            info = self._watched_files.get(local)
+            if info is not None:
+                info['dirty'] = False
+                if self._sftp:
+                    try:
+                        st = self._sftp.stat(remote)
+                        info['server_mtime'] = int(st.st_mtime or 0)
+                        info['server_size']  = st.st_size or 0
+                    except Exception:
+                        pass
             self.status_msg.emit(f"Zapisano na SFTP: {os.path.basename(remote)}", False)
             self._list(self._path)
 
@@ -4025,7 +4810,16 @@ class SftpPanel(QWidget):
         def on_error(e):
             self._upload_active.discard(local)
             self._transfer_finished_cleanup()
+            # Keep the dirty bit around so internal state stays honest
+            # (used by anything else that inspects _watched_files), but
+            # the visible signal is now: modal error + listing refresh.
+            # The listing's server-side mtime tells the user whether the
+            # save took, replacing the dirty-reopen prompt we removed.
+            info = self._watched_files.get(local)
+            if info is not None:
+                info['dirty'] = True
             self.status_msg.emit(f"Błąd zapisu: {e}", True)
+            self._list(self._path)
 
         w = _SimpleWorker(do_upload)
         w.set_cancel_hook(hard_cancel)
@@ -4038,16 +4832,107 @@ class SftpPanel(QWidget):
         w.start()
         self._workers.append(w)
 
+    # Cap on the recursive-count scan that precedes a directory delete.
+    # We don't need an exact number — "5000+" is enough for the user to
+    # realise the scope. Stops a pathological tree (e.g. accidentally
+    # pointing at /var/log) from spending 30 s scanning before the
+    # confirmation dialog even appears.
+    _DELETE_COUNT_CAP = 5000
+
     def _delete(self, remote: str, is_dir: bool, name: str):
-        ans = QMessageBox.question(
-            self, "Usuń",
-            f"Usunąć {'katalog' if is_dir else 'plik'} '{name}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if ans != QMessageBox.StandardButton.Yes:
+        """Delete a remote file/directory after an informed confirm.
+
+        Plain file → short confirm and go. Directory → first scan its
+        contents on a worker thread (with a cap) and surface a confirm
+        that names how many files and subdirs are about to vanish.
+        Previously the prompt was a one-liner that hid the blast radius
+        of recursive deletes.
+        """
+        if not is_dir:
+            ans = QMessageBox.question(
+                self, "Usuń",
+                f"Usunąć plik '{name}'?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+            self._run_delete(remote, is_dir=False, name=name)
             return
 
-        import stat as _stat
+        # Directory — scan first to show count in the confirm dialog.
+        if not self._ssh_client:
+            return
+        ssh_client = self._ssh_client
+        lock = self._sftp_open_lock
+        cap = self._DELETE_COUNT_CAP
+        scan_result: dict = {}
+
+        self._progress.setFormat(f"Liczenie zawartości: {name}")
+        self._progress.setRange(0, 0)         # indeterminate
+        self._progress.setValue(0)
+        self._progress.setVisible(True)
+
+        def scan():
+            with lock:
+                sftp = ssh_client.open_sftp()
+            try:
+                scan_result.update(
+                    _count_dir_with_cap(sftp.listdir_attr, remote, cap))
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        def reset_progress():
+            self._progress.setRange(0, 100)
+            self._progress.setFormat("%p%")
+            self._progress.setVisible(False)
+
+        def after_scan():
+            reset_progress()
+            if scan_result.get('error'):
+                self.status_msg.emit(
+                    f"Nie można odczytać katalogu: {scan_result['error']}", True)
+                return
+            f = scan_result.get('files', 0)
+            d = scan_result.get('dirs', 0)
+            capped = scan_result.get('capped', False)
+            if capped:
+                details = (f"co najmniej {_pl_pl(f, 'plik', 'pliki', 'plików')} "
+                           f"i {_pl_pl(d, 'podkatalog', 'podkatalogi', 'podkatalogów')} "
+                           f"(zawartość większa niż {cap})")
+            elif f == 0 and d == 0:
+                details = "katalog jest pusty"
+            else:
+                details = (f"{_pl_pl(f, 'plik', 'pliki', 'plików')}, "
+                           f"{_pl_pl(d, 'podkatalog', 'podkatalogi', 'podkatalogów')}")
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Usuń katalog")
+            box.setText(f"Czy na pewno usunąć katalog '{name}'?")
+            box.setInformativeText(
+                f"Zawiera: {details}\n\nOperacja jest nieodwracalna."
+            )
+            btn_yes = box.addButton("Usuń", QMessageBox.ButtonRole.DestructiveRole)
+            btn_no  = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(btn_no)
+            box.exec()
+            if box.clickedButton() is btn_yes:
+                self._run_delete(remote, is_dir=True, name=name)
+
+        def on_err(e):
+            reset_progress()
+            self.status_msg.emit(f"Liczenie zawartości: {e}", True)
+
+        w = _SimpleWorker(scan)
+        w.done.connect(after_scan)
+        w.error.connect(on_err)
+        w.start()
+        self._workers.append(w)
+
+    def _run_delete(self, remote: str, is_dir: bool, name: str):
+        """Actually perform the delete after the user confirmed."""
         sftp = self._sftp
         worker_ref = [None]
 
@@ -4055,12 +4940,11 @@ class SftpPanel(QWidget):
             if not is_dir:
                 sftp.remove(remote)
                 return
-            # Recursively collect entries (files first, dirs deepest-first)
             files, dirs = [], []
             def walk(p):
                 for a in sftp.listdir_attr(p):
                     sub = p.rstrip('/') + '/' + a.filename
-                    if _stat.S_ISDIR(a.st_mode or 0):
+                    if stat.S_ISDIR(a.st_mode or 0):
                         walk(sub)
                         dirs.append(sub)
                     else:
@@ -4087,7 +4971,7 @@ class SftpPanel(QWidget):
         if is_dir:
             self._progress.setRange(0, 100)
         else:
-            self._progress.setRange(0, 0)  # indeterminate for single file
+            self._progress.setRange(0, 0)        # indeterminate for single file
         self._progress.setValue(0)
         self._progress.setVisible(True)
 
@@ -4131,20 +5015,8 @@ class SftpPanel(QWidget):
             path = url.toLocalFile()
             if os.path.isfile(path):
                 files.append(path)
-        if not files:
-            return
-        if len(files) == 1:
-            self._upload_file(files[0])
-        else:
-            queue = []
-            for p in files:
-                fname = os.path.basename(p)
-                remote = self._path.rstrip('/') + '/' + fname
-                queue.append(('put', remote, p, os.path.getsize(p)))
-            self._transfer_queue = queue
-            self._transfer_total_count = len(queue)
-            self._transfer_done_count = 0
-            self._run_next_queued_transfer()
+        if files:
+            self._begin_uploads(files)
 
     # ── Cleanup ───────────────────────────────────────────────────────────
 
@@ -4363,12 +5235,19 @@ class _EnvironmentPanel(QWidget):
         rl.setContentsMargins(10, 4, 8, 4)
         rl.setSpacing(6)
 
-        # IP + name on one line
-        if m.name:
-            line = (f"<b style='color:#b0c0ff;'>{m.ip}</b>"
-                    f"<span style='color:#8a90a4;'>  {m.name}</span>")
+        # IP + name on one line. HTML colours don't pass through the theme
+        # remap (that only touches setStyleSheet), so pick them per-theme: a
+        # strong dark blue on the light card (the periwinkle was too pale),
+        # the original light periwinkle on dark.
+        if theme.active() == theme.LIGHT:
+            ip_c, name_c = "#0a4db0", "#525861"
         else:
-            line = f"<b style='color:#b0c0ff;'>{m.ip}</b>"
+            ip_c, name_c = "#b0c0ff", "#8a90a4"
+        if m.name:
+            line = (f"<b style='color:{ip_c};'>{m.ip}</b>"
+                    f"<span style='color:{name_c};'>  {m.name}</span>")
+        else:
+            line = f"<b style='color:{ip_c};'>{m.ip}</b>"
         lbl = QLabel(line)
         lbl.setTextFormat(Qt.TextFormat.RichText)
         lbl.setStyleSheet("font-size:11px;")
@@ -4892,6 +5771,11 @@ class SshDialog(QDialog):
             | Qt.WindowType.WindowCloseButtonHint
         )
         SshDialog._alive.append(self)
+        # Eagerly bind the host-key prompt bridge to the GUI thread. The
+        # worker threads call into this from missing_host_key() during
+        # connect — if the singleton were created from a worker, its
+        # queued signal would deliver to that worker's (dead) event loop.
+        _get_host_key_prompt()
         self._machine  = machine
         self._hospital = hospital
         self._all_hospitals = all_hospitals or []
@@ -6002,7 +6886,13 @@ class SshDialog(QDialog):
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _status(self, text: str, err: bool = False):
-        pass  # status bar removed — errors visible in terminal
+        # Critical: SFTP errors used to vanish here (no-op). A read-only
+        # remote file or permission-denied upload would silently fail, and
+        # the user kept editing convinced everything was saved — until the
+        # next session re-downloaded the original. Surface real failures
+        # as a modal so the user can react; ignore success notifications.
+        if err and text:
+            QMessageBox.warning(self, "SFTP", text)
 
     def closeEvent(self, event):
         for s in self._sessions:

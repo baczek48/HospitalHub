@@ -2,7 +2,7 @@
 ; Kompilacja: iscc HospitalHub.iss (lub prawym -> Compile w Inno Setup IDE)
 
 #define MyAppName      "HospitalHub"
-#define MyAppVersion   "1.5.2"
+#define MyAppVersion   "1.5.3"
 #define MyAppPublisher "Sebastian Bąk"
 #define MyAppExeName   "HospitalHub.exe"
 

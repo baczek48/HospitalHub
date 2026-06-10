@@ -127,6 +127,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import models
 import vpn_connect
 from crypto import decrypt
+from ui import theme
 from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard_copy
 from ui.utils import confirm
 from ui.ssh_panel import SshDialog
@@ -284,7 +285,7 @@ def _setup_table_columns(
     # nothing else in the app changes colour.
     pal = table.palette()
     pal.setColor(QPalette.ColorRole.Highlight, QColor(0, 0, 0, 0))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#e6edf3"))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.paint("#e6edf3")))
     table.setPalette(pal)
 
 
@@ -706,9 +707,17 @@ class DetailPanel(QWidget):
         if not item:
             return
 
-        orig_bg = QColor("#1c2128") if row % 2 else QColor("#161b22")
-        pressed_bg = QColor("#0a0c10")
-        half_bg = QColor("#13171c")  # mid-fade to soften the bg release
+        if theme.active() == theme.LIGHT:
+            # Warm-ivory press feedback: a gentle DARKER tint on press that
+            # settles back to the row's real background (remap turns the dark
+            # source hexes lighter, so we can't reuse them for a press recess).
+            orig_bg = QColor("#f2f3f6") if row % 2 else QColor("#ffffff")
+            pressed_bg = QColor("#dde0e6")
+            half_bg = QColor("#eaecf0")
+        else:
+            orig_bg = QColor("#1c2128") if row % 2 else QColor("#161b22")
+            pressed_bg = QColor("#0a0c10")
+            half_bg = QColor("#13171c")  # mid-fade to soften the bg release
 
         base_font = item.font()
         if base_font.pointSize() <= 0 and base_font.pixelSize() <= 0:
@@ -818,13 +827,16 @@ class DetailPanel(QWidget):
             self._machines_table.insertRow(i)
 
             ip_item = QTableWidgetItem(machine.ip)
-            ip_item.setForeground(QBrush(QColor(0, 120, 215)))
+            # Darker, stronger blue on the white light-theme card (the steel blue
+            # was too faint); keep the brighter blue on the dark theme.
+            ip_color = QColor("#0a4db0") if theme.active() == theme.LIGHT else QColor(0, 120, 215)
+            ip_item.setForeground(QBrush(ip_color))
             self._machines_table.setItem(i, 0, ip_item)
 
             for col, text in [(1, machine.name), (2, machine.description)]:
                 item = QTableWidgetItem(text)
                 if machine.admin_only:
-                    item.setForeground(QBrush(QColor("#c084fc")))
+                    item.setForeground(QBrush(QColor(theme.paint("#c084fc"))))
                 self._machines_table.setItem(i, col, item)
 
             self._machines_table.setCellWidget(i, _MACHINES_AKCJE_COL, self._machine_actions(machine))
@@ -946,7 +958,7 @@ class DetailPanel(QWidget):
             for col, text in enumerate(texts):
                 item = QTableWidgetItem(text)
                 if db.admin_only:
-                    item.setForeground(QBrush(QColor("#c084fc")))
+                    item.setForeground(QBrush(QColor(theme.paint("#c084fc"))))
                 self._db_table.setItem(i, col, item)
             self._db_table.setCellWidget(i, _DB_AKCJE_COL, self._db_actions(db))
 
