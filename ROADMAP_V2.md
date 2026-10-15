@@ -105,10 +105,10 @@ Zakres zgodny z dyrektywą i `AUDYT_V2.md` (§3 wydajność P1–P12, §9 bezpie
 | G7 | **ROZSTRZYGNIĘTE 10-15:** Inno Setup 6.7.1 zainstalowany przez użytkownika | — |
 | G8 | **ROZSTRZYGNIĘTE 10-15 (korekta):** X11 domyślnie WŁĄCZONY, zachowanie bez zmian, testy regresji | — |
 | G9 | **ROZSTRZYGNIĘTE 10-15:** redesign odłożony do końca stabilizacji i testów przedwdrożeniowych | — |
-| G10 | włączenie bezpiecznej podmiany SFTP (tmp + posix-rename) | zgodność z odbiorcami HL7 — test na katalogu testowym odbiorcy |
+| G10 | włączenie bezpiecznej podmiany SFTP (tmp + posix-rename) | test bezpieczeństwa i zgodności zapisu SFTP wykonany 10-15 (pliki XML, bez prawdziwych serwerów); włączenie flagi = decyzja użytkownika |
 
 ## Etap 70 (2026-10-15) — SFTP: edycja w zewnętrznym edytorze
 
 Zakres wąski (bez przebudowy SSH/SFTP): kolizje plików o tej samej nazwie, wiązanie
 edycji z serwerem/sesją/ścieżką, bezpieczny zapis. Stan: **DONE**, review APPROVE WITH
-NOTES ×2. Włączenie bezpiecznej podmiany — bramka G10. Szczegóły: `EXECUTION_LOG.md`.
+NOTES ×2. Włączenie bezpiecznej podmiany — bramka G10 (test zapisu SFTP 10-15 PASS, flaga wyłączona). Szczegóły: `EXECUTION_LOG.md`.

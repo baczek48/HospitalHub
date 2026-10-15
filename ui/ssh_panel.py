@@ -3263,9 +3263,10 @@ def replace_local_copy(part: str, local: str, expect_mtime=None) -> None:
 #: 2026-10-15 (P1, RELEASE_READINESS "auto-upload nieatomowy"): an edit saved
 #: in the external editor goes back through a temp file next to the original
 #: and an atomic posix-rename over it, so a broken transfer never leaves the
-#: server file truncated.  OFF until checked against the file receivers (HL7
-#: watchers see IN_MOVED_TO instead of IN_CLOSE_WRITE, the temp file briefly
-#: appears in the directory) — gate G10.  Off = the old direct put.
+#: server file truncated.  OFF until the SFTP write safety and compatibility
+#: test (gate G10): the replace is a new file — owner, mode bits and ACLs
+#: are not all carried over, and a temp file briefly appears in the
+#: directory.  Off = the old direct put.
 SFTP_SAFE_REPLACE_ENABLED = False
 
 
@@ -3275,8 +3276,8 @@ class SafeReplaceError(IOError):
 
 def remote_part_path(target: str) -> str:
     """Hidden temp name next to `target`: a leading dot and a ``.part``
-    suffix, so receivers that skip dot files or filter on the extension
-    (``*.hl7``, ``*.xml``) do not pick it up."""
+    suffix, so a directory listing or a process that skips dot files or
+    filters on the extension does not take it for the real file."""
     import posixpath
     head, base = posixpath.split(target)
     return posixpath.join(head, f".{base}.hhv2-{os.urandom(4).hex()}.part")
@@ -3284,13 +3285,17 @@ def remote_part_path(target: str) -> str:
 
 def _write_private_temp(sftp, local: str, tmp: str, total: int, callback):
     """Create `tmp` (never an existing file) readable by its owner only, then
-    write `local` into it — HL7 content is never world-readable, not even for
-    the length of the transfer (review 2026-10-15 L5)."""
+    write `local` into it — the edited content is never readable by other
+    users, not even for the length of the transfer (review 2026-10-15 L5)."""
     with open(local, 'rb') as src:
         f = sftp.open(tmp, 'wbx')
         try:
             f.chmod(0o600)
-            f.set_pipelined(True)
+            # NOT pipelined (G10 protocol test, 2026-10-15): paramiko checks
+            # the server's status for a pipelined write only every ~100
+            # requests, so a refused write in the middle (disk full, quota)
+            # went unnoticed — and when a later write landed, the file still
+            # had the right size.  Unpipelined, every write waits for its OK.
             done = 0
             while True:
                 chunk = src.read(32768)
@@ -4901,7 +4906,7 @@ class SftpPanel(QWidget):
         2026-10-14 (C1-12): this used to open the file for writing ('r+') and
         close it.  Nothing was written, but closing a handle opened for
         writing raises IN_CLOSE_WRITE on the server — the event incron/inotify
-        watchers on HL7 exchange directories pick files up on.  Now the mode
+        watchers on the server react to.  Now the mode
         bits from ``stat`` are compared with the user's uid and groups (one
         ``id`` per connection, cached).  Anything unknown answers True, as
         before, so a transient failure never blocks the user; an ACL that

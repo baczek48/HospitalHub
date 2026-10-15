@@ -518,16 +518,16 @@ def test_an_upload_still_running_is_not_started_again(env, sp, monkeypatch):
 # P1 — upload_edit, safe replace
 # ══════════════════════════════════════════════════════════════════════════
 
-ORIGINAL = b"MSH|^~\\&|LAB|SZPITAL|...\r" * 50
+ORIGINAL = b'<?xml version="1.0"?><config><item k="a"/></config>\n' * 50
 
 
 @pytest.fixture
-def hl7(tmp_path):
+def xmlfile(tmp_path):
     server = FakeServer("H")
-    server.groups.add(50)               # the SFTP user is in the HL7 group
-    server.add("/hl7/out/msg.hl7", ORIGINAL, mode=0o640, uid=1000, gid=50)
-    local = tmp_path / "msg.hl7"
-    local.write_bytes(b"MSH|^~\\&|EDITED|...\r" * 60)
+    server.groups.add(50)               # the SFTP user is in group 50
+    server.add("/data/out/config.xml", ORIGINAL, mode=0o640, uid=1000, gid=50)
+    local = tmp_path / "config.xml"
+    local.write_bytes(b'<?xml version="1.0"?><config><item k="b"/></config>\n' * 60)
     return server, FakeSftp(server), str(local)
 
 
@@ -535,55 +535,55 @@ def test_the_flag_is_off_until_receivers_are_checked(sp):
     assert sp.SFTP_SAFE_REPLACE_ENABLED is False
 
 
-def test_safe_replace_swaps_the_file_and_keeps_mode_and_owner(sp, hl7):
-    server, sftp, local = hl7
-    sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
-    f = server.files["/hl7/out/msg.hl7"]
+def test_safe_replace_swaps_the_file_and_keeps_mode_and_owner(sp, xmlfile):
+    server, sftp, local = xmlfile
+    sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
+    f = server.files["/data/out/config.xml"]
     assert f["data"] == open(local, "rb").read()
     assert st_mod.S_IMODE(f["mode"]) == 0o640 and (f["uid"], f["gid"]) == (1000, 50)
     assert server.leftovers() == []
-    assert ("put", "/hl7/out/msg.hl7") not in server.log, "nigdy put w oryginał"
+    assert ("put", "/data/out/config.xml") not in server.log, "nigdy put w oryginał"
 
 
-def test_the_temp_file_is_hidden_and_next_to_the_original(sp, hl7):
-    server, sftp, local = hl7
-    sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
+def test_the_temp_file_is_hidden_and_next_to_the_original(sp, xmlfile):
+    server, sftp, local = xmlfile
+    sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
     tmp = next(e[1] for e in server.log if e[0] == "open")
     assert ("open", tmp, "wbx") in server.log, "nigdy nie nadpisuje istniejącego"
     assert ("fchmod", tmp, 0o600) in server.log
-    assert server.log.index(("fchmod", tmp, 0o600)) < server.log.index(("posix_rename", tmp, "/hl7/out/msg.hl7"))
+    assert server.log.index(("fchmod", tmp, 0o600)) < server.log.index(("posix_rename", tmp, "/data/out/config.xml"))
     head, base = tmp.rsplit("/", 1)
-    assert head == "/hl7/out" and base.startswith(".msg.hl7.") and base.endswith(".part")
-    assert not base.endswith(".hl7")
+    assert head == "/data/out" and base.startswith(".config.xml.") and base.endswith(".part")
+    assert not base.endswith(".xml")
 
 
-def test_a_broken_transfer_leaves_the_original_whole(sp, hl7):
+def test_a_broken_transfer_leaves_the_original_whole(sp, xmlfile):
     """The link drops mid-transfer: the original is whole; the temp file
     cannot be removed over the dead channel and is reported (review M3)."""
-    server, sftp, local = hl7
+    server, sftp, local = xmlfile
     server.break_put_after = 100
     leftovers = []
     with pytest.raises(sp.SafeReplaceError, match="nie został zmieniony"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True,
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True,
                        leftovers=leftovers)
-    assert server.data("/hl7/out/msg.hl7") == ORIGINAL
+    assert server.data("/data/out/config.xml") == ORIGINAL
     assert leftovers == server.leftovers() and len(leftovers) == 1
     assert st_mod.S_IMODE(server.files[leftovers[0]]["mode"]) == 0o600,         "fragment z danymi nie jest czytelny dla innych"
 
 
-def test_a_failure_on_a_live_link_removes_the_temp_file(sp, hl7):
-    server, sftp, local = hl7
-    server.files["/hl7/out/msg.hl7"]["uid"] = 2000
+def test_a_failure_on_a_live_link_removes_the_temp_file(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.files["/data/out/config.xml"]["uid"] = 2000
     leftovers = []
     with pytest.raises(sp.SafeReplaceError):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True,
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True,
                        leftovers=leftovers)
     assert leftovers == [] and server.leftovers() == []
 
 
-def test_a_lost_rename_reply_is_reported_as_unknown(sp, hl7):
+def test_a_lost_rename_reply_is_reported_as_unknown(sp, xmlfile):
     """Review M4: no reply to the rename — never claim the file is intact."""
-    server, sftp, local = hl7
+    server, sftp, local = xmlfile
     real = sftp.posix_rename
 
     def rename_then_drop(old, new):
@@ -592,117 +592,117 @@ def test_a_lost_rename_reply_is_reported_as_unknown(sp, hl7):
         raise OSError("Socket is closed")
     sftp.posix_rename = rename_then_drop
     with pytest.raises(sp.SafeReplaceError, match="NIEZNANY"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
 
 
-def test_a_file_taken_by_the_receiver_right_after_the_rename_is_success(sp, hl7):
+def test_a_file_taken_by_the_receiver_right_after_the_rename_is_success(sp, xmlfile):
     """Review M4: a receiver that moves the file away at once must not turn
-    a done replace into an error (and a second HL7 message on retry)."""
-    server, sftp, local = hl7
+    a done replace into an error (and a needless second write on retry)."""
+    server, sftp, local = xmlfile
     real = sftp.posix_rename
 
     def rename_then_receiver_takes_it(old, new):
         real(old, new)
         del server.files[new]
     sftp.posix_rename = rename_then_receiver_takes_it
-    assert sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True) is None
+    assert sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True) is None
 
 
-def test_a_file_gone_from_the_server_is_not_recreated(sp, hl7):
-    server, sftp, local = hl7
-    del server.files["/hl7/out/msg.hl7"]
+def test_a_file_gone_from_the_server_is_not_recreated(sp, xmlfile):
+    server, sftp, local = xmlfile
+    del server.files["/data/out/config.xml"]
     with pytest.raises(sp.SafeReplaceError, match="nie istnieje"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
     assert server.files == {}
 
 
-def test_a_cancel_during_the_transfer_leaves_the_original_whole(sp, hl7):
-    server, sftp, local = hl7
+def test_a_cancel_during_the_transfer_leaves_the_original_whole(sp, xmlfile):
+    server, sftp, local = xmlfile
 
     def cb(done, total):
         raise sp._CancelledError()
     with pytest.raises(sp._CancelledError):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", callback=cb,
+        sp.upload_edit(sftp, local, "/data/out/config.xml", callback=cb,
                        safe_replace=True)
-    assert server.data("/hl7/out/msg.hl7") == ORIGINAL
+    assert server.data("/data/out/config.xml") == ORIGINAL
     assert server.leftovers() == []
 
 
-def test_a_cancel_just_before_the_rename_leaves_the_original_whole(sp, hl7):
-    server, sftp, local = hl7
+def test_a_cancel_just_before_the_rename_leaves_the_original_whole(sp, xmlfile):
+    server, sftp, local = xmlfile
 
     def before_commit():
         raise sp._CancelledError()
     with pytest.raises(sp._CancelledError):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True,
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True,
                        before_commit=before_commit)
-    assert server.data("/hl7/out/msg.hl7") == ORIGINAL
+    assert server.data("/data/out/config.xml") == ORIGINAL
     assert server.leftovers() == []
 
 
-def test_no_posix_rename_means_a_clear_error_and_no_direct_write(sp, hl7):
-    server, sftp, local = hl7
+def test_no_posix_rename_means_a_clear_error_and_no_direct_write(sp, xmlfile):
+    server, sftp, local = xmlfile
     server.posix_rename_supported = False
     with pytest.raises(sp.SafeReplaceError, match="posix-rename"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
-    assert server.data("/hl7/out/msg.hl7") == ORIGINAL
-    assert ("put", "/hl7/out/msg.hl7") not in server.log
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
+    assert server.data("/data/out/config.xml") == ORIGINAL
+    assert ("put", "/data/out/config.xml") not in server.log
     assert server.leftovers() == []
 
 
-def test_an_owner_that_cannot_be_kept_aborts(sp, hl7):
-    server, sftp, local = hl7
-    server.files["/hl7/out/msg.hl7"]["uid"] = 2000     # owned by the receiver
+def test_an_owner_that_cannot_be_kept_aborts(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.files["/data/out/config.xml"]["uid"] = 2000     # owned by another user
     with pytest.raises(sp.SafeReplaceError, match="właściciela"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
-    assert server.data("/hl7/out/msg.hl7") == ORIGINAL
-    assert server.files["/hl7/out/msg.hl7"]["uid"] == 2000
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
+    assert server.data("/data/out/config.xml") == ORIGINAL
+    assert server.files["/data/out/config.xml"]["uid"] == 2000
     assert server.leftovers() == []
 
 
-def test_an_owner_is_restored_when_the_server_allows_it(sp, hl7):
-    server, sftp, local = hl7
-    server.files["/hl7/out/msg.hl7"]["uid"] = 2000
+def test_an_owner_is_restored_when_the_server_allows_it(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.files["/data/out/config.xml"]["uid"] = 2000
     server.chown_allowed = True                         # e.g. root
-    sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
-    assert server.files["/hl7/out/msg.hl7"]["uid"] == 2000
+    sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
+    assert server.files["/data/out/config.xml"]["uid"] == 2000
 
 
-def test_a_directory_without_write_access_aborts_without_fallback(sp, hl7):
-    server, sftp, local = hl7
-    server.readonly_dirs.add("/hl7/out")
+def test_a_directory_without_write_access_aborts_without_fallback(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.readonly_dirs.add("/data/out")
     with pytest.raises(sp.SafeReplaceError, match="tymczasowego"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
-    assert server.data("/hl7/out/msg.hl7") == ORIGINAL
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
+    assert server.data("/data/out/config.xml") == ORIGINAL
     assert [e for e in server.log if e[0] == "put"] == [], "bez powrotu do put"
 
 
-def test_a_symlink_is_kept_and_its_target_replaced(sp, hl7):
-    server, sftp, local = hl7
-    server.link("/hl7/current.hl7", "/hl7/out/msg.hl7")
-    sp.upload_edit(sftp, local, "/hl7/current.hl7", safe_replace=True)
-    assert server.files["/hl7/current.hl7"]["link"] == "/hl7/out/msg.hl7"
-    assert server.data("/hl7/out/msg.hl7") == open(local, "rb").read()
+def test_a_symlink_is_kept_and_its_target_replaced(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.link("/data/current.xml", "/data/out/config.xml")
+    sp.upload_edit(sftp, local, "/data/current.xml", safe_replace=True)
+    assert server.files["/data/current.xml"]["link"] == "/data/out/config.xml"
+    assert server.data("/data/out/config.xml") == open(local, "rb").read()
 
 
-def test_something_that_is_not_a_file_is_refused(sp, hl7):
-    server, sftp, local = hl7
-    server.files["/hl7/out/msg.hl7"]["mode"] = st_mod.S_IFDIR | 0o755
+def test_something_that_is_not_a_file_is_refused(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.files["/data/out/config.xml"]["mode"] = st_mod.S_IFDIR | 0o755
     with pytest.raises(sp.SafeReplaceError, match="zwykłym plikiem"):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=True)
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
 
 
-def test_direct_mode_is_the_old_put_and_its_risk_is_documented(sp, hl7):
+def test_direct_mode_is_the_old_put_and_its_risk_is_documented(sp, xmlfile):
     """Flag off: what V2 does today.  A drop mid-transfer truncates the
     original — the reason for G10."""
-    server, sftp, local = hl7
-    sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=False)
-    assert server.log == [("put", "/hl7/out/msg.hl7")]
-    server.add("/hl7/out/msg.hl7", ORIGINAL)
+    server, sftp, local = xmlfile
+    sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
+    assert server.log == [("put", "/data/out/config.xml")]
+    server.add("/data/out/config.xml", ORIGINAL)
     server.break_put_after = 100
     with pytest.raises(OSError):
-        sp.upload_edit(sftp, local, "/hl7/out/msg.hl7", safe_replace=False)
-    assert server.data("/hl7/out/msg.hl7") != ORIGINAL
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
+    assert server.data("/data/out/config.xml") != ORIGINAL
 
 
 def test_the_panel_with_safe_replace_keeps_the_server_file_on_a_drop(env, sp,

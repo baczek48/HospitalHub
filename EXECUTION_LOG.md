@@ -432,3 +432,25 @@ Ustalenia:
 Niezmierzone (ścieżka klawiszowa V2): FOCUSED po Shift+Tab ×2 z pola Username, otwarcie Spacją,
 zatwierdzenie Enterem po wpisaniu nazwy. **Ocena G2: jeszcze nie** — wymaga odpowiedzi na pkt 5–6
 i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawiszy V2).
+
+---
+
+## 2026-10-15 — G10: korekta zakresu i test bezpieczeństwa zapisu SFTP
+
+- **Korekta właściciela:** HospitalHub nie obsługuje przesyłek HL7; nie zakładamy, że pliki SFTP
+  odbiera system HL7. G10 = „test bezpieczeństwa i zgodności zapisu SFTP”. Usunięte założenia HL7
+  dodane w Etapie 70: komentarze `SFTP_SAFE_REPLACE_ENABLED`, `remote_part_path`,
+  `_write_private_temp`, docstring `_probe_writable` (C1-12) w `ui/ssh_panel.py`; dane i ścieżki
+  testów (`/data/out/config.xml`, treść XML); dokumenty G10. Wpisy dziennika z 2026-10-14 zostają
+  jako historia.
+- **Nowy `tests/test_sftp_safe_replace_protocol.py` (15):** prawdziwy serwer SFTP paramiko w procesie,
+  `socketpair` (bez sieci), katalog tymczasowy, pliki XML; zerwanie połączenia, błąd zapisu,
+  anulowanie, brak/odmowa `posix-rename`, brak prawa tworzenia, `O_EXCL`, plik zniknął, katalog;
+  tryb bezpośredni dla porównania (zerwanie ucina oryginał).
+- **Znalezisko:** zapis potokowy paramiko (`set_pipelined(True)`, także w `sftp.put`) nie zgłasza
+  odrzuconego zapisu w środku pliku, jeśli później serwer przyjął ostatni blok — plik ma poprawny
+  rozmiar i dziurę, kontrola rozmiaru tego nie łapie. **Tryb bezpieczny:** zapis bez potokowania
+  (każdy blok potwierdzany) — test + mutacja (z potokowaniem: 2 FAIL). **Tryb bezpośredni
+  (domyślny):** bez zmian, zachowanie utrwalone testem; decyzja użytkownika.
+- `SFTP_SAFE_REPLACE_ENABLED` nadal `False`. Wynik, ograniczenia i rekomendacja:
+  `RELEASE_READINESS_V2.md` §G10. **1718 PASS / 0 FAIL.**

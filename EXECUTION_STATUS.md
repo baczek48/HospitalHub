@@ -3,7 +3,7 @@
 > Aktualizowane po każdym checkpoincie. Plan: `ROADMAP_V2.md`. Historia: `EXECUTION_LOG.md`.
 > Gotowość: `RELEASE_READINESS_V2.md`. Testy: `TEST_MATRIX_V2.md`.
 
-**Ostatnia aktualizacja:** 2026-10-15 20:10 · **Testy:** 1703 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
+**Ostatnia aktualizacja:** 2026-10-15 (G10) · **Testy:** 1718 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
 (`py -3.13 -m pytest tests -q -p no:cacheprovider`) · **Build:** exe + instalator 2026-10-15 20:05,
 cykl instalacja → start → aktualizacja → deinstalacja (per-user, bez UAC) PASS
 
@@ -54,7 +54,7 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 | **G2** | live connect FortiClient V2 | po G1 — osobna, wyraźna zgoda |
 | **G3/G4** | live connect Stormshield / Barracuda V2 | po akceptacji G2 |
 | **G6** | instalacja **admin** do Program Files | wymaga kliknięcia UAC — uruchomić `dist_installer\HospitalHubV2-Setup-2.0.0.exe`, potem odinstalować; per-user zrobione automatycznie |
-| **G10** (nowa) | włączenie bezpiecznej podmiany SFTP (`SFTP_SAFE_REPLACE_ENABLED`) | test zgodności z odbiorcą HL7 w katalogu testowym — lista w `RELEASE_READINESS_V2.md` §G10 |
+| **G10** (nowa) | włączenie bezpiecznej podmiany SFTP (`SFTP_SAFE_REPLACE_ENABLED`) | test bezpieczeństwa i zgodności zapisu SFTP — **wykonany 2026-10-15 na plikach XML (fake + prawdziwy protokół SFTP w procesie)**; flaga nadal `False`, decyzja o włączeniu u użytkownika — `RELEASE_READINESS_V2.md` §G10 |
 
 ## Jak wznowić (dla następnej sesji)
 
@@ -69,7 +69,7 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 ## Kolejka
 
 1. Po G1: korekta `_select_profile` wg zmierzonych stanów; ocena gotowości do G2.
-2. Po G10: włączenie bezpiecznej podmiany SFTP (albo per połączenie, jeśli odbiorcy się różnią).
+2. G10: decyzja użytkownika o włączeniu bezpiecznej podmiany (rekomendacja w `RELEASE_READINESS_V2.md` §G10) oraz o trybie bezpośrednim (zapis potokowy paramiko maskuje odrzucony zapis — patrz §G10).
 3. Pozostawione znaleziska z `RELEASE_READINESS_V2.md` (L8 z Etapu 70, C1-16/18/19, D-08/D-10…).
 4. Ręczne scenariusze Windows z `TEST_MATRIX_V2.md` (Win+V, multi-window, RDP).
 5. PHASE F (redesign) — po stabilizacji (decyzja G9).

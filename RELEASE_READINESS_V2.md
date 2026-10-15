@@ -8,7 +8,7 @@
 ## Werdykt
 
 **V2 NIE jest gotowe do wdrożenia.** Zmiany etapów 63–70 są zaimplementowane, pokryte testami
-fake (1703 PASS, bez skip/xfail) i każda przeszła niezależny przegląd (APPROVE WITH NOTES, po
+fake (1718 PASS, bez skip/xfail) i każda przeszła niezależny przegląd (APPROVE WITH NOTES, po
 dwóch REJECT poprawionych). Żadna z nich nie była sprawdzona na żywym systemie poza smoke startem
 exe i instalatora. Kluczowe ścieżki VPN V2 nie mają weryfikacji live (G1/G2). Instalator buduje
 się i przechodzi cykl instalacja/aktualizacja/deinstalacja w trybie per-user; instalacja admin
@@ -48,7 +48,7 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | G7 | Inno Setup | **rozstrzygnięte:** zainstalowany, skrypt zweryfikowany |
 | G8 | X11 | **rozstrzygnięte:** domyślnie włączony, bez zmian w kodzie, testy regresji |
 | G9 | redesign UI | **rozstrzygnięte:** odłożony do końca stabilizacji |
-| G10 | włączenie bezpiecznej podmiany SFTP | test zgodności z odbiorcami — niżej |
+| G10 | włączenie bezpiecznej podmiany SFTP | test bezpieczeństwa i zgodności zapisu wykonany — decyzja o fladze, niżej |
 
 ## Ryzyka wdrożenia
 
@@ -61,9 +61,10 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
    ostrzeżenie TOFU przy zmianie typu klucza hosta, okno „tylko do odczytu” przy plikach z ACL.
 
 5. **Auto-upload edycji SFTP domyślnie nadal nie jest atomowy:** `put` najpierw obcina plik na
-   serwerze — przy zerwaniu połączenia plik (np. w katalogu wymiany HL7) może zostać ucięty.
-   Bezpieczna podmiana jest zaimplementowana i przetestowana na fake'ach, ale wyłączona do G10,
-   bo zmienia to, co widzi odbiorca (zdarzenie, właściciel, ACL — lista niżej).
+   serwerze — przy zerwaniu połączenia plik może zostać ucięty (test protokołowy to pokazuje).
+   Bezpieczna podmiana jest zaimplementowana i przetestowana (fake + prawdziwy protokół SFTP),
+   ale wyłączona do decyzji G10, bo podmieniony plik jest nowym plikiem (właściciel, tryb, ACL —
+   niżej).
 6. IPsec w FortiClient V2 zawsze BLOCKED (L10); zawieszony FortiClient = „Trwa inne łączenie”
    dla wszystkich kart do restartu (N2).
 7. V2 ma lokalne repo Git (bez remote) + migawki `.tgz` z `SHA256SUMS`; brak kopii poza tym dyskiem.
@@ -100,24 +101,62 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | H1 | `numpy` w exe (przez `pyautogui`), exe 145 MB | LOW |
 | legacy | `vpn_connect.py` kopiuje hasło do schowka bez wykluczenia z historii Win+V | MEDIUM (legacy nietykalny) |
 
-## G10 — co sprawdzić przed włączeniem bezpiecznej podmiany SFTP
+## G10 — test bezpieczeństwa i zgodności zapisu SFTP (2026-10-15)
 
-`SFTP_SAFE_REPLACE_ENABLED = True` zmienia zapis edycji z „nadpisz w miejscu” na „ukryty plik
-`.nazwa.hhv2-xxxx.part` (0600, `O_EXCL`) w tym samym katalogu → właściciel/tryb oryginału →
-`posix-rename@openssh.com`”. Gdy czegoś nie da się zrobić — błąd i oryginał nietknięty, bez
-powrotu do bezpośredniego zapisu. Na katalogu testowym każdego typu odbiorcy sprawdzić:
+**Mechanizm** (`upload_edit`, `SFTP_SAFE_REPLACE_ENABLED = True`): ukryty plik
+`.nazwa.hhv2-xxxx.part` w tym samym katalogu, tworzony z `O_EXCL` i od razu 0600 → zapis z
+potwierdzeniem każdego bloku → kontrola rozmiaru → właściciel i tryb oryginału → `posix-rename`.
+Każda porażka = `SafeReplaceError`, oryginał nietknięty, **bez powrotu do zapisu bezpośredniego**.
+Flaga **pozostaje `False`** (nie włączana automatycznie).
 
-1. Odbiorca reaguje na zdarzenie: incron `IN_CLOSE_WRITE` **nie** zobaczy podmiany (jest
-   `IN_MOVED_TO`), a zobaczy plik `.part` — czy go ignoruje (filtr rozszerzenia / plików z kropką)?
-2. Mirth File Reader: „ignore dot files”, filtr nazw, „move/delete after processing”.
-3. Właściciel pliku inny niż konto SFTP → podmiana odmówi (chown niedozwolony) — czy to akceptowalne.
-4. POSIX ACL / xattr / SELinux / hardlinki oryginału — rename ich nie przenosi (SFTP v3 tego nie widzi).
-5. inotify ustawiony na sam plik (nie katalog) gubi obserwację po rename.
-6. Katalog bez prawa zapisu przy zapisywalnym pliku → bezpieczna podmiana odmówi, direct działał.
-7. Serwer bez rozszerzenia `posix-rename@openssh.com` → odmowa z czytelnym błędem.
+**Jak testowano** — bez prawdziwych serwerów i danych produkcyjnych, zwykłe pliki XML:
+- `tests/test_sftp_safe_replace_protocol.py` (15): prawdziwy serwer SFTP paramiko w procesie
+  testu, połączenie przez `socketpair` (bez sieci), katalog tymczasowy jako dysk, wstrzykiwane
+  awarie. Sprawdza realne komunikaty protokołu (`open` CREATE|EXCL, `fsetstat`,
+  `posix-rename@openssh.com`, kody statusu).
+- `tests/test_sftp_edit_collisions.py` (36): serwer in-memory z modelem POSIX (właściciel,
+  grupy, tryb, symlink) i pełny cykl panelu.
 
-Możliwe wyniki: włączyć globalnie, włączyć per połączenie (wymaga pola w modelu/dialogu) albo
-zostawić direct dla wybranych katalogów.
+**Wyniki**
+
+| Wymaganie | Wynik |
+|---|---|
+| Przerwanie transferu (zerwane połączenie, anulowanie, błąd zapisu serwera) nie uszkadza oryginału | **PASS** — oryginał bajt w bajt; po zerwaniu fragment `.part` zostaje (kanał martwy) i jest nazwany w komunikacie, przy żywym łączu jest usuwany |
+| Nieudana podmiana nie powoduje utraty danych | **PASS** — brak `posix-rename` / odmowa rename / brak prawa tworzenia w katalogu / plik zniknął / katalog zamiast pliku: błąd, oryginał nietknięty i nigdy nie otwierany do zapisu |
+| Istniejący plik zastępowany poprawnie | **PASS** — pełna treść, rozmiar, postęp; symlink zachowany, podmieniany cel (fake); utracona odpowiedź na rename = komunikat „stan NIEZNANY” |
+| Błędy serwera bez niebezpiecznego fallbacku | **PASS** — żadna ścieżka nie wraca do `put` w oryginał (test + mutacja) |
+| Zajęta nazwa pliku tymczasowego | **PASS** — `O_EXCL`: cudzy plik nie jest nadpisywany |
+| Właściciel, uprawnienia, ACL | udokumentowane niżej; właściciel/tryb przetestowane na modelu POSIX, nie na prawdziwym POSIX |
+
+**Znalezisko w trakcie testu (naprawione w trybie bezpiecznym):** przy zapisie potokowym paramiko
+sprawdza odpowiedzi serwera tylko co ~100 żądań — zapis odrzucony w środku (np. pełny dysk,
+quota), po którym serwer przyjął ostatni blok, dawał plik o **poprawnym rozmiarze z dziurą** i bez
+błędu. Bezpieczny zapis pisze teraz bez potokowania (każdy blok czeka na potwierdzenie; wolniej
+na łączach o dużym opóźnieniu, bez znaczenia dla edytowanych plików konfiguracyjnych).
+**Ten sam mechanizm ma domyślny tryb bezpośredni** (`sftp.put` paramiko) — utrwala to test
+`test_direct_mode_can_hide_a_refused_write_behind_the_right_size`. Nie zmieniono go — decyzja
+użytkownika.
+
+**Właściciel, uprawnienia, ACL (ograniczenia — rename tworzy nowy plik):**
+- Właściciel: zachowany tylko, gdy serwer pozwala (`chown` na siebie i własną grupę albo root);
+  inaczej podmiana **odmawia** — pliku innego użytkownika nie da się zapisać w tym trybie.
+- Tryb (bity rwx, setgid itp.): kopiowany z oryginału i weryfikowany po ustawieniu.
+- POSIX ACL, xattr, etykiety SELinux, hardlinki: SFTP v3 ich nie widzi ani nie przenosi — po
+  podmianie ich **nie będzie**; z klienta nie da się tego wykryć.
+- Plik w katalogu bez prawa zapisu (sam plik zapisywalny): podmiana odmawia, tryb bezpośredni działał.
+- Serwer bez `posix-rename@openssh.com` (nie-OpenSSH): odmowa z czytelnym błędem.
+- Procesy obserwujące katalog na serwerze widzą utworzenie i przeniesienie pliku zamiast zapisu
+  w miejscu; przez chwilę w katalogu jest ukryty plik `.part`.
+
+**Czego testy nie pokrywają:** prawdziwy serwer POSIX (OpenSSH na Linuksie) — semantyka
+właściciela/trybu/ACL na żywym systemie plików; inne implementacje serwera SFTP.
+
+**Rekomendacja:** tryb bezpieczny jest gotowy i spełnia wymagania bezpieczeństwa zapisu. Przed
+włączeniem: jeden kontrolowany test na nieprodukcyjnym serwerze OpenSSH/Linux z plikiem testowym
+(w tym plik z ACL i plik innego właściciela) — sprawdzić komunikaty odmowy i zachowanie trybu.
+Potem włączyć flagę globalnie (błędy są jawne, oryginał zawsze cały); wyjątek per połączenie tylko,
+gdyby odmowy okazały się częste. Niezależnie rozważyć zapis bez potokowania także w trybie
+bezpośrednim (znalezisko wyżej).
 
 ## Procedura wycofania
 
