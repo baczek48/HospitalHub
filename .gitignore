@@ -1,0 +1,49 @@
+__pycache__/
+.venv/
+*.py[cod]
+*.pyo
+
+# PyInstaller build artifacts
+build/
+dist/
+dist_installer/
+*.exe
+
+# Test / scratch files
+_test_tmp.py
+test_terminal_deep.py
+test_terminal_history.py
+
+# Vault data files (user data, never commit)
+*.vault
+
+# Config / local user settings (never commit — może zawierać poświadczenia)
+config.json
+
+# Logi diagnostyczne
+*.log
+Seba J HH/
+zrzuty_debug/
+
+# Transkrypty sesji i zrzuty ekranu (robocze)
+20[0-9][0-9]-[0-9]*.txt
+*.png
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dodane 2026-10-15 (audyt przed git init)
+.pytest_cache/
+.vscode/
+*.bak
+*.tmp
+*.tgz
+*.zip
+*.rdp
+*.pem
+*.key
+known_hosts*
+.env
+.env.*
+crash*.txt
