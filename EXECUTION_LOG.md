@@ -396,3 +396,39 @@ rekurencja usuwania).
   i menu Start usunięte). `%APPDATA%\HospitalHubV2` i instalacja V1 (`C:\Program Files\HospitalHub`,
   222 pliki) bez zmian. Nie zrobione: instalacja admin do Program Files (UAC — użytkownik).
 - Flagi ×3 False, `SFTP_SAFE_REPLACE_ENABLED` False, `vpn_connect.py` a929035e…, V1 bez zmian.
+
+---
+
+## 2026-10-15 — G1: pomiar MSAA listy „VPN Name” (FortiClient 7.4.3, read-only)
+
+Sonda `smoke.forticlient_msaa_live watch --seconds 90`, uruchomiona przez nas, interakcja wyłącznie
+użytkownika (zero klawiszy z naszej strony). Katalog: ssl=2, ipsec=1. Dwa przebiegi, identyczne:
+
+```
++ 9.92s  hwnd=0x1205b2 refused=profile-control-missing
++10.24s  hwnd=0x1205b2 state=0x40100400 [COLLAPSED FOCUSABLE]         value='Personal VPNs' + ssl tunnel #2/2
++11.20s  hwnd=0x1205b2 state=0x40100200 [EXPANDED FOCUSABLE]          value='Personal VPNs' + ssl tunnel #2/2
++18.69s  hwnd=0x1205b2 state=0x40100404 [FOCUSED COLLAPSED FOCUSABLE] value='Personal VPNs' + ipsec tunnel #1/1
++20.49s  no verified FortiClient window
+(2. przebieg: nowe hwnd 0xf00c4, te same stany i wartości: 49.35 / 49.69 / 50.94 / 56.86 / 59.00 s)
+```
+
+Ustalenia:
+1. **accValue nie podąża za podświetleniem.** Przez 7,5 s / 6 s otwartej listy (przesuwanie strzałkami)
+   ani stan, ani wartość się nie zmieniły — wartość zmienia się dopiero przy zatwierdzeniu.
+   Zgodne z założeniem Etapu 63 (potwierdzenie = dwa odczyty po zamknięciu listy).
+2. **EXPANDED bez FOCUSED.** Otwarta lista nie ma bitu FOCUSED; `list_open` wymaga tylko EXPANDED — zgodne.
+3. **Po zamknięciu: FOCUSED + COLLAPSED**, więc bit FOCUSED jest raportowany. Stan na starcie
+   (po otwarciu okna): COLLAPSED **bez** FOCUSED.
+4. **Etykieta „Personal VPNs” obejmuje też tunel IPsec** — wartość po zamknięciu to „Personal VPNs”
+   + nazwa tunelu z `IPSec\Tunnels`. `GROUP_LABELS = {'Personal VPNs': ssl}` opisuje to błędnie
+   (etykieta nie wyznacza rodzaju). Skutek dziś: wybór tunelu IPsec = odmowa (fail-closed, L10).
+5. **Po zamknięciu listy wybrany był inny tunel (IPsec) niż przed otwarciem (SSL #2)** — do
+   wyjaśnienia z użytkownikiem, czy lista była zamknięta Escape (wtedy Escape ZATWIERDZA
+   podświetlenie w tej kontrolce), czy Enter/kliknięciem.
+6. ~2 s po zatwierdzeniu „no verified FortiClient window”, drugi przebieg na nowym hwnd — do
+   wyjaśnienia (zamknięcie okna przez użytkownika czy reakcja FortiClienta na zmianę profilu).
+
+Niezmierzone (ścieżka klawiszowa V2): FOCUSED po Shift+Tab ×2 z pola Username, otwarcie Spacją,
+zatwierdzenie Enterem po wpisaniu nazwy. **Ocena G2: jeszcze nie** — wymaga odpowiedzi na pkt 5–6
+i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawiszy V2).

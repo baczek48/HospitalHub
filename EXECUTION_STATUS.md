@@ -50,7 +50,7 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 
 | Bramka | Co | Wymagane działanie |
 |---|---|---|
-| **G1** | stany MSAA listy „VPN Name” | Otwórz FortiClient (ekran logowania VPN), uruchom `py -3.13 -m smoke.forticlient_msaa_live watch --seconds 90`; otwórz listę „VPN Name”, przesuń podświetlenie strzałkami **bez Enter**, zamknij Escape. Wklej wynik. |
+| **G1** | stany MSAA — **pomiar wykonany 2026-10-15** (wyniki: `EXECUTION_LOG.md`) | odpowiedzieć: czym zamknięto listę (Escape/Enter/klik) i czy okno FortiClienta zamknięto ręcznie; potem G1b — sonda + sekwencja klawiszy V2 wykonana ręcznie |
 | **G2** | live connect FortiClient V2 | po G1 — osobna, wyraźna zgoda |
 | **G3/G4** | live connect Stormshield / Barracuda V2 | po akceptacji G2 |
 | **G6** | instalacja **admin** do Program Files | wymaga kliknięcia UAC — uruchomić `dist_installer\HospitalHubV2-Setup-2.0.0.exe`, potem odinstalować; per-user zrobione automatycznie |
