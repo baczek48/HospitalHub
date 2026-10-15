@@ -1,6 +1,6 @@
 # HospitalHub V2 — macierz testów
 
-> PHASE G dyrektywy wykonawczej. Stan: 2026-10-14, **1664 testy, wszystkie fake/in-process, bez skip/xfail**
+> PHASE G dyrektywy wykonawczej. Stan: 2026-10-15, **1703 testy, wszystkie fake/in-process, bez skip/xfail**
 > (`py -3.13 -m pytest tests -q -p no:cacheprovider`, ~16–30 s).
 >
 > **Zasada:** test na fake'ach dowodzi logiki i kontraktów, **nie** działania na żywym systemie.
@@ -21,6 +21,9 @@ izolacji. Każde trafienie w prawdziwy system = test FAIL (lub sesja FAIL, gdy p
 | Odporność aplikacji: excepthook, crash.log, wątki przy zamykaniu, sprzątanie %TEMP% | `test_app_resilience.py` | unit, concurrency (prawdziwe QThread) | smoke startu exe (offscreen) 2026-10-14 |
 | Okno szpitala — status VPN poza wątkiem GUI | `test_detail_panel_vpn_status.py` | unit, concurrency | nie |
 | SSH/SFTP: kopie lokalne, nazwy plików, TOFU, anulowanie, listowanie, timeouty, zamykanie | `test_ssh_sftp_safety.py`, `test_sftp_logic.py` | unit, regression, security | nie |
+| SFTP — edycja w zewnętrznym edytorze: pliki o tej samej nazwie (serwery, katalogi, okna, karty), wiązanie z połączeniem, ponowne pobranie, niewysłane edycje, anulowanie, zerwanie transferu, bezpieczna podmiana (tmp + posix-rename, właściciel, symlink, brak rozszerzenia) | `test_sftp_edit_collisions.py` (36; prawdziwy `SftpPanel`, workery synchronicznie, serwery in-memory) | regression, security | nie — zgodność z odbiorcami HL7 = **G10** |
+| SSH — X11 domyślnie włączony (G8): żądanie przed PTY, odmowa serwera, brak lokalnego X | `test_ssh_x11_default.py` | regression | nie |
+| Instalator: instalacja, start, aktualizacja, deinstalacja, izolacja danych | ręcznie, per-user do scratch (`/CURRENTUSER /VERYSILENT /DIR=`) | e2e | **tak, 2026-10-15** (admin/UAC — nie) |
 | RDP i schowek | `test_rdp_clipboard_safety.py` | unit, security | nie (Win+V do weryfikacji) |
 | Diagnostyka i redakcja | `test_diagnostics.py`, `test_vpn_trace.py` | unit, security | nie |
 | VPN — architektura providerów, routing, flagi | `test_vpn_provider_arch.py`, `test_vpn_v2_routing_gate.py`, `test_vpn_v2_provider_resolution.py`, `test_vpn_shadow_detection.py` | contract | — |

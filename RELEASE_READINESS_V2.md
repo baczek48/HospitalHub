@@ -1,17 +1,18 @@
 # HospitalHub V2 — raport gotowości (PHASE I)
 
-> Stan na 2026-10-14. Rozróżnia trzy poziomy: **kod gotowy** (zaimplementowany, testy fake
+> Stan na 2026-10-15 (aktualizacja po Etapie 70 i decyzjach G1–G9). Rozróżnia trzy poziomy: **kod gotowy** (zaimplementowany, testy fake
 > zielone, review), **zweryfikowany live** (zmierzony na prawdziwym Windows/kliencie),
 > **gotowy do wdrożenia** (oba poprzednie + build/instalator + procedura wycofania).
 > Szczegóły: `EXECUTION_LOG.md`, `EXECUTION_STATUS.md`, `TEST_MATRIX_V2.md`, `ROADMAP_V2.md`.
 
 ## Werdykt
 
-**V2 NIE jest gotowe do wdrożenia.** Zmiany etapów 63–69 są zaimplementowane, pokryte testami
-fake (1664 PASS, bez skip/xfail) i każda przeszła niezależny przegląd (APPROVE WITH NOTES, po
+**V2 NIE jest gotowe do wdrożenia.** Zmiany etapów 63–70 są zaimplementowane, pokryte testami
+fake (1703 PASS, bez skip/xfail) i każda przeszła niezależny przegląd (APPROVE WITH NOTES, po
 dwóch REJECT poprawionych). Żadna z nich nie była sprawdzona na żywym systemie poza smoke startem
-exe. Kluczowe ścieżki VPN V2 nie mają weryfikacji live, a instalatora nie da się zbudować na tej
-maszynie. Na poziomie kodu i testów usunięto wszystkie znalezione luki HIGH/CRITICAL w
+exe i instalatora. Kluczowe ścieżki VPN V2 nie mają weryfikacji live (G1/G2). Instalator buduje
+się i przechodzi cykl instalacja/aktualizacja/deinstalacja w trybie per-user; instalacja admin
+(UAC) czeka na użytkownika. Na poziomie kodu i testów usunięto wszystkie znalezione luki HIGH/CRITICAL w
 obszarach, których dotyczyły etapy; czy to przekłada się na zachowanie w terenie — do
 potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 
@@ -20,7 +21,7 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | Obszar | Kod | Live | Uwagi |
 |---|---|---|---|
 | Vault (zapis, typ, hasło, `.bak`, config) | gotowy (Etap 65) | nie | regresje C4-01..05/07 naprawione z testami |
-| SSH/SFTP | gotowy (Etapy 66, 68) | nie | C1-01..12, C1-14/15/17 naprawione; C1-13 (X11) — decyzja użytkownika; C1-16, C1-18, C1-19 LOW otwarte |
+| SSH/SFTP | gotowy (Etapy 66, 68, 70) | nie | C1-01..12, C1-14/15/17 naprawione; Etap 70: kolizje edycji zewnętrznej (F1–F3, M1, M2, L7) naprawione; bezpieczny zapis gotowy za flagą (G10); X11 domyślnie włączony (G8, testy regresji); C1-16, C1-18, C1-19 LOW otwarte |
 | RDP | gotowy (Etap 67) | nie | zasada „zawsze podpisany .rdp” zachowana |
 | Schowek | gotowy (Etap 67/68) | nie | Win+V do sprawdzenia ręcznie; legacy `vpn_connect.py` nadal kopiuje bez wykluczenia |
 | Stabilność (wątki, wyjątki, zapis poza GUI, status VPN poza GUI) | gotowy (Etap 69) | smoke startu exe | D-08/D-10 (legacy VPN w wątku GUI) — po cutoverze V2 |
@@ -32,21 +33,22 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | VPN V2 Barracuda | contract + autofill UIA (Etap 50C) | **nie** — G4 | — |
 | EMS / CLI 2FA (FortiClient płatny) | contract-only | nie (brak maszyny) | `cli-monitor-not-owned-by-panel` — blokada dla szpitali z EMS |
 | UI/UX redesign (PHASE F) | **nie rozpoczęty** | — | wymaga decyzji produktowych (patrz niżej) |
-| Build PyInstaller | gotowy (exe 2026-10-14 22:03, po wszystkich zmianach) | smoke startu (offscreen, 12 s, izolowane katalogi) | MSAA/UIA w zamrożonym procesie niezweryfikowane |
-| Instalator Inno Setup | `HospitalHubV2.iss` istnieje | **nie** — brak ISCC na maszynie | G7 |
+| Build PyInstaller | gotowy (exe 2026-10-15 20:05, po wszystkich zmianach) | smoke startu z instalacji (offscreen, 12 s, izolowane katalogi) | MSAA/UIA w zamrożonym procesie niezweryfikowane |
+| Instalator Inno Setup | gotowy (`dist_installer\HospitalHubV2-Setup-2.0.0.exe`, ISCC 6.7.1) | per-user: instalacja, start, aktualizacja 2.0.0→2.0.1, deinstalacja PASS 2026-10-15 | instalacja admin (UAC) — G6 u użytkownika |
 
 ## Bramki wymagające użytkownika
 
 | Bramka | Co | Działanie |
 |---|---|---|
 | G1 | pomiar stanów MSAA listy „VPN Name” | otworzyć FortiClient, uruchomić `py -3.13 -m smoke.forticlient_msaa_live watch --seconds 90`, otworzyć listę, przesunąć podświetlenie (bez Enter), Escape; wkleić wynik |
-| G2 | live connect FortiClient V2 | po G1 i G5; flaga na czas próby, restart aplikacji po cofnięciu |
+| G2 | live connect FortiClient V2 | po analizie G1 — **osobna, wyraźna zgoda**; flaga na czas próby, restart aplikacji po cofnięciu |
 | G3/G4 | live connect Stormshield / Barracuda V2 | po akceptacji G2 |
-| G5 | pusty `profile_name` w V2 | dziś BLOCKED (chyba że jeden tunel i on wyświetlony) — rekomendacja: zostawić |
-| G6 | instalacja/odinstalowanie na maszynie | po G7 |
-| G7 | zainstalowanie Inno Setup 6 (ISCC) | decyzja o instalacji narzędzia |
-| G8 | X11 forwarding domyślnie wyłączony? (C1-13) | decyzja produktowa |
-| G9 | redesign UI (PHASE F): zakres i kierunek | `AUDYT_V2.md` §4 to koncepcja — potrzebna akceptacja zakresu |
+| G5 | pusty `profile_name` w V2 | **rozstrzygnięte:** blokada zostaje, bez fallbacku do bieżącego profilu |
+| G6 | instalacja/odinstalowanie na maszynie | per-user zrobione; instalacja admin (UAC) — ręcznie |
+| G7 | Inno Setup | **rozstrzygnięte:** zainstalowany, skrypt zweryfikowany |
+| G8 | X11 | **rozstrzygnięte:** domyślnie włączony, bez zmian w kodzie, testy regresji |
+| G9 | redesign UI | **rozstrzygnięte:** odłożony do końca stabilizacji |
+| G10 | włączenie bezpiecznej podmiany SFTP | test zgodności z odbiorcami — niżej |
 
 ## Ryzyka wdrożenia
 
@@ -58,23 +60,25 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
    nadpisania istniejącego pliku przy tworzeniu, blokada edycji listy VPN w trakcie łączenia,
    ostrzeżenie TOFU przy zmianie typu klucza hosta, okno „tylko do odczytu” przy plikach z ACL.
 
-5. **Auto-upload edycji SFTP nie jest atomowy:** `put` najpierw obcina plik na serwerze — przy
-   zerwaniu połączenia lub anulowaniu plik na serwerze (np. katalog wymiany HL7) może być ucięty,
-   a watcher po stronie serwera może przetworzyć niepełny plik. Najważniejsza z otwartych luk.
+5. **Auto-upload edycji SFTP domyślnie nadal nie jest atomowy:** `put` najpierw obcina plik na
+   serwerze — przy zerwaniu połączenia plik (np. w katalogu wymiany HL7) może zostać ucięty.
+   Bezpieczna podmiana jest zaimplementowana i przetestowana na fake'ach, ale wyłączona do G10,
+   bo zmienia to, co widzi odbiorca (zdarzenie, właściciel, ACL — lista niżej).
 6. IPsec w FortiClient V2 zawsze BLOCKED (L10); zawieszony FortiClient = „Trwa inne łączenie”
    dla wszystkich kart do restartu (N2).
-7. V2 poza Git — punkty odtworzenia tylko jako migawki `.tgz` w `C:\claude\hospital_hub_v2_snapshots\`.
+7. V2 ma lokalne repo Git (bez remote) + migawki `.tgz` z `SHA256SUMS`; brak kopii poza tym dyskiem.
 
 ## Pozostawione znaleziska (świadomie, z przeglądów i audytów)
 
 | ID | Opis | Waga |
 |---|---|---|
-| Etap 68 | auto-upload edycji SFTP nieatomowy (put obcina plik) | MEDIUM |
+| Etap 68/70 | auto-upload edycji SFTP nieatomowy, dopóki G10 nie włączy bezpiecznej podmiany | MEDIUM |
+| Etap 70 L8 | pobranie zakończone po zamknięciu karty odkłada obserwację martwego połączenia — zapisy tej kopii cicho ignorowane (nic nie idzie w złe miejsce) | LOW |
 | Etap 68 | fałszywe „tylko do odczytu” przy ACL dających więcej niż bity trybu | LOW |
 | Etap 68 | alarm „klucz zmieniony”, gdy serwer doda nowy typ klucza hosta | LOW |
 | Etap 68 | brak timeoutu `invoke_subsystem` / `exec_command` (paramiko) | LOW |
-| Review 4 | `on_done`/`on_error` uploadu i `_transfer_done` czytają listę po zmianie karty (flagi/cache, bez uploadu); dialogi przed przechwyceniem klienta w `_open_remote` | LOW |
-| C1-13 | X11 forwarding zawsze żądany | decyzja G8 |
+| Review 4 | dialogi przed przechwyceniem klienta w `_open_remote` (`on_done`/`on_error` uploadu i `_transfer_done` — naprawione w Etapie 70) | LOW |
+| C1-13 | X11 forwarding zawsze żądany; brak przełącznika per połączenie (nie istniał w V2) | decyzja G8: tak ma być |
 | C1-16 | multiexec: hasło z promptu trafia do innych sesji; wklejanie wielolinijkowe bez potwierdzenia | LOW |
 | C1-18, C1-19 | ścieżka SFTP do złej sesji po zamknięciu karty; rekurencja przy bardzo głębokim usuwaniu | LOW |
 | L9 | MSAA pod `AttachThreadInput` niezmierzone (część G1) | — |
@@ -96,11 +100,31 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | H1 | `numpy` w exe (przez `pyautogui`), exe 145 MB | LOW |
 | legacy | `vpn_connect.py` kopiuje hasło do schowka bez wykluczenia z historii Win+V | MEDIUM (legacy nietykalny) |
 
+## G10 — co sprawdzić przed włączeniem bezpiecznej podmiany SFTP
+
+`SFTP_SAFE_REPLACE_ENABLED = True` zmienia zapis edycji z „nadpisz w miejscu” na „ukryty plik
+`.nazwa.hhv2-xxxx.part` (0600, `O_EXCL`) w tym samym katalogu → właściciel/tryb oryginału →
+`posix-rename@openssh.com`”. Gdy czegoś nie da się zrobić — błąd i oryginał nietknięty, bez
+powrotu do bezpośredniego zapisu. Na katalogu testowym każdego typu odbiorcy sprawdzić:
+
+1. Odbiorca reaguje na zdarzenie: incron `IN_CLOSE_WRITE` **nie** zobaczy podmiany (jest
+   `IN_MOVED_TO`), a zobaczy plik `.part` — czy go ignoruje (filtr rozszerzenia / plików z kropką)?
+2. Mirth File Reader: „ignore dot files”, filtr nazw, „move/delete after processing”.
+3. Właściciel pliku inny niż konto SFTP → podmiana odmówi (chown niedozwolony) — czy to akceptowalne.
+4. POSIX ACL / xattr / SELinux / hardlinki oryginału — rename ich nie przenosi (SFTP v3 tego nie widzi).
+5. inotify ustawiony na sam plik (nie katalog) gubi obserwację po rename.
+6. Katalog bez prawa zapisu przy zapisywalnym pliku → bezpieczna podmiana odmówi, direct działał.
+7. Serwer bez rozszerzenia `posix-rename@openssh.com` → odmowa z czytelnym błędem.
+
+Możliwe wyniki: włączyć globalnie, włączyć per połączenie (wymaga pola w modelu/dialogu) albo
+zostawić direct dla wybranych katalogów.
+
 ## Procedura wycofania
 
-- Kod: V2 nie jest w Git — migawki w `C:\claude\hospital_hub_v2_snapshots\`:
-  `hh_v2_snapshot_phase0.tgz` (sprzed zmian 2026-10-14), `hh_v2_snapshot_etap68.tgz`,
-  `hh_v2_snapshot_2026-10-14_final.tgz` (stan końcowy). Rozważyć objęcie V2 kontrolą wersji.
+- Kod: lokalne repo Git V2 (`git log`; `2682c72` = stan sprzed 2026-10-15) oraz migawki w
+  `C:\claude\hospital_hub_v2_snapshots\` (phase0, etap68, 2026-10-14_final, 2026-10-15_pre;
+  integralność: `sha256sum -c SHA256SUMS`).
+- SFTP: `SFTP_SAFE_REPLACE_ENABLED = False` = zapis jak przed Etapem 70.
 - VPN: każda flaga `CONNECT_ENABLED` z powrotem na `False` + restart aplikacji = powrót na legacy.
 - Dane: format vaulta niezmieniony; `.vault.bak` (jedna generacja) obok vaulta.
 - V1 (`C:\claude\hospital_hub`) nietknięta — pozostaje działającą alternatywą.

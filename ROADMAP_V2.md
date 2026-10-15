@@ -11,10 +11,12 @@
 ## Zasady nienaruszalne (skrót)
 
 - V1 (`C:\claude\hospital_hub`) nietknięty; praca tylko w `C:\claude\hospital_hub_v2`.
-- Katalog V2 **nie jest śledzony w Git** — przed szerokimi zmianami migawka
-  (`tar --force-local`, opis w `EXECUTION_LOG.md`).
+- Od 2026-10-15 V2 ma **własne lokalne repo Git** (bez remote; V1 i repo nadrzędne
+  `C:\claude` bez zmian). Przed szerokimi zmianami commit + migawka `.tgz`
+  (`C:\claude\hospital_hub_v2_snapshots\`, `SHA256SUMS`).
 - `CONNECT_ENABLED = False` ×3 (FortiClient, Stormshield, Barracuda) — flagę
   zmienia wyłącznie użytkownik, przy kontrolowanym live teście.
+- `SFTP_SAFE_REPLACE_ENABLED = False` (`ui/ssh_panel.py`) do bramki G10.
 - `vpn_connect.py` (legacy, sha256 `a929035e…`) — bez zmian bez osobnego uzasadnienia.
 - Brak automatycznego fallbacku V2 → legacy.
 - `tests/conftest.py` (izolacja od Windows) — nie osłabiać, nie obchodzić.
@@ -98,8 +100,15 @@ Zakres zgodny z dyrektywą i `AUDYT_V2.md` (§3 wydajność P1–P12, §9 bezpie
 | G2 | live connect FortiClient V2 (flaga True na czas próby) | realne połączenie VPN |
 | G3 | live connect Stormshield V2 | j.w. |
 | G4 | live connect Barracuda V2 | j.w. |
-| G5 | decyzja produktowa: puste `profile_name` w V2 | semantyka zachowania |
-| G6 | instalacja/odinstalowanie instalatora na maszynie | zmiana systemu |
-| G7 | zainstalowanie Inno Setup 6 (ISCC) do budowy instalatora | instalacja oprogramowania |
-| G8 | X11 forwarding domyślnie wyłączony? (C1-13) | zmiana zachowania produktu |
-| G9 | redesign UI (PHASE F): zakres i kierunek | decyzja produktowa; `AUDYT_V2.md` §4 to tylko koncepcja |
+| G5 | **ROZSTRZYGNIĘTE 10-15:** blokada w V2, gdy profil niejednoznaczny; bez fallbacku | — |
+| G6 | instalacja/odinstalowanie instalatora na maszynie | per-user (scratch) **zrobione 10-15**; instalacja admin wymaga UAC |
+| G7 | **ROZSTRZYGNIĘTE 10-15:** Inno Setup 6.7.1 zainstalowany przez użytkownika | — |
+| G8 | **ROZSTRZYGNIĘTE 10-15 (korekta):** X11 domyślnie WŁĄCZONY, zachowanie bez zmian, testy regresji | — |
+| G9 | **ROZSTRZYGNIĘTE 10-15:** redesign odłożony do końca stabilizacji i testów przedwdrożeniowych | — |
+| G10 | włączenie bezpiecznej podmiany SFTP (tmp + posix-rename) | zgodność z odbiorcami HL7 — test na katalogu testowym odbiorcy |
+
+## Etap 70 (2026-10-15) — SFTP: edycja w zewnętrznym edytorze
+
+Zakres wąski (bez przebudowy SSH/SFTP): kolizje plików o tej samej nazwie, wiązanie
+edycji z serwerem/sesją/ścieżką, bezpieczny zapis. Stan: **DONE**, review APPROVE WITH
+NOTES ×2. Włączenie bezpiecznej podmiany — bramka G10. Szczegóły: `EXECUTION_LOG.md`.

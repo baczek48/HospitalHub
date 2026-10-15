@@ -8,8 +8,20 @@
 ; Dzięki temu obie wersje mogą być zainstalowane i uruchomione jednocześnie,
 ; a odinstalowanie jednej nie rusza drugiej.
 
+;
+; Dane użytkownika (vault, config, diagnostyka) są w %APPDATA%\HospitalHubV2 —
+; poza {app}; odinstalowanie ich NIE usuwa (V1 używa %APPDATA%\HospitalHub).
+;
+; Test bez UAC (2026-10-15, G6/G7): instalacja per-user do wskazanego katalogu
+;   HospitalHubV2-Setup-X.exe /CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES
+;       /TASKS="" /DIR=<katalog> /LOG=<plik>
+; Normalna instalacja nadal wymaga uprawnień administratora.
+; Wersję można nadpisać przy kompilacji: iscc /DMyAppVersion=2.0.1 HospitalHubV2.iss
+
 #define MyAppName      "HospitalHub V2"
-#define MyAppVersion   "2.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "2.0.0"
+#endif
 #define MyAppPublisher "Sebastian Bąk"
 #define MyAppExeName   "HospitalHubV2.exe"
 
@@ -32,6 +44,11 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+; /CURRENTUSER tylko z linii poleceń (testy, brak admina) — kreator bez zmian
+PrivilegesRequiredOverridesAllowed=commandline
+VersionInfoVersion={#MyAppVersion}
+; Restart Manager zamyka działającą aplikację przed podmianą plików
+CloseApplications=yes
 
 [Languages]
 Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"

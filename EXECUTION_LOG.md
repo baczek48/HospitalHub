@@ -326,3 +326,73 @@ rekurencja usuwania).
   izolowanymi katalogami: żył do końca, brak crash.log, brak procesu po zakończeniu.
 - **Testy: 1664 PASS / 0 FAIL**, bez skip/xfail. Flagi ×3 False; `vpn_connect.py` a929035e…;
   V1 bez zmian (najnowszy plik 2026-09-11).
+
+---
+
+## 2026-10-15 — decyzje G1–G9, P0, Etap 70 (SFTP), instalator
+
+- **Decyzje właściciela:** G1 czeka na ręczny pomiar (zero interakcji z naszej strony), G2 tylko
+  za osobną zgodą po G1, G5 blokada bez fallbacku, G7 Inno Setup zainstalowany, G9 redesign
+  odłożony. **G8 — korekta tego samego dnia:** X11 domyślnie **włączony** (zastępuje pierwotne
+  „wyłącz domyślnie”); kod SSH bez zmian, dodane testy regresji. Uwaga: przełącznika X11 per
+  połączenie w V2 nie było i nie dodano go (polecenie: żadnych innych zmian w SSH/SFTP).
+- **Stan wejściowy:** niezmienniki OK (flagi ×3 False, `vpn_connect.py` a929035e…, spec 4b27eed2…),
+  1664 PASS.
+- **P0 — migawki:** trzy archiwa (phase0, etap68, 2026-10-14_final) — `gzip -t` OK, listy plików
+  bez vaultów/config/logów; `2026-10-14_final` rozpakowana i porównana z drzewem: różnią się tylko
+  `EXECUTION_STATUS.md` i `RELEASE_READINESS_V2.md` (edytowane po migawce). Nowa
+  `hh_v2_snapshot_2026-10-15_pre.tgz`; `SHA256SUMS` w katalogu migawek (`sha256sum -c` OK).
+  Kopia poza dyskiem C: nie zrobiona — wymaga wskazania miejsca przez użytkownika.
+- **P0 — Git:** audyt 132 plików kandydujących: brak kluczy, haseł, vaultów, `config.json`, logów;
+  trafienia to fikstury testowe (`DRY-RUN-PASSWORD-NOT-REAL`, `szpital-a.pl`, IP z przykładów,
+  nagłówek klucza w testach redakcji). Realna nazwa tunelu `1SZP` w testach MSAA — do podmiany,
+  gdyby repo miało trafić na zewnątrz. `.gitignore` uzupełniony (`.pytest_cache`, `.vscode`,
+  `*.bak`, `*.tmp`, `*.tgz`, `*.zip`, `*.rdp`, `*.pem`, `*.key`, `known_hosts*`, `.env*`,
+  `crash*.txt`), `core.autocrlf=false` (repo ma mieszane LF/CRLF). `git init` tylko w
+  `hospital_hub_v2`, commit bazowy `2682c72`, bez remote. Repo nadrzędne `C:\claude` i V1 bez zmian.
+- **Etap 70 — SFTP, edycja w zewnętrznym edytorze.** Cykl: `_open_remote`/`_open_with` (pobranie)
+  → kopia `sftp_temp_path` = katalog panelu / sha1(token połączenia + ścieżka zdalna)[:12] /
+  nazwa → `_watch_file` → poll mtime co 2 s → `_upload_changed_file`; flush przy zmianie karty
+  i zamknięciu. Zgłoszona kolizja (te same nazwy z różnych serwerów/katalogów) była już usunięta
+  w C1-01/02 i S3 (10-14) — **odtworzona testem** na starej ścieżce (sama nazwa: 4 FAIL) i
+  wykazana jako niemożliwa na obecnej. Znalezione i naprawione luki w tym samym cyklu:
+  - **F1:** „Otwórz za pomocą…” pobierał ponownie *do obserwowanej kopii* — poll mógł wysłać
+    na serwer pół pobrania, a anulowanie kasowało kopię edytowaną w edytorze. Teraz pobranie
+    idzie do prywatnego `.part`, podmiana `os.replace` dopiero po całości, `_download_active`
+    wstrzymuje poll/flush.
+  - **F2:** po przełączeniu kart tam i z powrotem mógł ruszyć drugi równoległy upload tego samego
+    pliku (`_upload_active.clear()` w `switch_sftp`) — usunięte.
+  - **F3:** wpis obserwacji ma niezmienny `owner` (weakref klienta); upload/flush tylko gdy
+    `owner is` bieżący klient i `remote` zgodny z wpisem; metadane po uploadzie z własnego kanału
+    uploadu, nie z `self._sftp`.
+  - **P1 — `upload_edit`:** tryb direct = dotychczasowy `put` + weryfikacja rozmiaru (także we
+    flushu). Tryb bezpieczny (flaga `SFTP_SAFE_REPLACE_ENABLED = False` do **G10**): ukryty
+    `.nazwa.hhv2-xxxx.part` w tym samym katalogu, `O_EXCL` + 0600 przed danymi, weryfikacja
+    rozmiaru, chown/chmod oryginału, symlink → podmiana celu, `posix-rename`; każda porażka =
+    `SafeReplaceError` z oryginałem nietkniętym, **bez powrotu do direct**.
+- **Review Etapu 70 (niezależny agent), runda 1: APPROVE WITH NOTES.** Wdrożone: M1 (otwarcie
+  pliku w trakcie jego uploadu — odmowa), M2 (niewysłane edycje nigdy nie są zastępowane
+  pobraniem; zapis w trakcie pobierania zostaje i jest wysyłany), M3 (plik tymczasowy, którego nie
+  da się usunąć po zerwaniu, jest nazwany w komunikacie), M4 (brak fałszywego błędu po udanej
+  podmianie; utracona odpowiedź na rename = „stan NIEZNANY”), L5 (0600 od pierwszego bajtu),
+  L7 (`_invalidate_open_remote_cache` liczy ścieżkę dla połączenia, przez które szedł upload),
+  komunikat flushu. L6 → lista G10 w `RELEASE_READINESS_V2.md`; L8 pozostawione (LOW).
+  **Runda 2: APPROVE WITH NOTES** — MEDIUM: w `_open_remote` (serwer zmieniony) obserwacja była
+  zdejmowana przed pobraniem → zapisy mogły przepaść po cichu; poprawione (obserwacja zostaje,
+  `_download_active` ją wstrzymuje). LOW: „NIEZNANY” ginął przy anulowaniu — poprawione.
+- **Testy:** nowe `tests/test_sftp_edit_collisions.py` (36: prawdziwy `SftpPanel`, workery
+  synchronicznie, serwery in-memory z wstrzykiwaniem awarii; bez sieci) i
+  `tests/test_ssh_x11_default.py` (3). Fikstura `fake_panel` w `test_ssh_sftp_safety.py` dostała
+  `_download_active`. **Mutacje:** cofnięcie każdej poprawki (F1 ×2, F2, F3, P1-fallback, M1, M2 ×2,
+  M4-pop, L5, L7, stara ścieżka kopii ×2) daje FAIL. **1703 PASS / 0 FAIL.**
+- **Instalator (G7/G6):** ISCC 6.7.1 jest per-user (`%LOCALAPPDATA%\Programs\Inno Setup 6`) —
+  `build_v2.bat` szuka tam też. `HospitalHubV2.iss`: `#ifndef MyAppVersion` (wersja z `/D`),
+  `PrivilegesRequiredOverridesAllowed=commandline` (kreator nadal wymaga admina; `/CURRENTUSER`
+  tylko z linii poleceń), `VersionInfoVersion`, `CloseApplications=yes`, opis danych poza `{app}`.
+  Build exe + instalatora exit 0 (20:05). **Cykl per-user do scratchpadu:** instalacja 2.0.0
+  (wpis tylko w HKCU, wydawca „Sebastian Bąk” poprawnie, bez skrótu na pulpicie) → start
+  offscreen 12 s z izolowanymi APPDATA/TEMP (żył, brak crash.log) → aktualizacja do 2.0.1
+  (ten sam katalog, jeden wpis, jeden deinstalator) → start → deinstalacja (katalog, wpis HKCU
+  i menu Start usunięte). `%APPDATA%\HospitalHubV2` i instalacja V1 (`C:\Program Files\HospitalHub`,
+  222 pliki) bez zmian. Nie zrobione: instalacja admin do Program Files (UAC — użytkownik).
+- Flagi ×3 False, `SFTP_SAFE_REPLACE_ENABLED` False, `vpn_connect.py` a929035e…, V1 bez zmian.

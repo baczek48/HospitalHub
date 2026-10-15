@@ -3,8 +3,9 @@
 > Aktualizowane po każdym checkpoincie. Plan: `ROADMAP_V2.md`. Historia: `EXECUTION_LOG.md`.
 > Gotowość: `RELEASE_READINESS_V2.md`. Testy: `TEST_MATRIX_V2.md`.
 
-**Ostatnia aktualizacja:** 2026-10-14 22:10 · **Testy:** 1664 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
-(`py -3.13 -m pytest tests -q -p no:cacheprovider`) · **Build:** exe 2026-10-14 22:03, smoke startu OK
+**Ostatnia aktualizacja:** 2026-10-15 20:10 · **Testy:** 1703 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
+(`py -3.13 -m pytest tests -q -p no:cacheprovider`) · **Build:** exe + instalator 2026-10-15 20:05,
+cykl instalacja → start → aktualizacja → deinstalacja (per-user, bez UAC) PASS
 
 ## Niezmienniki
 
@@ -13,59 +14,62 @@
 | `FortiClientProvider.CONNECT_ENABLED` | `False` |
 | `StormshieldProvider.CONNECT_ENABLED` | `False` |
 | `BarracudaProvider.CONNECT_ENABLED` | `False` |
+| `ui/ssh_panel.SFTP_SAFE_REPLACE_ENABLED` | `False` (bramka G10) |
 | `vpn_connect.py` sha256 | `a929035e5b62fb98…` (nietknięty) |
 | `HospitalHubV2.spec` sha256 | `4b27eed238414e28…` (H1) |
 | V1 `C:\claude\hospital_hub` | nietknięty (najnowszy plik 2026-09-11) |
-| Git | V2 nie jest śledzony — migawki w `C:\claude\hospital_hub_v2_snapshots\` (phase0 = sprzed zmian 10-14, etap68, 2026-10-14_final = stan końcowy) |
+| Git | **lokalne repo tylko w `hospital_hub_v2`** (od 2026-10-15, bez remote); commit bazowy `2682c72` = stan sprzed zmian 10-15 |
+| Migawki | `C:\claude\hospital_hub_v2_snapshots\` + `SHA256SUMS` (`sha256sum -c SHA256SUMS`) |
 
-## Ukończone (2026-10-14)
+## Decyzje właściciela (2026-10-15)
+
+| Bramka | Decyzja |
+|---|---|
+| G1 | czeka na ręczny pomiar użytkownika; podczas pomiaru zero klawiszy i interakcji z naszej strony |
+| G2 | osobna, wyraźna zgoda użytkownika po analizie G1; flag `CONNECT_ENABLED` nie włączamy |
+| G5 | blokada w V2 zostaje, gdy profilu docelowego nie da się jednoznacznie ustalić; bez cichego fallbacku do bieżącego profilu |
+| G7 | Inno Setup zainstalowany (6.7.1, per-user); skrypt przygotowany i zweryfikowany — **zrobione** |
+| G8 | **X11 domyślnie WŁĄCZONY** (korekta decyzji; zastępuje wcześniejsze „wyłącz domyślnie”). Zachowanie bez zmian, testy regresji dodane |
+| G9 | pełny redesign UI odłożony do końca stabilizacji i testów przedwdrożeniowych |
+
+## Ukończone 2026-10-15
 
 | Checkpoint | Review |
 |---|---|
-| Etap 63 — MSAA w `_select_profile()` | APPROVE WITH NOTES |
-| PHASE 0 — rozpoznanie, dokumenty, sonda G1 | — |
-| H1 — comtypes/oleacc w buildzie | — (build + smoke) |
-| Etap 64 — FortiClient V2: L1–L5, L7, L8, L13, L14 | REJECT → poprawione → APPROVE WITH NOTES |
-| Etap 65 — integralność vaulta | APPROVE WITH NOTES |
-| Etap 66 — SSH/SFTP C1-01..06, C1-17 (+S1–S3) | REJECT ×2 → poprawione → APPROVE WITH NOTES |
-| Etap 67 — RDP, schowek, IPC | APPROVE WITH NOTES |
-| Etap 68 — SSH/SFTP C1-07..12, schowek V2 | APPROVE WITH NOTES |
-| Etap 69 — stabilność (audyt PHASE D/E) | APPROVE WITH NOTES |
-| PHASE G — macierz testów (`TEST_MATRIX_V2.md`) | — |
-| PHASE I — raport gotowości + niezależna weryfikacja | werdykt: NIE gotowe do wdrożenia |
+| P0 — migawki zweryfikowane (gzip, lista, diff z drzewem), nowa `2026-10-15_pre`, `SHA256SUMS` | — |
+| P0 — audyt sekretów + `.gitignore` + `git init` w V2 (commit `2682c72`) | — |
+| Etap 70 — SFTP: kolizje plików edytowanych zewnętrznie (F1–F3, L7), bezpieczny zapis `upload_edit` (P1, za flagą) | APPROVE WITH NOTES ×2 (M1–M4, L5 i uwaga z 2. rundy poprawione) |
+| G8 — testy regresji X11 (`tests/test_ssh_x11_default.py`) | — |
+| G7/G6 — instalator: kompilacja, instalacja, start, aktualizacja 2.0.0→2.0.1, deinstalacja (per-user, scratch) | — |
 
 ## Aktywne
 
-Brak — dalsza praca wymaga decyzji lub działań użytkownika (niżej).
+Brak — kolejne kroki wymagają użytkownika (niżej).
 
 ## Zablokowane (wymagają użytkownika)
 
 | Bramka | Co | Wymagane działanie |
 |---|---|---|
 | **G1** | stany MSAA listy „VPN Name” | Otwórz FortiClient (ekran logowania VPN), uruchom `py -3.13 -m smoke.forticlient_msaa_live watch --seconds 90`; otwórz listę „VPN Name”, przesuń podświetlenie strzałkami **bez Enter**, zamknij Escape. Wklej wynik. |
-| **G2** | live connect FortiClient V2 | po G1 i G5 |
+| **G2** | live connect FortiClient V2 | po G1 — osobna, wyraźna zgoda |
 | **G3/G4** | live connect Stormshield / Barracuda V2 | po akceptacji G2 |
-| **G5** | pusty `profile_name` w V2 | rekomendacja: zostawić obecną blokadę, uzupełnić nazwy profili w kartach |
-| **G6** | instalacja/odinstalowanie instalatora | po G7 |
-| **G7** | Inno Setup 6 (ISCC) nie jest zainstalowany | decyzja o instalacji |
-| **G8** | X11 forwarding domyślnie (C1-13) | decyzja produktowa |
-| **G9** | redesign UI (PHASE F) | zakres i kierunek |
+| **G6** | instalacja **admin** do Program Files | wymaga kliknięcia UAC — uruchomić `dist_installer\HospitalHubV2-Setup-2.0.0.exe`, potem odinstalować; per-user zrobione automatycznie |
+| **G10** (nowa) | włączenie bezpiecznej podmiany SFTP (`SFTP_SAFE_REPLACE_ENABLED`) | test zgodności z odbiorcą HL7 w katalogu testowym — lista w `RELEASE_READINESS_V2.md` §G10 |
 
 ## Jak wznowić (dla następnej sesji)
 
-1. Przeczytaj ten plik, potem `RELEASE_READINESS_V2.md` (pełna lista pozostawionych znalezisk).
-2. Sprawdź niezmienniki z tabeli wyżej (flagi ×3 = False, sha `vpn_connect.py`, V1 nietknięte)
-   i uruchom testy — oczekiwane 1664 PASS.
-3. Zapytaj użytkownika, które bramki są już rozstrzygnięte (G1 wynik sondy, G5, G7, G8, G9)
-   oraz o decyzję w sprawie atomowego uploadu SFTP (tmp+rename zmienia to, jak watcher po
-   stronie serwera, np. HL7, widzi plik).
-4. Przed szerokimi zmianami: nowa migawka do `C:\claude\hospital_hub_v2_snapshots\`
-   (`tar --force-local -czf … --exclude=hospital_hub_v2/build --exclude=hospital_hub_v2/dist`).
-5. Po zmianach: testy, build (`build_v2.bat`), smoke startu exe offscreen, wpis w `EXECUTION_LOG.md`.
+1. Przeczytaj ten plik, potem `RELEASE_READINESS_V2.md`.
+2. Sprawdź niezmienniki (flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, sha `vpn_connect.py`,
+   V1 nietknięte), `git -C C:/claude/hospital_hub_v2 status`, uruchom testy — oczekiwane 1703 PASS.
+3. Zapytaj o wynik G1 i o G10.
+4. Przed szerokimi zmianami: commit w repo V2 (a dodatkowo migawka `.tgz` + dopisanie do `SHA256SUMS`).
+5. Po zmianach: testy, build (`build_v2.bat` — buduje też instalator), smoke startu exe offscreen,
+   wpis w `EXECUTION_LOG.md`.
 
-## Kolejka (gdy bramki pozwolą)
+## Kolejka
 
-1. Po G1: korekta `_select_profile` wg zmierzonych stanów; potem G2.
-2. Pozostawione znaleziska (pełna lista: `RELEASE_READINESS_V2.md`), w tym nieatomowy auto-upload
-   edycji SFTP (tmp+rename) — najważniejsze z otwartych.
-3. PHASE F po decyzji G9; PHASE H instalator po G7.
+1. Po G1: korekta `_select_profile` wg zmierzonych stanów; ocena gotowości do G2.
+2. Po G10: włączenie bezpiecznej podmiany SFTP (albo per połączenie, jeśli odbiorcy się różnią).
+3. Pozostawione znaleziska z `RELEASE_READINESS_V2.md` (L8 z Etapu 70, C1-16/18/19, D-08/D-10…).
+4. Ręczne scenariusze Windows z `TEST_MATRIX_V2.md` (Win+V, multi-window, RDP).
+5. PHASE F (redesign) — po stabilizacji (decyzja G9).

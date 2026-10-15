@@ -3215,6 +3215,228 @@ def sftp_temp_path(panel_dir: str, server: str, remote: str, name: str) -> str:
     return os.path.join(panel_dir, hashlib.sha1(key).hexdigest()[:12], safe_name)
 
 
+def local_part_path(local: str) -> str:
+    """A private file next to `local` that a download is written into first.
+
+    2026-10-15 (F1): downloads wrote straight into the watched local copy.
+    "Otwórz za pomocą…" of a file that was already open re-downloaded into
+    it while the watch was live, so the poll could upload a half-written
+    download — and a cancel deleted the copy the editor was working on.
+    The download now lands here and replaces the copy only when complete.
+    """
+    return f"{local}.{os.urandom(4).hex()}.part"
+
+
+def _mtime_or_none(path: str):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def replace_local_copy(part: str, local: str, expect_mtime=None) -> None:
+    """Put a finished download in place of the local copy, or fail clearly.
+
+    `expect_mtime` is the copy's mtime when the download started: if the
+    editor saved it meanwhile (review 2026-10-15 M2), the copy is kept and
+    the download dropped — its unsent edit is uploaded by the poll later."""
+    if _mtime_or_none(local) != expect_mtime:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise IOError(
+            f"'{os.path.basename(local)}' został zapisany w edytorze podczas "
+            "pobierania — lokalnej kopii nie nadpisano")
+    try:
+        os.replace(part, local)
+    except OSError as e:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise IOError(
+            f"nie można podmienić lokalnej kopii '{os.path.basename(local)}' "
+            f"— zamknij ją w edytorze i otwórz ponownie ({e.strerror or e})") from e
+
+
+#: 2026-10-15 (P1, RELEASE_READINESS "auto-upload nieatomowy"): an edit saved
+#: in the external editor goes back through a temp file next to the original
+#: and an atomic posix-rename over it, so a broken transfer never leaves the
+#: server file truncated.  OFF until checked against the file receivers (HL7
+#: watchers see IN_MOVED_TO instead of IN_CLOSE_WRITE, the temp file briefly
+#: appears in the directory) — gate G10.  Off = the old direct put.
+SFTP_SAFE_REPLACE_ENABLED = False
+
+
+class SafeReplaceError(IOError):
+    """The safe replace cannot be done; the server file is untouched."""
+
+
+def remote_part_path(target: str) -> str:
+    """Hidden temp name next to `target`: a leading dot and a ``.part``
+    suffix, so receivers that skip dot files or filter on the extension
+    (``*.hl7``, ``*.xml``) do not pick it up."""
+    import posixpath
+    head, base = posixpath.split(target)
+    return posixpath.join(head, f".{base}.hhv2-{os.urandom(4).hex()}.part")
+
+
+def _write_private_temp(sftp, local: str, tmp: str, total: int, callback):
+    """Create `tmp` (never an existing file) readable by its owner only, then
+    write `local` into it — HL7 content is never world-readable, not even for
+    the length of the transfer (review 2026-10-15 L5)."""
+    with open(local, 'rb') as src:
+        f = sftp.open(tmp, 'wbx')
+        try:
+            f.chmod(0o600)
+            f.set_pipelined(True)
+            done = 0
+            while True:
+                chunk = src.read(32768)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if callback is not None:
+                    callback(done, total)
+        finally:
+            f.close()
+
+
+def _remote_state(sftp, path: str):
+    """True / False = `path` exists / does not; None = cannot tell."""
+    try:
+        sftp.stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return None
+
+
+def upload_edit(sftp, local: str, remote: str, callback=None,
+                safe_replace: bool | None = None, before_commit=None,
+                leftovers: list | None = None):
+    """Send an edited local copy back to `remote`; return the final stat
+    (None when the server cannot be asked after a successful write).
+
+    Direct mode (``safe_replace`` False) is the old behaviour: ``put`` writes
+    over the file in place, then the size is compared.  Safe mode writes a
+    new, owner-only temp file in the same directory, checks its size, gives
+    it the original's owner and permissions, and posix-renames it over the
+    original.  Anything it cannot do — no posix-rename on the server, no
+    write access to the directory, an owner it may not set, a target that is
+    not a regular file or no longer exists — raises SafeReplaceError with the
+    original untouched; it never falls back to the direct put.
+    `before_commit` runs just before the rename (the last point where a
+    cancel still leaves the original as it was).  A temp file that could not
+    be removed afterwards (the link is gone) is appended to `leftovers`.
+    """
+    if safe_replace is None:
+        safe_replace = SFTP_SAFE_REPLACE_ENABLED
+    local_size = os.path.getsize(local)
+    if not safe_replace:
+        sftp.put(local, remote, callback=callback)
+        try:
+            final = sftp.stat(remote)
+        except Exception:
+            return None                 # as before: unverifiable is not failure
+        if (final.st_size or 0) != local_size:
+            raise IOError(
+                f"weryfikacja po zapisie: rozmiar zdalny {final.st_size} B "
+                f"!= lokalny {local_size} B")
+        return final
+
+    untouched = "plik na serwerze nie został zmieniony."
+    try:
+        target = remote
+        orig = sftp.lstat(remote)
+        if stat.S_ISLNK(orig.st_mode or 0):
+            # Replace the file the link points at and keep the link itself.
+            target = sftp.normalize(remote)
+            orig = sftp.lstat(target)
+    except FileNotFoundError as e:
+        raise SafeReplaceError(
+            f"'{remote}' nie istnieje już na serwerze — bezpieczna podmiana "
+            "nie tworzy pliku od nowa.") from e
+    except Exception as e:
+        raise SafeReplaceError(
+            f"Nie można odczytać '{remote}' ({e}) — {untouched}") from e
+    if not stat.S_ISREG(orig.st_mode or 0):
+        raise SafeReplaceError(
+            f"'{remote}' nie jest zwykłym plikiem — bezpieczna podmiana "
+            f"niemożliwa, {untouched}")
+    want_mode = (orig.st_mode or 0) & 0o7777
+    want_owner = (orig.st_uid, orig.st_gid)
+
+    tmp = remote_part_path(target)
+    committed = False
+    try:
+        try:
+            _write_private_temp(sftp, local, tmp, local_size, callback)
+            st = sftp.stat(tmp)
+            if (st.st_size or 0) != local_size:
+                raise SafeReplaceError(
+                    f"Plik tymczasowy ma {st.st_size} B zamiast {local_size} B "
+                    f"— przerwano, {untouched}")
+            if (st.st_uid, st.st_gid) != want_owner:
+                try:
+                    sftp.chown(tmp, *want_owner)
+                except Exception as e:
+                    raise SafeReplaceError(
+                        f"Podmiana zmieniłaby właściciela '{target}' "
+                        f"({want_owner[0]}:{want_owner[1]}) — przerwano, "
+                        f"{untouched}") from e
+            sftp.chmod(tmp, want_mode)      # after chown, which may clear bits
+            st = sftp.stat(tmp)
+            if (((st.st_mode or 0) & 0o7777) != want_mode
+                    or (st.st_uid, st.st_gid) != want_owner):
+                raise SafeReplaceError(
+                    f"Nie udało się odtworzyć uprawnień '{target}' — przerwano, "
+                    f"{untouched}")
+        except (_CancelledError, SafeReplaceError):
+            raise
+        except Exception as e:
+            raise SafeReplaceError(
+                f"Nie można przygotować pliku tymczasowego obok '{target}' ({e}) "
+                f"— {untouched}") from e
+        if before_commit is not None:
+            before_commit()
+        try:
+            sftp.posix_rename(tmp, target)
+        except Exception as e:
+            if _remote_state(sftp, tmp) is True:
+                raise SafeReplaceError(
+                    f"Serwer nie wykonał bezpiecznej podmiany (posix-rename): "
+                    f"{e} — {untouched}") from e
+            # The reply is lost (link down, cancel): the rename may have run.
+            raise SafeReplaceError(
+                f"Podmiana '{target}' przerwana bez potwierdzenia ({e}) — stan "
+                "pliku na serwerze NIEZNANY, sprawdź go przed ponownym zapisem.") from e
+        committed = True
+    finally:
+        if not committed:
+            try:
+                sftp.remove(tmp)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                if leftovers is not None:
+                    leftovers.append(tmp)
+    try:
+        final = sftp.stat(target)
+    except Exception:
+        # Replaced, but the server cannot be asked (a receiver already took
+        # the file, or the link dropped) — not a failure (review M4).
+        return None
+    if (final.st_size or 0) != local_size:
+        raise IOError(
+            f"weryfikacja po zapisie: rozmiar zdalny {final.st_size} B "
+            f"!= lokalny {local_size} B")
+    return final
+
+
 class SftpPanel(QWidget):
     status_msg    = pyqtSignal(str, bool)   # text, is_error
     upload_file   = pyqtSignal(str)         # local path
@@ -3276,6 +3498,9 @@ class SftpPanel(QWidget):
         #  editor temp files, etc. — causing freezes and data loss).
         self._watched_files: dict[str, dict] = {}  # path → {remote, orig_size, mtime}
         self._upload_active: set[str] = set()       # paths currently being uploaded
+        #: Local copies a download is about to replace (F1): never uploaded
+        #: until the download has finished and the watch is renewed.
+        self._download_active: set[str] = set()
         self._watch_poll = QTimer(self)
         self._watch_poll.setInterval(2000)
         #: connection token -> (uid, gids) of its SSH user (C1-12).
@@ -4389,6 +4614,7 @@ class SftpPanel(QWidget):
     def _start_single_transfer(self, mode, remote, local, size):
         self._transfer_current_mode   = mode
         self._transfer_current_remote = remote
+        self._transfer_current_owner  = self._ssh_client
         total = self._transfer_total_count
         done_n = self._transfer_done_count
         if total > 1:
@@ -4428,7 +4654,9 @@ class SftpPanel(QWidget):
         # żeby kolejny double-click pobrał świeżą zawartość zamiast pokazywać
         # starą lokalną kopię (np. po podmianie certyfikatu o tej samej nazwie).
         if self._transfer_current_mode == 'put':
-            self._invalidate_open_remote_cache(self._transfer_current_remote)
+            self._invalidate_open_remote_cache(
+                self._transfer_current_remote,
+                getattr(self, '_transfer_current_owner', None))
         self._transfer_done_count += 1
         total = self._transfer_total_count
         if self._transfer_queue:
@@ -4619,17 +4847,25 @@ class SftpPanel(QWidget):
                       self._btn_mkdir, self._btn_ul):
                 b.setEnabled(False)
 
-    def _invalidate_open_remote_cache(self, remote: str):
-        """Drop the _watched_files entry for `remote` so the next _open_remote
-        re-downloads instead of opening the stale tmp copy.
+    def _invalidate_open_remote_cache(self, remote: str, owner=None):
+        """Drop the watch of `remote` on the connection `owner` (default: the
+        current one) so the next _open_remote re-downloads instead of opening
+        the stale local copy.
 
-        Tmp path is derived solely from basename (see _open_remote), so we
-        match by basename — same logic as the cache lookup. The tmp file on
-        disk is left in place; sftp.get() opens its local target with 'wb'
-        and overwrites on the next download. Removing it eagerly could fail
-        when an external viewer still holds the handle.
+        The local path depends on the connection, not only on the name
+        (C1-01, review 2026-10-15 L7): a manual upload through A that ends
+        after a switch to B must drop A's watch, never B's file of the same
+        path.  The copy on disk stays; the next download replaces it.
         """
-        self._watched_files.pop(self._local_copy_path(remote, remote), None)
+        owner = owner if owner is not None else self._ssh_client
+        path = sftp_temp_path(self._temp_dir, connection_token(owner),
+                              remote, remote)
+        if self.bound_to(owner):
+            self._watched_files.pop(path, None)
+            return
+        kept = self._watch_store.get(id(owner))
+        if kept is not None and kept[0]() is owner:
+            kept[1].pop(path, None)
 
     # Files larger than this trigger a "do you really want to download?"
     # prompt before "Otwórz lokalnie" / "Otwórz za pomocą…" pulls them
@@ -4746,6 +4982,16 @@ class SftpPanel(QWidget):
         # changed since our last download (e.g. user vim'd it in the
         # terminal) — if so, drop the stale temp and re-download.
         # Otherwise just open the cached local copy.
+        if tmp_path in self._download_active:
+            self.status_msg.emit(f"'{name}' jest właśnie pobierany.", False)
+            return
+        if tmp_path in self._upload_active:
+            # Review 2026-10-15 M1: a direct put truncates the server file
+            # first — reading it now could bring back a cut copy.
+            self.status_msg.emit(
+                f"'{name}' jest właśnie wysyłany — otwórz go ponownie za chwilę.",
+                False)
+            return
         if tmp_path in self._watched_files:
             info = self._watched_files[tmp_path]
             server_changed = False
@@ -4765,14 +5011,18 @@ class SftpPanel(QWidget):
             if not server_changed:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(tmp_path))
                 return
-            # Server has newer content — wipe cache and fall through to
-            # the fresh download path below.
-            self._watched_files.pop(tmp_path, None)
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except OSError:
-                pass
+            if self._has_unsent_edits(tmp_path):
+                # Review 2026-10-15 M2: the copy holds edits the server has
+                # not got — never replace them with the newer server file.
+                self.status_msg.emit(
+                    f"'{name}' zmienił się na serwerze, a lokalna kopia ma "
+                    "niewysłane zmiany — nie pobrano nowej wersji.", True)
+                return
+            # Server has newer content — download again below.  The watch
+            # stays (re-review 2026-10-15): _download_active holds it during
+            # the download and _watch_file renews it on success; a failed,
+            # cancelled or refused download leaves the editor's saves still
+            # going to the server instead of silently nowhere.
 
         # Size guard — bail before any download if the file is huge.
         # The stat is one nav-channel roundtrip; tolerable to do on the
@@ -4807,6 +5057,9 @@ class SftpPanel(QWidget):
 
         worker_ref = [None]
         sftp_ref = [None]
+        part_path = local_part_path(tmp_path)
+        start_mtime = _mtime_or_none(tmp_path)
+        self._download_active.add(tmp_path)
 
         def do_open():
             with lock:                          # serialize channel opens
@@ -4826,13 +5079,14 @@ class SftpPanel(QWidget):
                     if worker_ref[0]._cancel:
                         raise _CancelledError()
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
-                sftp.get(remote, tmp_path, callback=cb)
+                sftp.get(remote, part_path, callback=cb)
             finally:
                 sftp_ref[0] = None
                 try:
                     sftp.close()
                 except Exception:
                     pass
+            replace_local_copy(part_path, tmp_path, start_mtime)
             self._open_local.emit(tmp_path)
             size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
             # Always register the watcher — even in view-only mode — so a
@@ -4856,8 +5110,11 @@ class SftpPanel(QWidget):
         worker_ref[0] = w
         self._active_transfer_worker = w
         w.progress.connect(self._progress.setValue)
-        w.cancelled.connect(lambda: self._transfer_cancelled(tmp_path))
+        w.cancelled.connect(lambda: (
+            self._download_ended(tmp_path, part_path),
+            self._transfer_cancelled(part_path)))
         w.error.connect(lambda e: (
+            self._download_ended(tmp_path, part_path),
             self._transfer_finished_cleanup(),
             self.status_msg.emit(f"Otwieranie: {e}", True)))
         w.done.connect(lambda: self._transfer_finished_cleanup())
@@ -4891,6 +5148,20 @@ class SftpPanel(QWidget):
                 return
             watch_for_upload = False
 
+        if tmp_path in self._download_active:
+            self.status_msg.emit(f"'{name}' jest właśnie pobierany.", False)
+            return
+        if tmp_path in self._upload_active:
+            self.status_msg.emit(
+                f"'{name}' jest właśnie wysyłany — otwórz go ponownie za chwilę.",
+                False)
+            return
+        if self._has_unsent_edits(tmp_path):
+            self.status_msg.emit(
+                f"Lokalna kopia '{name}' ma niewysłane zmiany — nie pobrano jej "
+                "ponownie. Zapisz ją jeszcze raz albo zamknij edytor.", True)
+            return
+
         ssh_client = self._ssh_client
         lock = self._sftp_open_lock
 
@@ -4901,6 +5172,11 @@ class SftpPanel(QWidget):
 
         worker_ref = [None]
         sftp_ref = [None]
+        # F1: a file already open is downloaded again here — into a private
+        # part file, with the watch held, never into the copy being edited.
+        part_path = local_part_path(tmp_path)
+        start_mtime = _mtime_or_none(tmp_path)
+        self._download_active.add(tmp_path)
 
         srv_meta = {'mtime': 0, 'size': 0}
 
@@ -4920,13 +5196,14 @@ class SftpPanel(QWidget):
                     if worker_ref[0]._cancel:
                         raise _CancelledError()
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
-                sftp.get(remote, tmp_path, callback=cb)
+                sftp.get(remote, part_path, callback=cb)
             finally:
                 sftp_ref[0] = None
                 try:
                     sftp.close()
                 except Exception:
                     pass
+            replace_local_copy(part_path, tmp_path, start_mtime)
 
         def hard_cancel():
             s = sftp_ref[0]
@@ -4939,6 +5216,7 @@ class SftpPanel(QWidget):
         def on_done():
             self._transfer_finished_cleanup()
             if not os.path.exists(tmp_path):
+                self._download_ended(tmp_path, part_path)
                 return
             if sys.platform == 'win32':
                 import subprocess
@@ -4959,8 +5237,11 @@ class SftpPanel(QWidget):
         worker_ref[0] = w
         self._active_transfer_worker = w
         w.progress.connect(self._progress.setValue)
-        w.cancelled.connect(lambda: self._transfer_cancelled(tmp_path))
+        w.cancelled.connect(lambda: (
+            self._download_ended(tmp_path, part_path),
+            self._transfer_cancelled(part_path)))
         w.error.connect(lambda e: (
+            self._download_ended(tmp_path, part_path),
             self._transfer_finished_cleanup(),
             self.status_msg.emit(f"Otwieranie: {e}", True)))
         w.done.connect(on_done)
@@ -5089,6 +5370,15 @@ class SftpPanel(QWidget):
             'server_mtime': server_mtime,  # for stale-cache detection on re-open
             'server_size':  server_size,
         }
+        self._download_active.discard(local_path)
+        # The connection the file came through, fixed for the life of the
+        # watch (2026-10-15, F3): an upload goes only through this one, never
+        # through whatever tab happens to be active.
+        bind_to = owner if owner is not None else self._ssh_client
+        try:
+            entry['owner'] = weakref.ref(bind_to) if bind_to is not None else None
+        except TypeError:
+            entry['owner'] = None
         # The download finished on the worker thread; the user may have
         # switched tabs (or the session reconnected) meanwhile.  The file
         # belongs to the connection it came through — watching it under the
@@ -5099,6 +5389,45 @@ class SftpPanel(QWidget):
         self._watched_files[local_path] = entry
         if not self._watch_poll.isActive():
             self._watch_poll.start()
+
+    def _has_unsent_edits(self, local_path: str) -> bool:
+        """Has the editor saved `local_path` since its last upload, or did
+        that upload fail?  (Read-only copies never upload — not counted.)"""
+        info = self._watched_files.get(local_path)
+        if info is None or info.get('readonly'):
+            return False
+        if info.get('dirty'):
+            return True
+        mtime = _mtime_or_none(local_path)
+        return mtime is not None and mtime > info['mtime']
+
+    def _report_leftovers(self, leftovers: list) -> None:
+        """Safe replace could not delete its temp file (review 2026-10-15
+        M3): say where it is, so it does not sit unnoticed in a receiver's
+        directory."""
+        for path in leftovers:
+            self.status_msg.emit(
+                f"Plik tymczasowy '{path}' mógł zostać na serwerze — "
+                "sprawdź katalog i usuń go ręcznie.", True)
+
+    def _download_ended(self, local_path: str, part_path: str) -> None:
+        """A download into `local_path` is over without a new watch."""
+        self._download_active.discard(local_path)
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+
+    def _upload_target_ok(self, info: dict) -> bool:
+        """Does this watch belong to the connection the panel is on now?
+
+        The watch list is swapped with the tab, so this always holds — it is
+        the second lock on the door (F3): an entry without a live owner, or
+        with another one, is never uploaded."""
+        ref = info.get('owner')
+        client = ref() if ref is not None else None
+        return client is not None and client is self._ssh_client
 
     def _watch_for_other(self, owner, local_path: str, entry: dict) -> None:
         """File a watch under a connection that is not the active one."""
@@ -5115,7 +5444,8 @@ class SftpPanel(QWidget):
         if not self._ssh_client:
             return
         for local_path, info in list(self._watched_files.items()):
-            if local_path in self._upload_active:
+            if (local_path in self._upload_active
+                    or local_path in self._download_active):
                 continue
             if not os.path.exists(local_path):
                 continue
@@ -5126,6 +5456,8 @@ class SftpPanel(QWidget):
                 continue
             if mtime <= info['mtime']:
                 continue                          # file not modified since last check
+            if not self._upload_target_ok(info):
+                continue
             orig_size = info['orig_size']
             # Defence against editor crashes / antivirus quarantine
             # truncating the temp file to 0 B or a sliver of its
@@ -5180,6 +5512,11 @@ class SftpPanel(QWidget):
     def _upload_changed_file(self, local: str, remote: str):
         if not self._ssh_client or local in self._upload_active:
             return
+        # The watch, not the active tab, says where the file goes (F3).
+        info = self._watched_files.get(local)
+        if info is None or info.get('remote') != remote \
+                or not self._upload_target_ok(info):
+            return
         self._upload_active.add(local)
         ssh_client = self._ssh_client
 
@@ -5196,6 +5533,9 @@ class SftpPanel(QWidget):
 
         worker_ref = [None]
         sftp_ref = [None]
+        final_stat = [None]
+        leftovers: list[str] = []
+        unknown = [None]     # "stan NIEZNANY" must survive a cancel
 
         def do_upload():
             with lock:
@@ -5206,22 +5546,20 @@ class SftpPanel(QWidget):
                     if worker_ref[0]._cancel:
                         raise _CancelledError()
                     worker_ref[0].progress.emit(min(int(done * 100 / (t or total)), 100))
-                # paramiko's put(confirm=True) already stat()s after upload and
-                # raises on size mismatch — but only when the server reports
-                # an honest size. Re-verify explicitly so a quota/permission
-                # quirk that silently drops bytes can't masquerade as success.
-                sftp.put(local, remote, callback=cb)
+
+                def before_commit():
+                    if worker_ref[0]._cancel:
+                        raise _CancelledError()
+                # Size re-verified after the write so a quota/permission quirk
+                # that silently drops bytes can't masquerade as success.
                 try:
-                    local_size  = os.path.getsize(local)
-                    remote_size = sftp.stat(remote).st_size or 0
-                except Exception:
-                    local_size = remote_size = None
-                if (local_size is not None
-                        and remote_size is not None
-                        and local_size != remote_size):
-                    raise IOError(
-                        f"weryfikacja po zapisie: rozmiar zdalny {remote_size} B "
-                        f"!= lokalny {local_size} B")
+                    final_stat[0] = upload_edit(sftp, local, remote, callback=cb,
+                                                before_commit=before_commit,
+                                                leftovers=leftovers)
+                except SafeReplaceError as e:
+                    if 'NIEZNANY' in str(e):
+                        unknown[0] = str(e)
+                    raise
             finally:
                 sftp_ref[0] = None
                 try:
@@ -5244,16 +5582,13 @@ class SftpPanel(QWidget):
             # set by a previous failed upload of the same file. Also
             # refresh the stored server metadata so the next re-open
             # doesn't see our own upload as "someone vim'd it externally".
-            info = self._watched_files.get(local)
-            if info is not None:
-                info['dirty'] = False
-                if self._sftp:
-                    try:
-                        st = self._sftp.stat(remote)
-                        info['server_mtime'] = int(st.st_mtime or 0)
-                        info['server_size']  = st.st_size or 0
-                    except Exception:
-                        pass
+            # The stat comes from the upload's own channel — the panel may
+            # be on another server by now (F3).
+            info['dirty'] = False
+            st = final_stat[0]
+            if st is not None:
+                info['server_mtime'] = int(st.st_mtime or 0)
+                info['server_size']  = st.st_size or 0
             self.status_msg.emit(f"Zapisano na SFTP: {os.path.basename(remote)}", False)
             self._list(self._path)
 
@@ -5261,6 +5596,10 @@ class SftpPanel(QWidget):
             self._upload_active.discard(local)
             self._transfer_finished_cleanup()
             self.status_msg.emit("Auto-upload anulowany", False)
+            if unknown[0]:
+                info['dirty'] = True
+                self.status_msg.emit(f"Błąd zapisu: {unknown[0]}", True)
+            self._report_leftovers(leftovers)
 
         def on_error(e):
             self._upload_active.discard(local)
@@ -5270,10 +5609,9 @@ class SftpPanel(QWidget):
             # the visible signal is now: modal error + listing refresh.
             # The listing's server-side mtime tells the user whether the
             # save took, replacing the dirty-reopen prompt we removed.
-            info = self._watched_files.get(local)
-            if info is not None:
-                info['dirty'] = True
+            info['dirty'] = True
             self.status_msg.emit(f"Błąd zapisu: {e}", True)
+            self._report_leftovers(leftovers)
             self._list(self._path)
 
         w = _SimpleWorker(do_upload)
@@ -5309,7 +5647,9 @@ class SftpPanel(QWidget):
         if not client or not self._watched_files:
             return
         for local_path, info in list(self._watched_files.items()):
-            if info.get('readonly') or local_path in self._upload_active:
+            if (info.get('readonly') or local_path in self._upload_active
+                    or local_path in self._download_active
+                    or not self._upload_target_ok(info)):
                 continue
             if not os.path.exists(local_path):
                 continue
@@ -5331,9 +5671,11 @@ class SftpPanel(QWidget):
                 # Synchronous, on the UI thread, often while closing: bounded
                 # so a dead connection fails instead of freezing (C1-11).
                 sftp = open_sftp_bounded(client)
+                leftovers: list[str] = []
                 try:
-                    sftp.put(local_path, remote)
+                    upload_edit(sftp, local_path, remote, leftovers=leftovers)
                 finally:
+                    self._report_leftovers(leftovers)
                     try:
                         sftp.close()
                     except Exception:
@@ -5344,8 +5686,7 @@ class SftpPanel(QWidget):
                     f"{os.path.basename(remote)}", False)
             except Exception as e:
                 self.status_msg.emit(
-                    f"Niewysłane zmiany w '{name}' — połączenie niedostępne: {e}",
-                    True)
+                    f"Niewysłane zmiany w '{name}': {e}", True)
 
     # Above this size, _flush_pending_edits refuses the synchronous put so the
     # teardown path can't block the UI thread. Edited config files are tiny;
@@ -5555,7 +5896,10 @@ class SftpPanel(QWidget):
         if self._ssh_client is not None and self._watched_files:
             self._remember_watches(self._ssh_client, self._watched_files)
         self._watched_files = self._recall_watches(ssh_client)
-        self._upload_active.clear()
+        # _upload_active is NOT cleared (2026-10-15, F2): its paths are unique
+        # per connection, and an upload of A still running when the user
+        # comes back to A must keep the poll from starting a second, parallel
+        # write of the same file.  Each upload removes its own entry.
         self._sftp        = sftp
         self._ssh_client  = ssh_client
         if self._watched_files and sftp is not None:
