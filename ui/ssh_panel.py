@@ -1756,19 +1756,9 @@ def _count_dir_with_cap(listdir_attr_fn, root: str, cap: int) -> dict:
 
 
 def _pl_pl(n: int, sg: str, pl_few: str, pl_many: str) -> str:
-    """Render '{n} {noun}' with correct Polish declension.
-
-    1 → singular; 2-4 (but not 12-14) → 'pliki/katalogi'-form; rest → genitive
-    plural ('plików/katalogów'). Mirrors how the language actually counts.
-    """
-    if n == 1:
-        return f"{n} {sg}"
-    last2 = n % 100
-    if 11 <= last2 <= 14:
-        return f"{n} {pl_many}"
-    if 2 <= n % 10 <= 4:
-        return f"{n} {pl_few}"
-    return f"{n} {pl_many}"
+    """Render '{n} {noun}' with correct Polish declension (ui.utils.plural)."""
+    from ui.utils import plural
+    return plural(n, sg, pl_few, pl_many)
 
 
 def _ssh_fingerprint(key) -> tuple[str, str]:
@@ -4782,7 +4772,9 @@ class SftpPanel(QWidget):
             if total > 1:
                 mode = getattr(self, '_transfer_current_mode', 'get')
                 verb = "Pobrano" if mode == 'get' else "Wgrano"
-                self.status_msg.emit(f"{verb} {self._transfer_done_count} plików", False)
+                self.status_msg.emit(
+                    f"{verb} {_pl_pl(self._transfer_done_count, 'plik', 'pliki', 'plików')}",
+                    False)
             else:
                 self.status_msg.emit(msg, False)
             self._list(self._path)
@@ -5859,12 +5851,12 @@ class SftpPanel(QWidget):
         of recursive deletes.
         """
         if not is_dir:
-            ans = QMessageBox.question(
-                self, "Usuń",
-                f"Usunąć plik '{name}'?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if ans != QMessageBox.StandardButton.Yes:
+            from ui.utils import confirm
+            # "Anuluj" by default (E-07): the file goes from the server for good.
+            if not confirm(self, "Usuń plik",
+                           f"Usunąć plik '{name}' z serwera?\n\n"
+                           "Tej operacji nie można cofnąć.",
+                           yes="Usuń", no="Anuluj"):
                 return
             self._run_delete(remote, is_dir=False, name=name)
             return

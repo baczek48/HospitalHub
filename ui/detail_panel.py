@@ -130,7 +130,7 @@ from crypto import decrypt
 from ui import theme
 from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard_copy
 from ui.thread_retire import retire_thread
-from ui.utils import confirm
+from ui.utils import confirm, plural
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
 from ui.db_connect import launch_sqldeveloper
@@ -833,15 +833,16 @@ class DetailPanel(QWidget):
             return
         m  = len(self._visible_machines())
         db = len(self._visible_databases())
-        ms  = 'maszyna' if m  == 1 else 'maszyny' if 2 <= m  <= 4 else 'maszyn'
-        dbs = 'baza'    if db == 1 else 'bazy'    if 2 <= db <= 4 else 'baz'
         hidden_m = sum(1 for x in self.current_hospital.machines if x.admin_only)
         hidden_d = sum(1 for x in self.current_hospital.databases if x.admin_only)
         hidden = hidden_m + hidden_d
         suffix = ""
         if hidden and not self._admin_unlocked:
-            suffix = f"   ·   🔒 {hidden} ukrytych"
-        self._stats_badge.setText(f"🖥  {m} {ms}   ·   🗄  {db} {dbs}{suffix}")
+            suffix = "   ·   🔒 " + plural(hidden, "ukryta pozycja",
+                                            "ukryte pozycje", "ukrytych pozycji")
+        self._stats_badge.setText(
+            f"🖥  {plural(m, 'maszyna', 'maszyny', 'maszyn')}   ·   "
+            f"🗄  {plural(db, 'baza', 'bazy', 'baz')}{suffix}")
 
     def _visible_machines(self) -> list[models.Machine]:
         if not self.current_hospital:
@@ -1080,11 +1081,18 @@ class DetailPanel(QWidget):
         """Called externally (MainWindow right-click menu)."""
         if not self.current_hospital or self._all_hospitals is None:
             return
+        h = self.current_hospital
+        creds = (sum(len(m.credentials) for m in h.machines)
+                 + sum(len(d.credentials) for d in h.databases))
         if confirm(
             self,
             "Usuń szpital",
-            f"Usunąć szpital '{self.current_hospital.name}'?\n"
-            "Wszystkie maszyny, bazy i poświadczenia zostaną usunięte.",
+            f"Usunąć szpital '{h.name}'?\n\n"
+            f"Zostaną usunięte: "
+            f"{plural(len(h.machines), 'maszyna', 'maszyny', 'maszyn')}, "
+            f"{plural(len(h.databases), 'baza', 'bazy', 'baz')} i "
+            f"{plural(creds, 'poświadczenie', 'poświadczenia', 'poświadczeń')}.",
+            yes="Usuń szpital", no="Anuluj",
         ):
             self._all_hospitals.remove(self.current_hospital)
             self.current_hospital = None

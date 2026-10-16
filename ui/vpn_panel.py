@@ -28,6 +28,7 @@ from vpn.panel_bridge import (
 from ui.vpn_v2_connect import V2ConnectController
 from ui.dialogs import _clipboard_copy
 from ui.thread_retire import retire_thread
+from ui.utils import plural
 
 # ------------------------------------------------------------------ #
 # 2FA dialog                                                           #
@@ -1432,7 +1433,8 @@ class VpnPanel(QWidget):
         self.data_changed.emit()
         QMessageBox.information(
             self, "Import FortiClient",
-            f"Zaimportowano {len(new_tunnels)} tunel(i) z FortiClient."
+            "Zaimportowano " + plural(len(new_tunnels), "tunel", "tunele",
+                                      "tuneli") + " z FortiClient."
         )
 
     def _add_profile(self):
@@ -1448,9 +1450,9 @@ class VpnPanel(QWidget):
         if self._edit_idx < 0 or self._edit_idx >= len(self._profiles):
             return
         name = self._profiles[self._edit_idx].name or "(nowy profil)"
-        ans = QMessageBox.question(self, "Usuń profil",
-                                   f"Usunąć profil \"{name}\"?")
-        if ans != QMessageBox.StandardButton.Yes:
+        from ui.utils import confirm
+        if not confirm(self, "Usuń profil", f"Usunąć profil \"{name}\"?",
+                       yes="Usuń", no="Anuluj"):
             return
         self._profiles.pop(self._edit_idx)
         self._edit_idx = -1
