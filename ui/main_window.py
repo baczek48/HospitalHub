@@ -111,7 +111,8 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         self.setMinimumSize(700, 450)
-        self.resize(1050, 680)
+        from ui.utils import resize_within_screen
+        resize_within_screen(self, 1050, 680)
 
         central = QWidget()
         self.setCentralWidget(central)

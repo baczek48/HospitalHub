@@ -173,6 +173,7 @@ class VpnSettingsDialog(QDialog):
         paths_scroll = QScrollArea()
         paths_scroll.setWidgetResizable(True)
         paths_scroll.setMaximumHeight(200)
+        paths_scroll.setMinimumHeight(90)     # ~3 rows, never 1.5 (V-22)
         paths_scroll.setStyleSheet("QScrollArea { border: 1px solid #21262d; background: #0d1117; }")
         paths_widget = QWidget()
         self._paths_layout = QVBoxLayout(paths_widget)
@@ -570,6 +571,10 @@ class VpnPanel(QWidget):
     def _resize_window(self, w: int, h: int):
         win = self.window()
         if win and win is not self:
+            screen = win.screen()
+            if screen is not None:                       # V-23
+                area = screen.availableGeometry()
+                w, h = min(w, area.width()), min(h, area.height())
             # Minimum first: set after resize(), the previous page's minimum
             # clipped the new size and its height stuck (UX audit V-19).
             win.setMinimumSize(w - 60, h - 60)

@@ -76,7 +76,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-10 | P2 | jasny motyw: wyłączony „Wgraj” = czarny prostokąt | NAPRAWIONE | pakiet okna SSH |
 | V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | NAPRAWIONE | R4 — _ic(): jasne wypełnienia ikon w jasnym motywie |
 | V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
-| V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
+| V-13 | P3 | „⚠” w terminalu jako tofu | NAPRAWIONE | „!” zamiast „⚠” (zawsze w foncie konsolowym) |
 | V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
 | V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | NAPRAWIONE | R3 — EmptyHint: tabele, lista szpitali (brak wyników / pusty vault / ukryte przez admina); kontrast VPN; „Nie połączono” w SFTP zostaje (to etykieta ścieżki) |
 | V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | NAPRAWIONE | R1 — przyciski danger |
@@ -85,8 +85,8 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-19 | P2 | okno VPN: rozmiar dryfuje po edycji, min. 640 zostaje | NAPRAWIONE | pakiet okna głównego |
 | V-20 | — | niespójne dialogi (paleta, kolejność przycisków, etykiety) | NAPRAWIONE | R1 — ui/style.py FormStyled: jedna paleta, akcja główna z akcentem, Anuluj | Akcja |
 | V-21 | — | ikony-glify i emoji | REDESIGN | |
-| V-22 | P3 | Ustawienia VPN: lista ścieżek zapada się | RĘCZNY TEST | |
-| V-23 | P2 | domyślne rozmiary okien nie mieszczą się na 1366×768 @150% | RĘCZNY TEST | |
+| V-22 | P3 | Ustawienia VPN: lista ścieżek zapada się | NAPRAWIONE | min. 3 wiersze; na prawdziwym małym ekranie: RĘCZNY TEST |
+| V-23 | P2 | domyślne rozmiary okien nie mieszczą się na 1366×768 @150% | NAPRAWIONE | rozmiary startowe ograniczone do ekranu; prawdziwy 1366×768 @150 %: RĘCZNY TEST |
 | V-24 | P3 | drobne teksty („tutaj aby”, „<-  Wróć”) | NAPRAWIONE | pakiet okna SSH |
 | V-25 | P3 | nagłówki tabeli maszyn | NAPRAWIONE | R2 — 🔑 mówi, co kopiuje przycisk |
 
@@ -110,7 +110,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-14 | P2 | porty bez walidacji (cicho 22, „abc” zapisane) | NAPRAWIONE | pakiet dialogów — RDP, baza, Nowa sesja: 1–65535 z komunikatem |
 | E-15 | P2 | komunikaty SSH jako modal „SFTP”, sukcesy giną, surowe wyjątki | NAPRAWIONE | pakiet SFTP — sukcesy w pasku statusu, błąd SSH bez modala, polskie teksty błędów |
 | E-16 | P2 | Yes/No obok Tak/Nie; brak polskich znaków w dialogach admina | NAPRAWIONE | pakiet dialogów — qtbase_pl/qt_pl (już w buildzie), polskie znaki |
-| E-17 | — | niespójne kontrolki dla tych samych akcji | REDESIGN | |
+| E-17 | — | niespójne kontrolki dla tych samych akcji | REDESIGN | częściowo w R1/R2 (paleta, kolejność, menu wiersza); ikony ⚙/✎/⇆ — decyzja właściciela |
 | E-18 | P2 | okna SSH o identycznym tytule; nieaktualne dane po zmianach w vaulcie | NAPRAWIONE | pakiet okna SSH — tytuł SSH · user@host · szpital; nieaktualne dane po usunięciu maszyny: REDESIGN |
 | E-19 | P3 | złe hasło admina zamyka dialog | NAPRAWIONE | pakiet dialogów — weryfikacja w dialogu, komunikat pod polem |
 | E-20 | P2 | VPN w nagłówku: pierwszy klik tylko wczytuje vault; status synchronicznie | NIEROZWIĄZANE | dotyka legacy VPN (niezmiennik) |

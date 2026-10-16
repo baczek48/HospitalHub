@@ -108,3 +108,15 @@ class EmptyHint:
                          Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
                          self.empty_hint)
         painter.end()
+
+
+def resize_within_screen(widget, width: int, height: int) -> None:
+    """resize() that never makes a window bigger than the screen it is on —
+    1200×700 at 150 % on a 1366×768 laptop went past the taskbar (V-23)."""
+    from PyQt6.QtGui import QGuiApplication
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    if screen is not None:
+        area = screen.availableGeometry()
+        width = min(width, area.width())
+        height = min(height, area.height())
+    widget.resize(width, height)

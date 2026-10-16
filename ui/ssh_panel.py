@@ -7327,7 +7327,7 @@ class _TerminalPane(QWidget):
         self.term.feed(
             f"\r\n"
             f"\x1b[31m  ╔══════════════════════════════════════╗\x1b[0m\r\n"
-            f"\x1b[31m  ║   ⚠  POŁĄCZENIE NIEUDANE             ║\x1b[0m\r\n"
+            f"\x1b[31m  ║   !  POŁĄCZENIE NIEUDANE             ║\x1b[0m\r\n"
             f"\x1b[31m  ╚══════════════════════════════════════╝\x1b[0m\r\n"
             f"\x1b[90m  {msg}\x1b[0m\r\n"
             f"\r\n"
@@ -7678,7 +7678,8 @@ class SshDialog(QDialog):
 
         self.setWindowTitle("Terminal SSH - HospitalHub")
         self.setWindowIcon(_make_ssh_window_icon())
-        self.resize(1200, 700)
+        from ui.utils import resize_within_screen
+        resize_within_screen(self, 1200, 700)
         self.setMinimumSize(700, 450)
         self.setStyleSheet("""
             SshDialog { background: #010409; }
