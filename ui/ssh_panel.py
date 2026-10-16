@@ -1,6 +1,7 @@
 # Copyright © 2026 Sebastian Bąk. All rights reserved.
 
 import base64
+import codecs
 import hashlib
 import json
 import math
@@ -110,6 +111,12 @@ def _ipv4_port_sub(m):
 
 _PLACEHOLDER_RE = re.compile(r'\x00(\d+)\x00')
 
+#: A line that places the cursor (tmux/ncurses redraw) is a screen update,
+#: not a log line — highlighting it would cut the app's own colours (T-03).
+_CURSOR_ADDRESSING_RE = re.compile(r'\x1b\[[\d;]*[HfdGrJ]')
+#: A chunk that switches to an alternate screen: a full-screen app starts.
+_FULLSCREEN_ENTER_RE = re.compile(r'\x1b\[\?(?:1049|1047|47)h')
+
 _COLORIZE_MAX_LINE = 4096   # skip per-line regex pass on >4 KB lines
                             # (prevents pathological backtracking on JSON
                             #  blobs / minified output from `docker logs`)
@@ -123,12 +130,15 @@ def _colorize_log(text: str) -> str:
     rules from re-coloring octets inside an already-highlighted IPv4 address.
     """
     lines = text.split('\n')
+    last = len(lines) - 1
     for i, line in enumerate(lines):
         # Long lines (JSON dumps, minified output) get colorize skipped —
         # the regex passes are O(rules × len) and trigger backtracking on
         # input with many delimiter chars (`:`, `.`, `=`).
         if len(line) > _COLORIZE_MAX_LINE:
             continue
+        if _CURSOR_ADDRESSING_RE.search(line):
+            continue            # a screen update, not a log line (T-03)
         has_ansi = bool(_ANSI_PRESENT.search(line))
 
         # Stash: list of colored fragments; replaced by \x00idx\x00 in `line`
@@ -178,9 +188,12 @@ def _colorize_log(text: str) -> str:
         # Restore stashed fragments
         if stash:
             line = _PLACEHOLDER_RE.sub(lambda m: stash[int(m.group(1))], line)
-        # Always append reset on plain-text lines so pyte never carries
-        # a stale foreground color across visual line-wrap boundaries.
-        line += '\x1b[0m'
+        # Reset at the end of a whole plain-text line so pyte never carries
+        # a stale foreground color across visual line-wrap boundaries — not
+        # after a piece of one: typed characters arrive one per chunk and the
+        # reset wiped the background they were typed on (T-03).
+        if i < last:
+            line += '\x1b[0m'
         lines[i] = line
     return '\n'.join(lines)
 
@@ -369,12 +382,182 @@ try:
         )
         return _HistRow(text, packed)
 
-    class _TermScreen(pyte.HistoryScreen):
-        """HistoryScreen that saves visible content to scrollback before full-screen erases.
 
-        This ensures that running full-screen apps (top, less, vim) always leaves
-        their pre-run content accessible via scrollback, even if no lines had
-        naturally scrolled off the top yet.
+    # ── Parser: what tmux, ncurses and vim send that pyte 0.8.2 does not
+    # parse (UX audit 2026-10-16, T-01/T-09/T-10/T-11/T-22) ───────────────
+
+    from collections import defaultdict as _defaultdict
+
+    #: Zero-width code points that are not combining marks.  pyte's draw()
+    #: stops at the first one and drops the REST of the text it was given
+    #: (T-15: "✔️ Container started" showed as "✔").
+    _ZERO_WIDTH_RE = re.compile('[\u200b\u200c\u200d\u2060\ufe0e\ufe0f\ufeff]')
+
+    def _flatten_csi_params(groups, final):
+        """CSI parameters with ':' sub-parameters (``38:2::r:g:b``,
+        ``4:3``) as the flat list pyte understands, or None to ignore the
+        sequence (T-22).  Underline colour (58) is dropped: not rendered."""
+        if all(len(g) == 1 for g in groups):
+            flat = [g[0] for g in groups]
+        elif final != 'm':
+            return None             # sub-parameters only mean something in SGR
+        else:
+            flat = []
+            for g in groups:
+                head = g[0]
+                if len(g) == 1:
+                    flat.append(head)
+                elif head in (38, 48):
+                    if len(g) >= 3 and g[1] == 5:
+                        flat.extend((head, 5, g[2]))
+                    elif len(g) >= 5 and g[1] == 2:
+                        flat.extend((head, 2, g[-3], g[-2], g[-1]))
+                elif head != 58:
+                    flat.append(head)          # e.g. 4:3 curly → underline
+        if final == 'm' and 58 in flat:
+            out, i = [], 0
+            while i < len(flat):
+                if flat[i] == 58:
+                    i += 3 if flat[i + 1:i + 2] == [5] else 5
+                    continue
+                out.append(flat[i])
+                i += 1
+            flat = out
+        return flat
+
+    class _TermStream(pyte.Stream):
+        """pyte.Stream plus SU/SD, REP, SCOSC/SCORC, secondary DA and
+        ``>``/``=``-prefixed or intermediate-byte sequences, which pyte
+        either ignores or — worse — runs as their plain form (vim's
+        ``CSI > 4;2 m`` became SGR 4;2: underline + dim)."""
+
+        csi = dict(pyte.Stream.csi)
+        csi.update({'S': 'scroll_up', 'T': 'scroll_down',
+                    'b': 'repeat_last',
+                    's': 'save_cursor_sco', 'u': 'restore_cursor_sco'})
+
+        def _parser_fsm(self):
+            """pyte 0.8.2's FSM; only the CSI branch differs."""
+            ctrl = pyte.control
+            basic = self.basic
+            listener = self.listener
+            draw = listener.draw
+            debug = listener.debug
+            ESC, CSI_C1 = ctrl.ESC, ctrl.CSI_C1
+            OSC_C1 = ctrl.OSC_C1
+            NUL_OR_DEL = ctrl.NUL + ctrl.DEL
+            CAN_OR_SUB = ctrl.CAN + ctrl.SUB
+            ALLOWED_IN_CSI = "".join([ctrl.BEL, ctrl.BS, ctrl.HT, ctrl.LF,
+                                      ctrl.VT, ctrl.FF, ctrl.CR])
+            OSC_TERMINATORS = set([ctrl.ST_C0, ctrl.ST_C1, ctrl.BEL])
+
+            def create_dispatcher(mapping):
+                return _defaultdict(lambda: debug, dict(
+                    (event, getattr(listener, attr))
+                    for event, attr in mapping.items()))
+
+            basic_dispatch = create_dispatcher(basic)
+            sharp_dispatch = create_dispatcher(self.sharp)
+            escape_dispatch = create_dispatcher(self.escape)
+            csi_dispatch = create_dispatcher(self.csi)
+
+            while True:
+                char = yield True
+                if char == ESC:
+                    char = yield None
+                    if char == "[":
+                        char = CSI_C1
+                    elif char == "]":
+                        char = OSC_C1
+                    else:
+                        if char == "#":
+                            sharp_dispatch[(yield None)]()
+                        elif char == "%":
+                            self.select_other_charset((yield None))
+                        elif char in "()":
+                            code = yield None
+                            if self.use_utf8:
+                                continue
+                            listener.define_charset(code, mode=char)
+                        else:
+                            escape_dispatch[char]()
+                        continue
+                if char in basic:
+                    if (char == ctrl.SI or char == ctrl.SO) and self.use_utf8:
+                        continue
+                    basic_dispatch[char]()
+                elif char == CSI_C1:
+                    groups = [[]]
+                    current = ""
+                    private = False
+                    prefix = ""            # '>', '=', '<'
+                    intermediate = ""      # 0x20-0x2F before the final byte
+                    while True:
+                        char = yield None
+                        if char == "?":
+                            private = True
+                        elif char in "<=>":
+                            prefix = char
+                        elif char in ALLOWED_IN_CSI:
+                            basic_dispatch[char]()
+                        elif char in CAN_OR_SUB:
+                            break          # sequence aborted, nothing shown
+                        elif char.isdigit():
+                            current += char
+                        elif char == ":":
+                            groups[-1].append(min(int(current or 0), 9999))
+                            current = ""
+                        elif " " <= char <= "/":
+                            intermediate += char
+                        else:
+                            groups[-1].append(min(int(current or 0), 9999))
+                            if char == ";":
+                                groups.append([])
+                                current = ""
+                                continue
+                            if intermediate or prefix in ("<", "="):
+                                pass       # DECSCUSR, DECRQM, … — unsupported
+                            elif prefix == ">":
+                                if char == "c":
+                                    listener.report_secondary_device_attributes()
+                                # >m (modifyOtherKeys), >q (XTVERSION), >u: no
+                            else:
+                                params = _flatten_csi_params(groups, char)
+                                if params is not None:
+                                    if private:
+                                        csi_dispatch[char](*params, private=True)
+                                    else:
+                                        csi_dispatch[char](*params)
+                            break
+                elif char == OSC_C1:
+                    code = yield None
+                    if code == "R":
+                        continue
+                    elif code == "P":
+                        continue
+                    param = ""
+                    while True:
+                        char = yield None
+                        if char == ESC:
+                            char += yield None
+                        if char in OSC_TERMINATORS:
+                            break
+                        else:
+                            param += char
+                    param = param[1:]
+                    if code in "01":
+                        listener.set_icon_name(param)
+                    if code in "02":
+                        listener.set_title(param)
+                elif char not in NUL_OR_DEL:
+                    draw(char)
+
+    class _TermScreen(pyte.HistoryScreen):
+        """HistoryScreen with a real alternate screen and xterm's scrolling.
+
+        Full-screen apps (less, vim, htop, tmux) run in their own buffer: the
+        shell's screen comes back when they exit and nothing of theirs reaches
+        the scrollback (UX audit 2026-10-16, T-04/T-05).
         """
         _ALT_SCREEN = 1049          # DECSET 1049: alternate screen buffer
         _ALT_SCREEN_FLAG = 1049 << 5  # pyte stores private modes shifted by 5
@@ -396,6 +579,10 @@ try:
             # scrollback-wiping command (`clear`, `cls`, `reset`, Ctrl+L).
             # Consumed by the next CSI 2 J on the main screen.
             self._user_clear_pending = False
+            #: Main screen while an alternate screen is shown (T-04).
+            self._alt_saved = None
+            #: Last printed character, for REP (T-10).
+            self._last_drawn = ''
             super().__init__(*args, **kwargs)
 
         def reset(self):
@@ -404,6 +591,8 @@ try:
             self._in_draw = False
             self._just_homed = False
             self._user_clear_pending = False
+            self._alt_saved = None
+            self._last_drawn = ''
 
         def before_event(self, event):
             # The `clear` command emits CSI H immediately followed by
@@ -420,12 +609,102 @@ try:
             super().cursor_position(line, column)
             self._just_homed = (self.cursor.x == 0 and self.cursor.y == 0)
 
-        def draw(self, *args, **kwargs):
+        def draw(self, data):
+            if _ZERO_WIDTH_RE.search(data):
+                data = _ZERO_WIDTH_RE.sub('', data)          # T-15
+                if not data:
+                    return
+            self._last_drawn = data[-1]
             self._in_draw = True
             try:
-                super().draw(*args, **kwargs)
+                super().draw(data)
             finally:
                 self._in_draw = False
+
+        # ── sequences pyte lacks (see _TermStream) ───────────────────────
+
+        def scroll_up(self, count=None, *args, **kwargs):
+            """CSI n S: scroll the region up n lines, cursor stays (T-01).
+            tmux 3.2+ batches a pane's scroll into one of these."""
+            if kwargs.get('private'):
+                return
+            top, bottom = self.margins or (0, self.lines - 1)
+            n = max(1, min(count or 1, bottom - top + 1))
+            buf = self.buffer
+            for y in range(top, bottom + 1 - n):
+                buf[y] = buf[y + n]
+            for y in range(bottom + 1 - n, bottom + 1):
+                buf.pop(y, None)
+            self._soft_wrapped = {
+                (r - n if top <= r <= bottom else r) for r in self._soft_wrapped
+                if not (top <= r <= bottom) or r - n > top}
+            self.dirty.update(range(top, bottom + 1))
+
+        def scroll_down(self, count=None, *args, **kwargs):
+            """CSI n T: scroll the region down n lines, cursor stays."""
+            if kwargs.get('private'):
+                return
+            top, bottom = self.margins or (0, self.lines - 1)
+            n = max(1, min(count or 1, bottom - top + 1))
+            buf = self.buffer
+            for y in range(bottom, top + n - 1, -1):
+                buf[y] = buf[y - n]
+            for y in range(top, top + n):
+                buf.pop(y, None)
+            self._soft_wrapped = {
+                (r + n if top <= r <= bottom else r) for r in self._soft_wrapped
+                if not (top <= r <= bottom) or (r > top and r + n <= bottom)}
+            self.dirty.update(range(top, bottom + 1))
+
+        def repeat_last(self, count=None, *args, **kwargs):
+            """CSI n b (REP): print the last character n more times (T-10)."""
+            if self._last_drawn and not kwargs.get('private'):
+                self.draw(self._last_drawn
+                          * max(1, min(count or 1, self.columns * self.lines)))
+
+        def save_cursor_sco(self, *args, **kwargs):
+            """CSI s — not CSI ? s (XTSAVE) nor DECSLRM with parameters."""
+            if not kwargs.get('private') and not any(args):
+                self.save_cursor()
+
+        def restore_cursor_sco(self, *args, **kwargs):
+            if not kwargs.get('private') and not any(args):
+                self.restore_cursor()
+
+        def report_secondary_device_attributes(self):
+            """CSI > c: answer like a VT100-class terminal, as Windows
+            Terminal does (T-09)."""
+            self.write_process_input("\x1b[>0;10;1c")
+
+        # ── alternate screen (T-04/T-05) ─────────────────────────────────
+
+        def _enter_alt(self, save_cursor: bool):
+            self._alt_saved = dict(
+                buffer=self.buffer, soft=self._soft_wrapped,
+                cursor=(self.cursor.x, self.cursor.y, self.cursor.attrs)
+                if save_cursor else None,
+                lines=self.lines, columns=self.columns)
+            dc = self.default_char
+            self.buffer = _defaultdict(lambda: _defaultdict(lambda: dc))
+            self._soft_wrapped = set()
+            self.dirty.update(range(self.lines))
+
+        def _leave_alt(self):
+            saved, self._alt_saved = self._alt_saved, None
+            if saved is None:
+                return
+            lines, columns = self.lines, self.columns
+            self.buffer = saved['buffer']
+            self._soft_wrapped = saved['soft']
+            if saved['cursor'] is not None:
+                self.cursor.x, self.cursor.y, self.cursor.attrs = saved['cursor']
+            if (saved['lines'], saved['columns']) != (lines, columns):
+                # Resized while the app ran: reflow the shell's screen now.
+                self.lines, self.columns = saved['lines'], saved['columns']
+                self.resize(lines, columns)
+            self.cursor.x = min(self.cursor.x, self.columns - 1)
+            self.cursor.y = min(self.cursor.y, self.lines - 1)
+            self.dirty.update(range(self.lines))
 
         def index(self):
             top, bottom = self.margins or (0, self.lines - 1)
@@ -434,7 +713,11 @@ try:
             # then delegate the buffer scroll to plain Screen.index() so
             # HistoryScreen.index() does NOT also push its dict copy.
             if will_scroll:
-                self.history.top.append(_row_to_hist(self.buffer[top]))
+                # Only a line leaving the top of the MAIN screen is history;
+                # a tmux pane or a full-screen app scrolling its region is
+                # not (T-05).
+                if top == 0 and self._alt_saved is None:
+                    self.history.top.append(_row_to_hist(self.buffer[top]))
                 pyte.Screen.index(self)
             else:
                 super().index()
@@ -451,17 +734,6 @@ try:
                 self._soft_wrapped.add(self.cursor.y)
             else:
                 self._soft_wrapped.discard(self.cursor.y)
-
-        def _push_visible_to_history(self):
-            """Append each non-empty visible row to history.top (oldest→newest order)."""
-            for y in range(self.lines):
-                try:
-                    row = self.buffer[y]
-                    if any(getattr(c, 'data', ' ') not in (' ', '')
-                           for c in row.values()):
-                        self.history.top.append(_row_to_hist(row))
-                except Exception:
-                    pass
 
         def resize(self, lines=None, columns=None):
             """Resize with text reflow — narrowing wraps long lines,
@@ -483,8 +755,9 @@ try:
                 if lines < self.lines:
                     n_scroll = max(0, self.cursor.y - (lines - 1))
                     if n_scroll > 0:
-                        for y in range(n_scroll):
-                            self.history.top.append(_row_to_hist(self.buffer[y]))
+                        if self._alt_saved is None:      # never the alt screen (T-05)
+                            for y in range(n_scroll):
+                                self.history.top.append(_row_to_hist(self.buffer[y]))
                         for y in range(self.lines - n_scroll):
                             self.buffer[y] = self.buffer[y + n_scroll]
                         for y in range(self.lines - n_scroll, self.lines):
@@ -636,20 +909,48 @@ try:
                     self.history.bottom.clear()
                     self._soft_wrapped.clear()
                     self._suppress_history_push = False
-                super().erase_in_display(how, *args, **kwargs)
-                return
             super().erase_in_display(how, *args, **kwargs)
+            self._fill_erased_background(how)
+
+        def _fill_erased_background(self, how):
+            """BCE (T-07): an erase paints the current background on every
+            cell, not only on cells that held something — xterm-256color
+            promises it, and mc/vim/htop draw their backgrounds that way."""
+            blank = self.cursor.attrs
+            if blank.bg == 'default':
+                return
+            blank = blank._replace(data=' ')
+            cols, y = self.columns, self.cursor.y
+            if how == 0:
+                spans = [(y, range(self.cursor.x, cols))] + [
+                    (r, range(cols)) for r in range(y + 1, self.lines)]
+            elif how == 1:
+                spans = [(r, range(cols)) for r in range(y)] + [
+                    (y, range(0, min(self.cursor.x + 1, cols)))]
+            elif how == 2:
+                spans = [(r, range(cols)) for r in range(self.lines)]
+            else:
+                return
+            for r, xs in spans:
+                line = self.buffer[r]
+                for x in xs:
+                    line[x] = blank
 
         def set_mode(self, *modes, **kwargs):
-            # Entering any alternate screen variant (47 / 1047 / 1049) →
-            # save the current main-screen content into scrollback first
-            # so it remains accessible while the full-screen app runs and
-            # after it exits.
-            if kwargs.get("private")\
-                    and any(m in self._ALT_SCREEN_MODES for m in modes)\
-                    and not self._in_alt_screen():
-                self._push_visible_to_history()
+            # Entering an alternate screen (47 / 1047 / 1049): the shell's
+            # screen is put aside whole and comes back on exit; 1049 also
+            # saves the cursor (T-04).
+            if (kwargs.get("private") and self._alt_saved is None
+                    and any(m in self._ALT_SCREEN_MODES for m in modes)):
+                self._enter_alt(save_cursor=1049 in modes)
             super().set_mode(*modes, **kwargs)
+
+        def reset_mode(self, *modes, **kwargs):
+            super().reset_mode(*modes, **kwargs)
+            if (kwargs.get("private") and self._alt_saved is not None
+                    and any(m in self._ALT_SCREEN_MODES for m in modes)
+                    and not self._in_alt_screen()):
+                self._leave_alt()
 
 except ImportError:
     _PYTE_OK = False
@@ -716,6 +1017,11 @@ class TerminalWidget(QWidget):
     char_input     = pyqtSignal(bytes)
     resize_pty     = pyqtSignal(int, int)   # cols, rows → SSH PTY resize
     scroll_changed = pyqtSignal(int, int)   # offset, max_offset
+    #: Bytes for THIS session only — answers to terminal queries and mouse
+    #: reports; never broadcast by multi-exec like typed input (T-09/T-24).
+    term_reply     = pyqtSignal(bytes)
+    #: Ctrl+Shift+F — open the search bar (E-03).
+    search_requested = pyqtSignal()
 
     _SCROLLBACK = 250_000   # 25 MB - 250 MB per session (lines × ~100-1000 B);
                             # freed on tab close. Still 2.5× MobaXterm's max
@@ -796,13 +1102,29 @@ class TerminalWidget(QWidget):
         self._ch  = fm.height()
         self._asc = fm.ascent()
 
-        # Hard lower bound: 80 cols × 24 rows — prevents row loss on aggressive resize
-        self.setMinimumSize(int(80 * self._cw), int(24 * self._ch))
+        # Lower bound 40×10.  It used to be 80×24, but the SSH window's
+        # splitter squeezed the widget below that anyway, and the PTY was
+        # still told 80 columns: the rightmost ones were written off-screen
+        # (UX audit V-01).  The size sent is now always what is visible.
+        self.setMinimumSize(int(40 * self._cw), int(10 * self._ch))
 
         self._cols = 220
         self._rows = 50
         self._screen = _TermScreen(self._cols, self._rows, history=self._SCROLLBACK) if _PYTE_OK else None
-        self._stream = pyte.Stream(self._screen) if _PYTE_OK else None
+        self._stream = _TermStream(self._screen) if _PYTE_OK else None
+        if self._stream is not None:
+            # Text arrives already decoded, so UTF-8 stays intact; switching
+            # pyte's UTF-8 mode off lets ESC ( 0 / SO-SI line drawing work
+            # (T-08: frames drawn as "lqqk").
+            self._stream.use_utf8 = False
+            self._screen.write_process_input = (
+                lambda s: self.term_reply.emit(s.encode('utf-8')))
+        #: Read by the SSH worker thread (a plain bool): a full-screen app
+        #: is showing — no log highlighting, no output dropped on Ctrl+C.
+        self.alt_screen = False
+        #: How many sessions a paste reaches (multi-exec); set by SshDialog.
+        self.paste_targets = lambda: 1
+        self._mouse_button = None
 
         # Buffer of bytes typed on the current input line. Used by
         # _emit_input to detect when the user invokes a scrollback-wiping
@@ -867,6 +1189,12 @@ class TerminalWidget(QWidget):
             self._coalesce_timer.setInterval(8 if self.isVisible() else 250)
             self._coalesce_timer.start()
 
+    def feed_discontinuity(self):
+        """The worker dropped received bytes (Ctrl+C on the shell screen)."""
+        self._pending_data.append(None)
+        if not self._coalesce_timer.isActive():
+            self._coalesce_timer.start()
+
     def flush_now(self):
         """Process any buffered chunks immediately (used when a hidden tab
         becomes visible so the user sees fresh content right away)."""
@@ -914,8 +1242,15 @@ class TerminalWidget(QWidget):
             n = len(self._pending_data)
             i = 0
             while i < n:
+                item = self._pending_data[i]
                 try:
-                    self._stream.feed(self._pending_data[i])
+                    if item is None:
+                        # Bytes were dropped here (Ctrl+C): any escape
+                        # sequence in progress is gone — start clean (T-02).
+                        self._stream._initialize_parser()
+                        self._stream.feed('\x1b[0m')
+                    else:
+                        self._stream.feed(item)
                 except Exception as _e:
                     import traceback; traceback.print_exc()
                 i += 1
@@ -923,6 +1258,7 @@ class TerminalWidget(QWidget):
                 if i < n and _t.monotonic() >= deadline:
                     break
             del self._pending_data[:i]
+            self.alt_screen = self._screen._in_alt_screen()
         else:
             self._pending_data.clear()
         # Only auto-scroll to bottom if user is already at the bottom.
@@ -1036,8 +1372,8 @@ class TerminalWidget(QWidget):
 
     def terminal_size(self):
         """Return current terminal dimensions from actual widget size (always live)."""
-        cols = max(80, int(self.width()  / self._cw))
-        rows = max(24, int(self.height() / self._ch))
+        cols = max(20, int(self.width()  / self._cw))
+        rows = max(5, int(self.height() / self._ch))
         return cols, rows
 
     # ── Internal helpers ──────────────────────────────────────────────────
@@ -1158,7 +1494,9 @@ class TerminalWidget(QWidget):
             for x in range(c0, c1 + 1):
                 try:
                     cell = row_data[x]
-                    chars.append(cell.data or ' ')
+                    if cell.data == '':
+                        continue        # right half of a wide character
+                    chars.append(cell.data)
                 except (KeyError, AttributeError, TypeError):
                     chars.append(' ')
             lines.append(''.join(chars).rstrip())
@@ -1209,9 +1547,14 @@ class TerminalWidget(QWidget):
             p.drawText(8, 20, 'Brak biblioteki pyte. Zainstaluj: pip install pyte')
             return
 
-        cx      = self._screen.cursor.x
+        # Pending wrap leaves x == columns: draw in the last cell (T-23).
+        cx      = min(self._screen.cursor.x, max(0, self._cols - 1))
         cy      = self._screen.cursor.y
         focused = self.hasFocus()
+        # Hidden (DECTCEM ?25l) means hidden (T-12); without focus the
+        # cursor is an outline instead of nothing (T-23).
+        show_cursor = (not self._screen.cursor.hidden
+                       and (self._cur_vis or not focused))
         cw      = self._cw
         lh      = self._ch
         asc     = self._asc
@@ -1245,7 +1588,7 @@ class TerminalWidget(QWidget):
         for y in range(y_start, y_end):
             row = self._get_row(y)
             py  = int(y * lh)
-            is_cursor_row = (offset == 0 and y == cy and focused and self._cur_vis)
+            is_cursor_row = (offset == 0 and y == cy and show_cursor)
 
             flag_cols = self._flag_columns(row) if row else None
 
@@ -1253,7 +1596,11 @@ class TerminalWidget(QWidget):
                 # Draw cursor on empty row if needed
                 if is_cursor_row:
                     rx = int(cx * cw)
-                    p.fillRect(rx, py, int_cw, int_lh, default_fg_c)
+                    if focused:
+                        p.fillRect(rx, py, int_cw, int_lh, default_fg_c)
+                    else:
+                        p.setPen(default_fg_c)
+                        p.drawRect(rx, py, int_cw - 2, int_lh - 2)
                 continue
 
             # Batch: collect runs of chars with same style to draw together
@@ -1263,24 +1610,44 @@ class TerminalWidget(QWidget):
             run_x_start = 0
 
             for x in range(x_start, x_end):
+                cell = None
                 try:
                     cell = row[x]
+                    if cell.data == '':
+                        # Right half of a wide character: its glyph was drawn
+                        # with the left half; end the run so the next text
+                        # starts at its own column (T-14).
+                        if run_chars:
+                            text = ''.join(run_chars)
+                            if text.rstrip():
+                                p.drawText(int(run_x_start * cw), int(py + asc), text)
+                            run_chars = []
+                        bg = self._color(cell.bg, False)
+                        if bg != _DEFAULT_BG:
+                            p.fillRect(int(x * cw), py, int_cw, int_lh, _qcolor(bg))
+                        continue
                     char = cell.data or ' '
                     fg   = self._color(cell.fg, True)
                     bg   = self._color(cell.bg, False)
                     if cell.reverse:
                         fg, bg = bg, fg
-                    bold = cell.bold
+                    style = (cell.bold,
+                             getattr(cell, 'italics', False) or getattr(cell, 'italic', False),
+                             bool(getattr(cell, 'underscore', False)),
+                             bool(getattr(cell, 'strikethrough', False)))
                 except (KeyError, AttributeError, TypeError):
-                    char, fg, bg, bold = ' ', _DEFAULT_FG, _DEFAULT_BG, False
+                    char, fg, bg = ' ', _DEFAULT_FG, _DEFAULT_BG
+                    style = (False, False, False, False)
+                bold = style
 
                 # Flag highlighting (only when cell hasn't been colored by program)
-                if flag_cols and x in flag_cols and fg == _DEFAULT_FG and not cell.reverse:
+                if (flag_cols and x in flag_cols and fg == _DEFAULT_FG
+                        and not (cell is not None and cell.reverse)):
                     fg = _FLAG_FG
 
                 rx     = int(x * cw)
                 sel    = has_sel and self._in_selection(x, y)
-                is_cur = (is_cursor_row and x == cx)
+                is_cur = (is_cursor_row and focused and x == cx)
 
                 # Determine actual fg/bg for this cell
                 if sel:
@@ -1296,7 +1663,8 @@ class TerminalWidget(QWidget):
                     draw_fg = fg
 
                 # Check if we can extend the current text run
-                if draw_fg == prev_fg and bold == prev_bold and not sel and not is_cur:
+                if (run_chars and draw_fg == prev_fg and bold == prev_bold
+                        and not sel and not is_cur):
                     run_chars.append(char)
                 else:
                     # Flush previous run
@@ -1306,7 +1674,7 @@ class TerminalWidget(QWidget):
                             p.drawText(int(run_x_start * cw), int(py + asc), text)
                     # Start new run
                     if bold != prev_bold:
-                        p.setFont(self._font_bold if bold else self._font)
+                        p.setFont(self._styled_font(bold))
                         prev_bold = bold
                     if draw_fg != prev_fg:
                         p.setPen(_qcolor(draw_fg))
@@ -1319,6 +1687,9 @@ class TerminalWidget(QWidget):
                 text = ''.join(run_chars)
                 if text.rstrip():
                     p.drawText(int(run_x_start * cw), int(py + asc), text)
+            if is_cursor_row and not focused:
+                p.setPen(default_fg_c)
+                p.drawRect(int(cx * cw), py, int_cw - 2, int_lh - 2)
 
         # Search highlights — drawn on top of text. Current match uses a stronger
         # orange; others a softer yellow.
@@ -1349,15 +1720,31 @@ class TerminalWidget(QWidget):
                     p.drawText(rx, int(py + asc), ''.join(chars))
 
 
+    def _styled_font(self, style) -> QFont:
+        """(bold, italic, underline, strike) → font, cached (T-13)."""
+        cache = self.__dict__.setdefault('_font_cache', {})
+        f = cache.get(style)
+        if f is None:
+            f = QFont(self._font)
+            f.setBold(style[0])
+            f.setItalic(style[1])
+            f.setUnderline(style[2])
+            f.setStrikeOut(style[3])
+            cache[style] = f
+        return f
+
     # ── Resize ────────────────────────────────────────────────────────────
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.width() < 20 or self.height() < 20:
             return   # not yet laid out — ignore spurious resize events
-        new_cols = max(80, int(self.width()  / self._cw))
-        new_rows = max(24, int(self.height() / self._ch))
-        if new_cols != self._cols or new_rows != self._rows:
+        new_cols = max(20, int(self.width()  / self._cw))
+        new_rows = max(5, int(self.height() / self._ch))
+        # A pending resize is replaced even when the size came back to the
+        # current one: A→B→A within the debounce used to apply B (T-19).
+        if ((new_cols, new_rows) != (self._cols, self._rows)
+                or self._pending_resize is not None):
             # Do NOT touch pyte buffer here — resizing it on every drag pixel
             # causes it to pull scrollback history and produce phantom lines.
             # Schedule both the pyte resize and the PTY SIGWINCH for after
@@ -1366,6 +1753,9 @@ class TerminalWidget(QWidget):
             self._resize_timer.start()
 
     def _emit_resize(self):
+        if self._pending_resize == (self._cols, self._rows):
+            self._pending_resize = None
+            return
         if self._pending_resize:
             new_cols, new_rows = self._pending_resize
             if self._screen:
@@ -1435,10 +1825,26 @@ class TerminalWidget(QWidget):
 
         # Ctrl+Shift+V: paste from clipboard
         if ctrl and shift and key == Qt.Key.Key_V:
-            text = QApplication.clipboard().text()
-            if text:
-                self._scroll_offset = 0
-                self._emit_input(text.encode('utf-8'))
+            self.paste(QApplication.clipboard().text())
+            event.accept()
+            return
+
+        # Ctrl+Shift+F: search (E-03) — Ctrl+F itself belongs to the shell.
+        if ctrl and shift and key == Qt.Key.Key_F:
+            self.search_requested.emit()
+            event.accept()
+            return
+
+        # Shift+PgUp / Shift+PgDn: page through the local scrollback.
+        if (shift and not ctrl and self._screen
+                and key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown)):
+            step = max(1, self._rows - 1)
+            hist_max = len(self._screen.history.top)
+            delta = step if key == Qt.Key.Key_PageUp else -step
+            self._scroll_offset = max(0, min(self._scroll_offset + delta, hist_max))
+            self._hist_cache = None
+            self.update()
+            self._emit_scroll()
             event.accept()
             return
 
@@ -1455,21 +1861,8 @@ class TerminalWidget(QWidget):
             self._scroll_offset = 0
             self.update()
 
-        if ctrl and not shift:
-            data = self._CTRL_MAP.get(key)
-        else:
-            # DECCKM check: pyte stores private modes shifted by 5, so mode 1
-            # (application cursor keys) appears in screen.mode as 32. When set,
-            # arrows must use \x1bOA-D instead of \x1b[A-D — otherwise vim's
-            # cursor navigation in normal mode looks dead.
-            if (self._screen
-                    and key in self._APP_CURSOR_MAP
-                    and 32 in self._screen.mode):
-                data = self._APP_CURSOR_MAP[key]
-            else:
-                data = self._SPECIAL_MAP.get(key)
-            if data is None and event.text():
-                data = event.text().encode('utf-8')
+        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+        data = self._encode_key(key, event.text(), ctrl, shift, alt)
 
         if data:
             self._cur_vis = True
@@ -1477,10 +1870,163 @@ class TerminalWidget(QWidget):
             self._emit_input(data)
         event.accept()
 
+    # xterm key encoding (UX audit T-16/T-17): a modifier is the parameter
+    # 1 + Shift + 2·Alt + 4·Ctrl; DECCKM switches cursor keys to SS3.
+    _CSI_LETTER_KEYS = {
+        Qt.Key.Key_Up: 'A', Qt.Key.Key_Down: 'B', Qt.Key.Key_Right: 'C',
+        Qt.Key.Key_Left: 'D', Qt.Key.Key_Home: 'H', Qt.Key.Key_End: 'F',
+    }
+    _SS3_FKEYS = {Qt.Key.Key_F1: 'P', Qt.Key.Key_F2: 'Q',
+                  Qt.Key.Key_F3: 'R', Qt.Key.Key_F4: 'S'}
+    _TILDE_KEYS = {
+        Qt.Key.Key_Insert: 2, Qt.Key.Key_Delete: 3, Qt.Key.Key_PageUp: 5,
+        Qt.Key.Key_PageDown: 6, Qt.Key.Key_F5: 15, Qt.Key.Key_F6: 17,
+        Qt.Key.Key_F7: 18, Qt.Key.Key_F8: 19, Qt.Key.Key_F9: 20,
+        Qt.Key.Key_F10: 21, Qt.Key.Key_F11: 23, Qt.Key.Key_F12: 24,
+    }
+    _CTRL_SYMBOLS = {
+        Qt.Key.Key_Space: b'\x00', Qt.Key.Key_2: b'\x00',
+        Qt.Key.Key_3: b'\x1b', Qt.Key.Key_4: b'\x1c', Qt.Key.Key_5: b'\x1d',
+        Qt.Key.Key_6: b'\x1e', Qt.Key.Key_AsciiCircum: b'\x1e',
+        Qt.Key.Key_7: b'\x1f', Qt.Key.Key_Slash: b'\x1f',
+        Qt.Key.Key_Minus: b'\x1f', Qt.Key.Key_Underscore: b'\x1f',
+        Qt.Key.Key_8: b'\x7f', Qt.Key.Key_Question: b'\x7f',
+    }
+
+    def _encode_key(self, key, text: str, ctrl: bool, shift: bool,
+                    alt: bool) -> bytes | None:
+        """The bytes xterm sends for this key, or None."""
+        mod = 1 + shift + 2 * alt + 4 * ctrl
+        app_cursor = self._screen is not None and 32 in self._screen.mode
+        letter = self._CSI_LETTER_KEYS.get(key)
+        if letter:
+            if mod > 1:
+                return f'\x1b[1;{mod}{letter}'.encode()
+            return (b'\x1bO' if app_cursor else b'\x1b[') + letter.encode()
+        letter = self._SS3_FKEYS.get(key)
+        if letter:
+            if mod > 1:
+                return f'\x1b[1;{mod}{letter}'.encode()
+            return b'\x1bO' + letter.encode()
+        num = self._TILDE_KEYS.get(key)
+        if num:
+            return (f'\x1b[{num};{mod}~' if mod > 1 else f'\x1b[{num}~').encode()
+        if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab and shift):
+            return b'\x1b[Z'
+        if key == Qt.Key.Key_Tab:
+            return b'\t'
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return b'\x1b\r' if alt else b'\r'
+        if key == Qt.Key.Key_Backspace:
+            if ctrl:
+                return b'\x08'
+            return b'\x1b\x7f' if alt else b'\x7f'
+        if key == Qt.Key.Key_Escape:
+            return b'\x1b'
+        # AltGr on Windows arrives as Ctrl+Alt carrying the character it
+        # produced (ą, ę, @, {): that is text, not a control combination.
+        if ctrl and alt and text and text.isprintable():
+            return text.encode('utf-8')
+        if ctrl:
+            data = self._CTRL_MAP.get(key) or self._CTRL_SYMBOLS.get(key)
+            if data:
+                return b'\x1b' + data if alt else data
+            if text and len(text) == 1 and ord(text) < 0x20:
+                return text.encode()
+            return None
+        if text:
+            data = text.encode('utf-8')
+            return b'\x1b' + data if alt else data
+        return None
+
+    # ── Paste ─────────────────────────────────────────────────────────────
+
+    def paste(self, text: str) -> None:
+        """Send clipboard text the way xterm does (UX audit T-18/E-05).
+
+        Line breaks become CR (what the Enter key sends).  When the program
+        asked for bracketed paste (?2004 — bash 5.1+, zsh, vim) the text is
+        wrapped so nothing runs until the user presses Enter.  Without it,
+        several lines — each run the moment it lands — or a paste into more
+        than one session (multi-exec) need a confirmation first.
+        """
+        if not text:
+            return
+        text = text.replace('\r\n', '\r').replace('\n', '\r')
+        bracketed = (self._screen is not None
+                     and (2004 << 5) in self._screen.mode)
+        lines = text.rstrip('\r').count('\r') + 1
+        targets = max(1, int(self.paste_targets() or 1))
+        if (lines > 1 and not bracketed) or targets > 1:
+            if not self._confirm_paste(text, lines, targets, bracketed):
+                return
+        if bracketed:
+            text = '\x1b[200~' + text.replace('\x1b[201~', '') + '\x1b[201~'
+        self._scroll_offset = 0
+        self._emit_input(text.encode('utf-8'))
+
+    def _confirm_paste(self, text: str, lines: int, targets: int,
+                       bracketed: bool) -> bool:
+        from ui.utils import plural
+        what = "Wklejasz " + plural(lines, "linię", "linie", "linii")
+        if targets > 1:
+            what += f" do {plural(targets, 'sesji', 'sesji', 'sesji')} naraz (Multi-exec)"
+        what += "."
+        if lines > 1 and not bracketed:
+            what += "\nKażda linia zostanie wykonana od razu po wklejeniu."
+        preview = text.replace('\r', '\n').strip('\n')
+        shown = preview.split('\n')[:6]
+        preview = '\n'.join(s if len(s) <= 100 else s[:100] + '…' for s in shown)
+        if lines > len(shown):
+            preview += '\n…'
+        box = QMessageBox(QMessageBox.Icon.Warning, "Wklejanie do terminala",
+                          what, parent=self)
+        box.setInformativeText(preview)
+        paste_btn = box.addButton("Wklej", QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        return box.clickedButton() is paste_btn
+
     # ── Mouse ─────────────────────────────────────────────────────────────
+
+    def _mouse_report(self, button: int, col: int, row: int,
+                      release: bool = False, motion: bool = False) -> bool:
+        """Report a mouse event to a program that asked for it (?1000/1002/
+        1003, SGR 1006) — tmux `mouse on`, htop, mc, vim mouse=a (T-24).
+        Returns False when nobody asked: the click stays local."""
+        mode = self._screen.mode if self._screen else ()
+        if not any((m << 5) in mode for m in (1000, 1002, 1003)):
+            return False
+        code = button + (32 if motion else 0)
+        if (1006 << 5) in mode:
+            data = f'\x1b[<{code};{col + 1};{row + 1}{"m" if release else "M"}'.encode()
+        else:
+            if col > 222 or row > 222:
+                return True               # beyond the X10 encoding: dropped
+            data = b'\x1b[M' + bytes((32 + (3 if release else code),
+                                      33 + col, 33 + row))
+        self.term_reply.emit(data)
+        return True
+
+    _MOUSE_BUTTONS = {Qt.MouseButton.LeftButton: 0,
+                      Qt.MouseButton.MiddleButton: 1,
+                      Qt.MouseButton.RightButton: 2}
+
+    def _mouse_reportable(self, event) -> bool:
+        """Shift keeps the mouse local (selection, paste), as in xterm."""
+        return (self._scroll_offset == 0
+                and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
 
     def mousePressEvent(self, event):
         self.setFocus()
+        button = self._MOUSE_BUTTONS.get(event.button())
+        if button is not None and self._mouse_reportable(event):
+            col, row = self._cell_at_pos(event.position())
+            if self._mouse_report(button, col, row):
+                self._mouse_button = button
+                return
         if event.button() == Qt.MouseButton.LeftButton:
             col, row = self._cell_at_pos(event.position())
             arow = self._vrow_to_arow(row)
@@ -1490,13 +2036,17 @@ class TerminalWidget(QWidget):
             self._selecting = True
             self.update()
         elif event.button() == Qt.MouseButton.RightButton:
-            # Paste from clipboard (PuTTY style)
-            text = QApplication.clipboard().text()
-            if text:
-                self._scroll_offset = 0
-                self._emit_input(text.encode('utf-8'))
+            # Paste from clipboard (PuTTY style) — through paste(): several
+            # lines or several sessions ask first (E-05).
+            self.paste(QApplication.clipboard().text())
 
     def mouseMoveEvent(self, event):
+        if self._mouse_button is not None:
+            mode = self._screen.mode if self._screen else ()
+            if (1002 << 5) in mode or (1003 << 5) in mode:
+                col, row = self._cell_at_pos(event.position())
+                self._mouse_report(self._mouse_button, col, row, motion=True)
+            return
         if self._selecting and (event.buttons() & Qt.MouseButton.LeftButton):
             col, vrow_raw = self._cell_at_pos_unclamped(event.position())
             self._sel_mouse_col = col
@@ -1545,6 +2095,11 @@ class TerminalWidget(QWidget):
             self._sel_scroll_timer.stop()
 
     def mouseReleaseEvent(self, event):
+        if self._mouse_button is not None:
+            col, row = self._cell_at_pos(event.position())
+            self._mouse_report(self._mouse_button, col, row, release=True)
+            self._mouse_button = None
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._selecting:
             self._sel_scroll_timer.stop()
             self._sel_scroll_dir = 0
@@ -1561,6 +2116,15 @@ class TerminalWidget(QWidget):
     def wheelEvent(self, event):
         if not self._screen:
             return
+        if self._mouse_reportable(event):
+            notches = event.angleDelta().y() // 120
+            if notches:
+                col, row = self._cell_at_pos(event.position())
+                button = 64 if notches > 0 else 65
+                if self._mouse_report(button, col, row):
+                    for _ in range(abs(notches) - 1):
+                        self._mouse_report(button, col, row)
+                    return
         steps    = event.angleDelta().y() // 40
         hist_max = len(self._screen.history.top)
         self._scroll_offset = max(0, min(self._scroll_offset + steps, hist_max))
@@ -2114,6 +2678,9 @@ class _SshWorker(QThread):
     error     = pyqtSignal(str)
     done      = pyqtSignal()
     dropped   = pyqtSignal()   # connection lost unexpectedly → trigger auto-reconnect
+    #: Received bytes were dropped (fast Ctrl+C): the terminal restarts its
+    #: parser there (T-02).
+    discontinuity = pyqtSignal()
 
     def __init__(self, host, user, password, cols=220, rows=50, port=22):
         super().__init__()
@@ -2148,7 +2715,11 @@ class _SshWorker(QThread):
         # fills up and the server slows down. Resumes when it drops below
         # _BP_LOW. No data is ever dropped — only throttled upstream.
         self._term_ref = None  # set externally; safe to read across threads
-                               # (only ever len(list), which is GIL-atomic)
+                               # (len(list) and a bool — GIL-atomic reads)
+        # One decoder for the whole stream: a character cut between two
+        # reads is completed by the next one instead of becoming U+FFFD
+        # (T-06 — tmux pane borders are 3 bytes each).
+        self._decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
     # ── Interactive password input ─────────────────────────────────────
 
@@ -2296,10 +2867,7 @@ class _SshWorker(QThread):
                         break
 
                 if got_ctrl_c:
-                    deadline = time.monotonic() + 0.5
-                    while (time.monotonic() < deadline
-                           and self._channel.recv_ready()):
-                        self._channel.recv(65536)
+                    self._quiet_after_ctrl_c()
                     for _ in range(50):
                         time.sleep(0.01)
                         if self._channel.recv_ready():
@@ -2365,6 +2933,24 @@ class _SshWorker(QThread):
         finally:
             self.done.emit()
 
+    def _quiet_after_ctrl_c(self) -> None:
+        """Instant quiet after Ctrl+C on the shell screen: output already
+        received is dropped.  Never inside a full-screen app — tmux, vim or
+        less would be left believing the screen was updated when it was
+        not (UX audit T-02)."""
+        import time
+        t = self._term_ref
+        if t is not None and getattr(t, 'alt_screen', False):
+            return
+        dropped = False
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and self._channel.recv_ready():
+            self._channel.recv(65536)
+            dropped = True
+        if dropped:
+            self._decoder.reset()
+            self.discontinuity.emit()
+
     def _session_dropped(self) -> bool:
         """The channel closed without an exit status: did the link drop
         (idle NAT / firewall timeout, network change, server gone) or did
@@ -2405,11 +2991,13 @@ class _SshWorker(QThread):
             total += len(buf)
         if not chunks:
             return
-        text = b''.join(chunks).decode('utf-8', errors='replace')
+        text = self._decoder.decode(b''.join(chunks))
+        if not text:
+            return
         EMIT_SIZE = 16384
         n = len(text)
         if n <= EMIT_SIZE:
-            self.output.emit(_colorize_log(text))
+            self.output.emit(self._highlight(text))
             return
         pos = 0
         while pos < n:
@@ -2418,8 +3006,16 @@ class _SshWorker(QThread):
                 nl = text.rfind('\n', pos, end)
                 if nl > pos:
                     end = nl + 1
-            self.output.emit(_colorize_log(text[pos:end]))
+            self.output.emit(self._highlight(text[pos:end]))
             pos = end
+
+    def _highlight(self, text: str) -> str:
+        """Log highlighting — but not into a full-screen app (T-03)."""
+        t = self._term_ref
+        if ((t is not None and getattr(t, 'alt_screen', False))
+                or _FULLSCREEN_ENTER_RE.search(text)):
+            return text
+        return _colorize_log(text)
 
     def send(self, data: bytes):
         """Queue bytes for immediate delivery by the worker thread."""
@@ -2572,6 +3168,14 @@ class _SftpListWorker(QThread):
 
 class _CancelledError(Exception):
     pass
+
+
+#: Leaves whatever a dead session switched on: alternate screen, scroll
+#: region, application cursor keys, hidden cursor, attributes, bracketed
+#: paste, mouse reporting, autowrap off (T-20).
+_TERM_SOFT_RESET = ('\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[r\x1b[?1l'
+                    '\x1b[?25h\x1b(B\x1b[0m\x1b[?2004l\x1b[?1000l'
+                    '\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h')
 
 
 def _own_signals(obj) -> list:
@@ -7039,7 +7643,7 @@ class SshDialog(QDialog):
         self._search_btn = QToolButton()
         self._search_btn.setText("🔍")
         self._search_btn.setCheckable(True)
-        self._search_btn.setToolTip("Szukaj w terminalu (Ctrl+F)")
+        self._search_btn.setToolTip("Szukaj w terminalu (Ctrl+Shift+F)")
         self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._search_btn.setFixedSize(22, 22)
         self._search_btn.setStyleSheet(
@@ -7257,6 +7861,10 @@ class SshDialog(QDialog):
 
         term.char_input.connect(
             lambda data, t=term: self._on_key(data, t))
+        # Answers to terminal queries and mouse reports: this session only.
+        term.term_reply.connect(lambda data, s=session: s.worker.send(data))
+        term.search_requested.connect(self._open_search)
+        term.paste_targets = lambda t=term: self._paste_target_count(t)
         term.resize_pty.connect(
             lambda c, r, s=session: self._resize_pty_worker(s.worker, c, r))
 
@@ -7503,6 +8111,8 @@ class SshDialog(QDialog):
         term = s.pane.term
         try: term.char_input.disconnect()
         except Exception: pass
+        try: term.term_reply.disconnect()
+        except Exception: pass
         try: term.resize_pty.disconnect()
         except Exception: pass
         if term._screen:
@@ -7673,6 +8283,7 @@ class SshDialog(QDialog):
         # Colorization already happens on the worker thread before emit,
         # so the UI thread only does the pyte feed + repaint here.
         worker.output.connect(lambda text, t=term: t.feed(text))
+        worker.discontinuity.connect(lambda t=term: t.feed_discontinuity())
         # Hand the worker a back-reference to the terminal so it can read
         # pending_chunks() for back-pressure (see _SshWorker.run).
         worker._term_ref = term
@@ -7735,8 +8346,13 @@ class SshDialog(QDialog):
         session.reconnecting = True
         session.reconnect_attempts = 0
         ts = datetime.now().strftime('%H:%M:%S')
+        # Whatever the dead session left switched on (tmux's alternate
+        # screen and scroll region, hidden cursor, app keypad, mouse
+        # reporting) must not carry over into the new shell (T-20).
+        session.term.feed_discontinuity()
         session.term.feed(
-            f"\r\n\x1b[33m─── Połączenie utracone [{ts}] — automatyczne "
+            _TERM_SOFT_RESET
+            + f"\r\n\x1b[33m─── Połączenie utracone [{ts}] — automatyczne "
             f"ponawianie…\x1b[0m\r\n")
         self._schedule_reconnect(session)
 
@@ -7791,6 +8407,7 @@ class SshDialog(QDialog):
             old_worker.connected.disconnect()
             old_worker.done.disconnect()
             old_worker.dropped.disconnect()
+            old_worker.discontinuity.disconnect()
         except Exception:
             pass
         old_worker.wait(500)
@@ -7887,6 +8504,21 @@ class SshDialog(QDialog):
         return None
 
     # ── Terminal search ───────────────────────────────────────────────────
+
+    def _open_search(self):
+        """Ctrl+Shift+F in a terminal (E-03)."""
+        if not self._search_btn.isChecked():
+            self._search_btn.click()
+        else:
+            self._search_edit.setFocus()
+            self._search_edit.selectAll()
+
+    def _paste_target_count(self, term) -> int:
+        """Sessions a paste from `term` reaches: all non-excluded ones in
+        multi-exec, otherwise one."""
+        if not self._multiexec:
+            return 1
+        return sum(1 for s in self._sessions if not s.excluded)
 
     def _toggle_search(self):
         show = self._search_btn.isChecked()
