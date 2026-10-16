@@ -3457,9 +3457,24 @@ def _sftp_icon(key: str) -> QIcon:
     return icon
 
 
+#: Dark fills of the file icons and what they become in the light theme —
+#: QPainter colours never pass through the stylesheet remap (UX audit V-11).
+_LIGHT_ICON_FILLS = {
+    "#21262d": "#ffffff", "#1a1e24": "#f6f8fa", "#30363d": "#d0d7de",
+    "#1f3a5f": "#ddf4ff", "#2d1117": "#ffebe9", "#0d1117": "#ffffff",
+}
+
+
+def _ic(hex_color: str) -> QColor:
+    """An icon colour for the active theme."""
+    if theme.active() == theme.LIGHT:
+        return QColor(_LIGHT_ICON_FILLS.get(hex_color.lower(), hex_color))
+    return QColor(hex_color)
+
+
 def _draw_folder(p: QPainter, s: int):
     """Yellow folder icon."""
-    c = QColor("#e2b340")
+    c = _ic("#e2b340")
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QBrush(c))
     # Tab
@@ -3478,7 +3493,7 @@ def _draw_folder(p: QPainter, s: int):
     path.closeSubpath()
     p.drawPath(path)
     # Lighter front face
-    p.setBrush(QBrush(QColor("#f0c850")))
+    p.setBrush(QBrush(_ic("#f0c850")))
     front = QPainterPath()
     front.moveTo(1, 6)
     front.lineTo(14.5, 6)
@@ -3492,8 +3507,8 @@ def _draw_folder(p: QPainter, s: int):
 
 def _draw_file_generic(p: QPainter, s: int):
     """White/gray generic file icon."""
-    p.setPen(QPen(QColor("#8b949e"), 1.2))
-    p.setBrush(QBrush(QColor("#21262d")))
+    p.setPen(QPen(_ic("#8b949e"), 1.2))
+    p.setBrush(QBrush(_ic("#21262d")))
     path = QPainterPath()
     path.moveTo(3, 1)
     path.lineTo(10, 1)
@@ -3505,7 +3520,7 @@ def _draw_file_generic(p: QPainter, s: int):
     path.closeSubpath()
     p.drawPath(path)
     # Dog ear
-    p.setPen(QPen(QColor("#8b949e"), 0.8))
+    p.setPen(QPen(_ic("#8b949e"), 0.8))
     p.drawLine(10, 1, 10, 4)
     p.drawLine(10, 4, 13, 4)
 
@@ -3513,7 +3528,7 @@ def _draw_file_generic(p: QPainter, s: int):
 def _draw_file_text(p: QPainter, s: int):
     """Text file — lines inside a doc."""
     _draw_file_generic(p, s)
-    p.setPen(QPen(QColor("#7d8590"), 1.0))
+    p.setPen(QPen(_ic("#7d8590"), 1.0))
     for y in (7, 9.5, 12):
         p.drawLine(5, int(y), 11, int(y))
 
@@ -3521,24 +3536,24 @@ def _draw_file_text(p: QPainter, s: int):
 def _draw_file_script(p: QPainter, s: int):
     """Shell/script file — terminal prompt icon."""
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(QColor("#1a1e24")))
+    p.setBrush(QBrush(_ic("#1a1e24")))
     p.drawRoundedRect(1, 1, 14, 14, 2.5, 2.5)
     # Title bar
-    p.setBrush(QBrush(QColor("#30363d")))
+    p.setBrush(QBrush(_ic("#30363d")))
     p.drawRoundedRect(1, 1, 14, 4, 2.5, 2.5)
     p.drawRect(1, 3, 14, 2)
     # Prompt >_
-    p.setPen(QPen(QColor("#3fb950"), 1.5))
+    p.setPen(QPen(_ic("#3fb950"), 1.5))
     p.drawLine(4, 9, 7, 11)
     p.drawLine(4, 13, 7, 11)
-    p.setPen(QPen(QColor("#8b949e"), 1.3))
+    p.setPen(QPen(_ic("#8b949e"), 1.3))
     p.drawLine(9, 13, 12, 13)
 
 
 def _draw_file_code(p: QPainter, s: int):
     """Code file — angle brackets < />."""
     _draw_file_generic(p, s)
-    p.setPen(QPen(QColor("#58a6ff"), 1.3))
+    p.setPen(QPen(_ic("#58a6ff"), 1.3))
     # <
     p.drawLine(5, 8, 3, 10)
     p.drawLine(3, 10, 5, 12)
@@ -3552,10 +3567,10 @@ def _draw_file_config(p: QPainter, s: int):
     """Config file — gear/cog."""
     _draw_file_generic(p, s)
     cx, cy, r = 8, 10.5, 2.2
-    p.setPen(QPen(QColor("#e2b340"), 1.2))
+    p.setPen(QPen(_ic("#e2b340"), 1.2))
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.drawEllipse(int(cx - r), int(cy - r), int(2 * r), int(2 * r))
-    p.setPen(QPen(QColor("#e2b340"), 1.0))
+    p.setPen(QPen(_ic("#e2b340"), 1.0))
     for i in range(6):
         a = math.radians(i * 60)
         x1, y1 = cx + r * math.cos(a), cy + r * math.sin(a)
@@ -3566,7 +3581,7 @@ def _draw_file_config(p: QPainter, s: int):
 def _draw_file_archive(p: QPainter, s: int):
     """Archive file — zip icon."""
     _draw_file_generic(p, s)
-    p.setPen(QPen(QColor("#da8b45"), 1.2))
+    p.setPen(QPen(_ic("#da8b45"), 1.2))
     # Zigzag
     p.drawLine(7, 6, 9, 8)
     p.drawLine(9, 8, 7, 10)
@@ -3578,7 +3593,7 @@ def _draw_file_image(p: QPainter, s: int):
     _draw_file_generic(p, s)
     # Mountain
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(QColor("#3fb950")))
+    p.setBrush(QBrush(_ic("#3fb950")))
     path = QPainterPath()
     path.moveTo(5, 13)
     path.lineTo(8, 8)
@@ -3586,14 +3601,14 @@ def _draw_file_image(p: QPainter, s: int):
     path.closeSubpath()
     p.drawPath(path)
     # Sun
-    p.setBrush(QBrush(QColor("#e2b340")))
+    p.setBrush(QBrush(_ic("#e2b340")))
     p.drawEllipse(10, 6, 3, 3)
 
 
 def _draw_file_log(p: QPainter, s: int):
     """Log file — scroll icon."""
     _draw_file_generic(p, s)
-    p.setPen(QPen(QColor("#da8b45"), 1.0))
+    p.setPen(QPen(_ic("#da8b45"), 1.0))
     for y in (7, 9, 11, 13):
         w = 6 if y < 13 else 4
         p.drawLine(5, y, 5 + w, y)
@@ -3601,20 +3616,20 @@ def _draw_file_log(p: QPainter, s: int):
 
 def _draw_file_data(p: QPainter, s: int):
     """Data/DB file — cylinder."""
-    p.setPen(QPen(QColor("#8b949e"), 1.0))
-    p.setBrush(QBrush(QColor("#1f3a5f")))
+    p.setPen(QPen(_ic("#8b949e"), 1.0))
+    p.setBrush(QBrush(_ic("#1f3a5f")))
     p.drawEllipse(3, 1, 10, 4)
     p.drawRect(3, 3, 10, 10)
-    p.setBrush(QBrush(QColor("#1f3a5f")))
+    p.setBrush(QBrush(_ic("#1f3a5f")))
     p.drawEllipse(3, 11, 10, 4)
-    p.setPen(QPen(QColor("#58a6ff"), 1.0))
+    p.setPen(QPen(_ic("#58a6ff"), 1.0))
     p.drawEllipse(3, 1, 10, 4)
 
 
 def _draw_file_pdf(p: QPainter, s: int):
     """PDF file — red document."""
-    p.setPen(QPen(QColor("#f85149"), 1.2))
-    p.setBrush(QBrush(QColor("#2d1117")))
+    p.setPen(QPen(_ic("#f85149"), 1.2))
+    p.setBrush(QBrush(_ic("#2d1117")))
     path = QPainterPath()
     path.moveTo(3, 1)
     path.lineTo(10, 1)
@@ -3625,11 +3640,11 @@ def _draw_file_pdf(p: QPainter, s: int):
     path.quadTo(3, 15, 3, 14)
     path.closeSubpath()
     p.drawPath(path)
-    p.setPen(QPen(QColor("#f85149"), 0.8))
+    p.setPen(QPen(_ic("#f85149"), 0.8))
     p.drawLine(10, 1, 10, 4)
     p.drawLine(10, 4, 13, 4)
     # "P" letter
-    p.setPen(QPen(QColor("#f85149"), 1.5))
+    p.setPen(QPen(_ic("#f85149"), 1.5))
     p.drawLine(6, 7, 6, 13)
     p.drawLine(6, 7, 9, 7)
     p.drawLine(9, 7, 9, 10)
@@ -3639,7 +3654,7 @@ def _draw_file_pdf(p: QPainter, s: int):
 def _draw_parent_dir(p: QPainter, s: int):
     """Parent dir (..) — folder with up arrow."""
     _draw_folder(p, s)
-    p.setPen(QPen(QColor("#0d1117"), 2.0))
+    p.setPen(QPen(_ic("#0d1117"), 2.0))
     p.drawLine(8, 12, 8, 8)
     p.drawLine(6, 10, 8, 8)
     p.drawLine(10, 10, 8, 8)

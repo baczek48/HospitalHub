@@ -74,7 +74,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | NAPRAWIONE | pakiet dialogów — test pilnuje braku ASCII-polszczyzny w ui/ |
 | V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | NAPRAWIONE | = E-16 |
 | V-10 | P2 | jasny motyw: wyłączony „Wgraj” = czarny prostokąt | NAPRAWIONE | pakiet okna SSH |
-| V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | REDESIGN | 71C — ikony |
+| V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | NAPRAWIONE | R4 — _ic(): jasne wypełnienia ikon w jasnym motywie |
 | V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
 | V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
 | V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
