@@ -19,10 +19,10 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | S-01 | P0 | zerwane łącze SSH = „exit”: karta znika, auto-reconnect martwy, zapisy z edytora giną po cichu | NAPRAWIONE | `4ada670`, `0783bfe` — `exit_status`, przepięcie obserwacji na nowe połączenie; test na prawdziwym serwerze 5/5 |
 | S-02 | P0 | zamknięcie okna SSH w trakcie transferu/listowania = crash procesu (0xC0000374) | NAPRAWIONE | `a62d6da` — pytanie, odłączenie sygnałów, `retire_thread`; mutacja 2 FAIL |
 | S-03 | P0 | okna SSH ignorują blokadę admina i przeżywają zamknięcie vaulta | NAPRAWIONE | `6487113` |
-| S-04 | P1 | nazwa pliku spoza UTF-8 blokuje listowanie katalogu SFTP | POTWIERDZONE | |
-| S-05 | P1 | upuszczenie pliku w trakcie kolejki pobierania kasuje resztę kolejki | POTWIERDZONE | |
-| S-06 | P1 | zerwanie w trakcie kolejki = N modalnych okien z surowymi wyjątkami | POTWIERDZONE | |
-| S-07 | P1 | zmiana nazwy SFTP przyjmuje „/” — plik przenoszony gdzie indziej | POTWIERDZONE | |
+| S-04 | P1 | nazwa pliku spoza UTF-8 blokuje listowanie katalogu SFTP | NAPRAWIONE | pakiet SFTP — listowanie odporne na nazwy spoza UTF-8 (z „�”) + komunikat |
+| S-05 | P1 | upuszczenie pliku w trakcie kolejki pobierania kasuje resztę kolejki | NAPRAWIONE | pakiet SFTP — dopisanie do kolejki |
+| S-06 | P1 | zerwanie w trakcie kolejki = N modalnych okien z surowymi wyjątkami | NAPRAWIONE | pakiet SFTP — jedno podsumowanie, polskie komunikaty |
+| S-07 | P1 | zmiana nazwy SFTP przyjmuje „/” — plik przenoszony gdzie indziej | NAPRAWIONE | pakiet SFTP |
 | S-08 | P2 | zamknięcie okna z łączącymi się sesjami zamraża GUI ~1 s/sesję | NAPRAWIONE | `a62d6da` — jeden budżet 1 s |
 | S-09 | P2 | VPN `get_status`/`disconnect` w wątku GUI przy kliknięciu; hasło w argumentach `FortiVPN.exe` | POTWIERDZONE | legacy `vpn_connect.py` jest zamrożony (niezmiennik) — poza zakresem 71; hasło w argumentach → do oceny bezpieczeństwa |
 | S-10 | P1 | dodanie szpitala o istniejącej nazwie zaznacza stary szpital | POTWIERDZONE | = E-06 |
@@ -75,7 +75,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | POTWIERDZONE | = E-16 |
 | V-10 | P2 | jasny motyw: wyłączony „Wgraj” = czarny prostokąt | POTWIERDZONE | |
 | V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | POTWIERDZONE | |
-| V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | POTWIERDZONE | = E-15 |
+| V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
 | V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
 | V-14 | P3 | pionowa kreska przy „Szpitale” | POTWIERDZONE | |
 | V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | POTWIERDZONE | |
@@ -108,7 +108,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-12 | P2 | Tab utyka w tabelach | POTWIERDZONE | |
 | E-13 | P2 | Esc w dialogach porzuca zmiany bez pytania | POTWIERDZONE | |
 | E-14 | P2 | porty bez walidacji (cicho 22, „abc” zapisane) | POTWIERDZONE | |
-| E-15 | P2 | komunikaty SSH jako modal „SFTP”, sukcesy giną, surowe wyjątki | POTWIERDZONE | |
+| E-15 | P2 | komunikaty SSH jako modal „SFTP”, sukcesy giną, surowe wyjątki | NAPRAWIONE | pakiet SFTP — sukcesy w pasku statusu, błąd SSH bez modala, polskie teksty błędów |
 | E-16 | P2 | Yes/No obok Tak/Nie; brak polskich znaków w dialogach admina | POTWIERDZONE | |
 | E-17 | — | niespójne kontrolki dla tych samych akcji | REDESIGN | |
 | E-18 | P2 | okna SSH o identycznym tytule; nieaktualne dane po zmianach w vaulcie | POTWIERDZONE | część (blokada admina) w S-03 |
@@ -120,3 +120,9 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-24 | P3 | klik w komórkę kopiuje jak sekret (czyszczony po 15 s); wyjątek w animacji | POTWIERDZONE | |
 | E-25 | P2 | multi-exec: „Duplikuj” ignorowane, aktywna = zawsze pierwsza sesja | POTWIERDZONE | |
 | E-26 | P3 | każdy znak w notatkach przebudowuje listę szpitali | POTWIERDZONE | |
+
+## Znalezione podczas napraw (spoza raportów audytorów)
+
+| ID | P | Znalezisko | Status | Commit / uwagi |
+|---|---|---|---|---|
+| X-01 | P0 | kolejka transferów SFTP po przełączeniu karty wysyłała pozostałe pliki przez połączenie nowej karty — na INNY serwer | NAPRAWIONE | pakiet SFTP — każda pozycja kolejki pamięta swoje połączenie; test + mutacja |

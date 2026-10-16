@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import queue as _queue
 import re
 import stat
@@ -3127,9 +3128,71 @@ class _SftpConnectWorker(QThread):
             self.error.emit(f"Błąd połączenia: {type(e).__name__}")
 
 
+def _friendly_sftp_error(text: str) -> str:
+    """What a paramiko/OS error means for the user (UX audit E-15, S-06)."""
+    low = (text or '').lower()
+    if any(s in low for s in ('socket is closed', 'connection dropped',
+                              'session not active', "has no attribute 'open_sftp'",
+                              'eof during negotiation', 'connection reset')):
+        return "połączenie z serwerem zostało przerwane"
+    if 'permission denied' in low or 'errno 13' in low:
+        return "brak uprawnień na serwerze"
+    if 'no such file' in low or 'errno 2' in low:
+        return "plik lub katalog nie istnieje"
+    if 'no space left' in low:
+        return "brak miejsca na dysku serwera"
+    return text
+
+
+def _listdir_attr_lenient(sftp, path: str):
+    """listdir_attr that survives file names which are not UTF-8.
+
+    paramiko decodes every name strictly, so ONE name written in CP1250 /
+    ISO-8859-2 on an older server made the whole directory unlistable (UX
+    audit S-04).  Same protocol exchange as paramiko's listdir_attr; a name
+    that does not decode is shown with U+FFFD.  Returns (entries, bad).
+    """
+    from paramiko.sftp import (CMD_OPENDIR, CMD_READDIR, CMD_HANDLE,
+                               CMD_NAME, CMD_CLOSE)
+    from paramiko.sftp_attr import SFTPAttributes
+    t, msg = sftp._request(CMD_OPENDIR, path)
+    if t != CMD_HANDLE:
+        raise IOError("Nie można otworzyć katalogu")
+    handle = msg.get_binary()
+    entries, bad = [], 0
+    try:
+        while True:
+            try:
+                t, msg = sftp._request(CMD_READDIR, handle)
+            except EOFError:
+                break
+            if t != CMD_NAME:
+                raise IOError("Nieoczekiwana odpowiedź serwera SFTP")
+            for _ in range(msg.get_int()):
+                raw = msg.get_string()
+                longname = msg.get_string()
+                try:
+                    name = raw.decode('utf-8')
+                except UnicodeDecodeError:
+                    name = raw.decode('utf-8', errors='replace')
+                    bad += 1
+                attr = SFTPAttributes._from_msg(
+                    msg, name, longname.decode('utf-8', errors='replace'))
+                if name not in ('.', '..'):
+                    entries.append(attr)
+    finally:
+        try:
+            sftp._request(CMD_CLOSE, handle)
+        except Exception:
+            pass
+    return entries, bad
+
+
 class _SftpListWorker(QThread):
     listing = pyqtSignal(str, list)
     error   = pyqtSignal(str)
+    #: Something the user should know about a listing that worked.
+    note    = pyqtSignal(str)
 
     def __init__(self, sftp, path):
         super().__init__()
@@ -3150,7 +3213,15 @@ class _SftpListWorker(QThread):
                     path = '/'.join(path.rstrip('/').split('/')[:-1]) or '/'
             except Exception:
                 pass  # stat failed — try listing anyway
-            entries = self._sftp.listdir_attr(path)
+            try:
+                entries = self._sftp.listdir_attr(path)
+            except UnicodeDecodeError:
+                entries, bad = _listdir_attr_lenient(self._sftp, path)
+                from ui.utils import plural
+                self.note.emit(
+                    f"Katalog zawiera {plural(bad, 'nazwę', 'nazwy', 'nazw')} "
+                    "w kodowaniu innym niż UTF-8 — pokazane z „�”; operacje "
+                    "na tych plikach mogą się nie udać.")
             result  = []
             for e in sorted(entries, key=lambda x: (
                 not stat.S_ISDIR(x.st_mode), x.filename.lower()
@@ -4184,6 +4255,13 @@ class SftpPanel(QWidget):
         # _on_listing can restore the view to where the user was looking.
         self._preserve_scroll_on_next_list: tuple[int, int] | None = None
         self._transfer_queue: list = []
+        # (name, reason) of failed transfers in the current queue, names not
+        # sent, and why (UX audit S-06): one summary at the end, not a
+        # modal per file.
+        self._transfer_failures: list = []
+        self._transfer_skipped: list = []
+        self._transfer_skip_reason = ''
+        self._transfer_last_msg = ''
         self._transfer_total_count = 0
         self._transfer_done_count = 0
         self._setup_ui()
@@ -4532,6 +4610,7 @@ class SftpPanel(QWidget):
         w = _SftpListWorker(self._sftp, path)
         w.listing.connect(lambda p, e, g=gen: self._on_listing(p, e, g))
         w.error.connect(lambda e, g=gen: self._on_listing_error(e, g))
+        w.note.connect(lambda text: self.status_msg.emit(text, False))
         w.start()
         self._workers.append(w)
 
@@ -4541,7 +4620,8 @@ class SftpPanel(QWidget):
         self._listing_active = False
         self._path_lbl.setText(self._path)
         self._end_path_edit()
-        self.status_msg.emit(f"SFTP: {msg}", True)
+        self.status_msg.emit(
+            f"Nie udało się wyświetlić katalogu: {_friendly_sftp_error(msg)}", True)
 
     def _on_listing(self, path: str, entries: list, gen: int | None = None):
         if gen is not None and gen != self._listing_gen:
@@ -4758,6 +4838,14 @@ class SftpPanel(QWidget):
         size     = data['size']
         if not new_name or new_name == original:
             self._close_rename_editor()
+            return
+        if '/' in new_name or new_name in ('.', '..'):
+            # "a/b" or "../x" would MOVE the file elsewhere (UX audit S-07).
+            self._close_rename_editor()
+            QMessageBox.warning(
+                self, "Zmiana nazwy",
+                "Nazwa nie może zawierać „/” ani być „.” lub „..”.\n"
+                "Do przenoszenia plików służy przeciąganie do katalogu.")
             return
         # Pre-check name collision (case-sensitive — POSIX SFTP servers are too).
         # The previous code optimistically renamed the row in the table and only
@@ -5151,10 +5239,7 @@ class SftpPanel(QWidget):
                     + "\n".join(repr(n) for n in skipped[:20]))
             if not queue:
                 return
-            self._transfer_queue = queue
-            self._transfer_total_count = len(queue)
-            self._transfer_done_count = 0
-            self._run_next_queued_transfer()
+            self._enqueue_transfers(queue)
 
     def _upload_browse(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Wybierz pliki do wgrania")
@@ -5265,11 +5350,7 @@ class SftpPanel(QWidget):
             remote, local, size = items[0]
             self._run_transfer('put', remote, local, size)
         else:
-            queue = [('put', r, l, s) for (r, l, s) in items]
-            self._transfer_queue = queue
-            self._transfer_total_count = len(queue)
-            self._transfer_done_count = 0
-            self._run_next_queued_transfer()
+            self._enqueue_transfers([('put', r, l, s) for (r, l, s) in items])
 
     def _ask_overwrite(self, conflict_paths: list[str]) -> str:
         """Modal for name conflicts (upload or move). Returns
@@ -5309,16 +5390,97 @@ class SftpPanel(QWidget):
         return 'cancel'
 
     def _run_transfer(self, mode, remote, local, size):
-        self._transfer_queue = []
-        self._transfer_total_count = 1
+        self._enqueue_transfers([(mode, remote, local, size)])
+
+    def _transfer_busy(self) -> bool:
+        w = self._active_transfer_worker
+        try:
+            return w is not None and w.isRunning()
+        except RuntimeError:
+            return False
+
+    def _enqueue_transfers(self, items) -> None:
+        """Queue (mode, remote, local, size) transfers on the CURRENT
+        connection.
+
+        Each item keeps the connection it was queued on: after a tab switch
+        the rest of a queue used to run through the new tab's connection —
+        another server.  A transfer requested while one runs joins the queue
+        (a dropped file used to wipe it silently, UX audit S-05).
+        """
+        owner = self._ssh_client
+        queued = [tuple(it) + (owner,) for it in items]
+        if self._transfer_busy():
+            self._transfer_queue.extend(queued)
+            self._transfer_total_count += len(queued)
+            from ui.utils import plural
+            self.status_msg.emit(
+                "Dodano do kolejki: " + plural(len(queued), 'plik', 'pliki', 'plików'),
+                False)
+            return
+        self._transfer_queue = queued
+        self._transfer_total_count = len(queued)
         self._transfer_done_count = 0
-        self._start_single_transfer(mode, remote, local, size)
+        self._transfer_failures = []
+        self._transfer_skipped = []
+        self._transfer_skip_reason = ''
+        self._run_next_queued_transfer()
 
     def _run_next_queued_transfer(self):
-        if not self._transfer_queue:
+        while self._transfer_queue:
+            mode, remote, local, size, owner = self._transfer_queue.pop(0)
+            if owner is not self._ssh_client:
+                self._transfer_skipped.append(posixpath.basename(remote))
+                self._transfer_skip_reason = (
+                    "widok przełączono na inne połączenie")
+                continue
+            self._start_single_transfer(mode, remote, local, size)
             return
-        mode, remote, local, size = self._transfer_queue.pop(0)
-        self._start_single_transfer(mode, remote, local, size)
+        self._finish_queue()
+
+    def _connection_lost(self) -> bool:
+        client = self._ssh_client
+        if client is None:
+            return True
+        try:
+            transport = client.get_transport()
+            return transport is None or not transport.is_active()
+        except Exception:
+            return True
+
+    def _finish_queue(self) -> None:
+        """One message for the whole queue (UX audit S-06)."""
+        from ui.utils import plural
+        self._transfer_finished_cleanup()
+        total, done = self._transfer_total_count, self._transfer_done_count
+        fails, skipped = self._transfer_failures, self._transfer_skipped
+        get = getattr(self, '_transfer_current_mode', 'get') == 'get'
+        if not fails and not skipped:
+            if total > 1:
+                verb = "Pobrano" if get else "Wgrano"
+                self.status_msg.emit(
+                    f"{verb} {plural(done, 'plik', 'pliki', 'plików')}", False)
+            elif self._transfer_last_msg:
+                self.status_msg.emit(self._transfer_last_msg, False)
+        else:
+            if total > 1:
+                lines = [f"Przesłano {done} z {plural(total, 'pliku', 'plików', 'plików')}."]
+            else:
+                lines = ["Transfer nie powiódł się."]
+            for name, why in fails[:10]:
+                lines.append(f"  • {name}: {why}")
+            if len(fails) > 10:
+                lines.append(f"  …+{len(fails) - 10} więcej")
+            if skipped:
+                names = ", ".join(skipped[:10]) + (
+                    f" …+{len(skipped) - 10}" if len(skipped) > 10 else "")
+                lines.append(f"Nie przesłano ({self._transfer_skip_reason}): {names}")
+            self.status_msg.emit("\n".join(lines), True)
+        self._transfer_failures, self._transfer_skipped = [], []
+        self._transfer_skip_reason = ''
+        self._transfer_last_msg = ''
+        if self._sftp is not None and not self._connection_lost():
+            self._list(self._path)
 
     def _start_single_transfer(self, mode, remote, local, size):
         self._transfer_current_mode   = mode
@@ -5367,30 +5529,20 @@ class SftpPanel(QWidget):
                 self._transfer_current_remote,
                 getattr(self, '_transfer_current_owner', None))
         self._transfer_done_count += 1
-        total = self._transfer_total_count
-        if self._transfer_queue:
-            self.status_msg.emit(msg, False)
-            self._run_next_queued_transfer()
-        else:
-            self._transfer_finished_cleanup()
-            if total > 1:
-                mode = getattr(self, '_transfer_current_mode', 'get')
-                verb = "Pobrano" if mode == 'get' else "Wgrano"
-                self.status_msg.emit(
-                    f"{verb} {_pl_pl(self._transfer_done_count, 'plik', 'pliki', 'plików')}",
-                    False)
-            else:
-                self.status_msg.emit(msg, False)
-            self._list(self._path)
+        self._transfer_last_msg = msg
+        self._run_next_queued_transfer()
 
     def _transfer_error(self, e: str):
-        if self._transfer_queue:
-            self.status_msg.emit(f"Transfer: {e}", True)
-            self._transfer_done_count += 1
-            self._run_next_queued_transfer()
-        else:
-            self._transfer_finished_cleanup()
-            self.status_msg.emit(f"Transfer: {e}", True)
+        name = posixpath.basename(getattr(self, '_transfer_current_remote', '') or '')
+        self._transfer_failures.append((name, _friendly_sftp_error(e)))
+        if self._transfer_queue and self._connection_lost():
+            # The link is gone: the rest cannot succeed — stop here instead
+            # of one error window per file (UX audit S-06).
+            self._transfer_skipped.extend(
+                posixpath.basename(it[1]) for it in self._transfer_queue)
+            self._transfer_skip_reason = "połączenie z serwerem zostało przerwane"
+            self._transfer_queue = []
+        self._run_next_queued_transfer()
 
     def _remote_exists(self, remote: str) -> bool:
         """Does `remote` exist?  Unknown counts as yes — the safe answer for
@@ -5408,6 +5560,7 @@ class SftpPanel(QWidget):
     def _transfer_cancelled(self, partial_file: str = None, remote_partial: str = None,
                             overwritten: str = None, owner=None):
         self._transfer_queue = []
+        self._transfer_failures, self._transfer_skipped = [], []
         self._transfer_finished_cleanup()
         if remote_partial and owner is not None and not self.bound_to(owner):
             # The panel is on another connection now (tab switched or the
@@ -7692,6 +7845,17 @@ class SshDialog(QDialog):
             "color: #6e7681; font-size: 10px; background: transparent;")
         self._search_count_lbl.setVisible(False)
         sbl.addWidget(self._search_count_lbl)
+        sbl.addSpacing(12)
+
+        # Short confirmations ("Zapisano na SFTP: …", "Pobrano 3 pliki") —
+        # they used to vanish unseen; errors still get a dialog (E-15).
+        self._notice_lbl = QLabel("")
+        self._notice_lbl.setStyleSheet(
+            "color: #3fb950; font-size: 11px; background: transparent;")
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(lambda: self._notice_lbl.setText(""))
+        sbl.addWidget(self._notice_lbl)
 
         sbl.addStretch()
 
@@ -8331,8 +8495,10 @@ class SshDialog(QDialog):
             return
         pane.term.feed(f"\x1b[31m✗ Błąd połączenia: {msg}\x1b[0m\r\n")
         pane.show_error(msg)
+        # The terminal already shows it, with R / Esc: no second, modal copy
+        # titled "SFTP" on top of that (UX audit V-12, E-15).
         if is_first:
-            self._status(f"Błąd połączenia: {msg}", err=True)
+            self._notice(f"Błąd połączenia: {msg}")
 
     # ── Auto-reconnect after an unexpected drop ───────────────────────────
     #
@@ -8697,8 +8863,19 @@ class SshDialog(QDialog):
         from PyQt6 import sip
         if sip.isdeleted(self):
             return              # a late report into a closed window (S-02)
-        if err and text:
-            QMessageBox.warning(self, "SFTP", text)
+        if not text:
+            return
+        if err:
+            QMessageBox.warning(self, "Pliki (SFTP)", text)
+        else:
+            self._notice(text)
+
+    def _notice(self, text: str) -> None:
+        """A short non-modal message in the status bar, gone after 6 s."""
+        first = text.splitlines()[0] if text else ""
+        self._notice_lbl.setText(first)
+        self._notice_lbl.setToolTip(text)
+        self._notice_timer.start(6000)
 
     def owner_window(self):
         ref = getattr(self, '_owner_ref', None)
