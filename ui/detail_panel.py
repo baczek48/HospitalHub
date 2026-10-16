@@ -128,6 +128,7 @@ class _DraggableTable(EmptyHint, QTableWidget):
 
 import sys
 import os
+import weakref
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import models
 import vpn_connect
@@ -149,6 +150,57 @@ from config import (load_column_widths, save_column_widths,
 # Session-level VPN profile cache (loaded once per app session)
 _vpn_session_profiles: list = []
 _vpn_session_loaded: bool = False
+
+# 2026-10-16 (owner's request): a VPN vault open in its own window lends its
+# profiles to the VPN button of the hospital windows — no second unlock while
+# it is open, and edits made there count at once.  Held weakly; when that
+# window is closed for good the button falls back to the vault unlocked here
+# (if any) or asks for one again.
+_vpn_window_source = None            # weakref to the VpnPanel
+_vpn_button_panels = weakref.WeakSet()
+
+
+def share_vpn_window(panel) -> None:
+    """`panel` (a VpnPanel) is open; None: the VPN window was closed."""
+    global _vpn_window_source
+    _vpn_window_source = weakref.ref(panel) if panel is not None else None
+    vpn_profiles_changed()
+
+
+def unshare_vpn_window(panel) -> None:
+    """The window of `panel` closes — stop lending it if it is the one."""
+    src = _vpn_window_source() if _vpn_window_source is not None else None
+    if src is panel:
+        share_vpn_window(None)
+
+
+def vpn_profiles_changed() -> None:
+    """Refresh the VPN button of every hospital window."""
+    for p in list(_vpn_button_panels):
+        try:
+            p._vpn_last_status = None
+            p._update_vpn_btn()
+        except RuntimeError:         # widget already deleted
+            pass
+
+
+def _window_vpn_profiles():
+    src = _vpn_window_source() if _vpn_window_source is not None else None
+    if src is None:
+        return None
+    try:
+        return list(src.get_profiles())
+    except RuntimeError:
+        return None
+
+
+def _session_vpn_profiles() -> list:
+    shared = _window_vpn_profiles()
+    return shared if shared is not None else _vpn_session_profiles
+
+
+def _vpn_available() -> bool:
+    return _vpn_session_loaded or _window_vpn_profiles() is not None
 
 # stretch_col: fills remaining space, pins Akcje to right edge
 # akcje_col: always ResizeToContents, not saved
@@ -594,6 +646,7 @@ class DetailPanel(QWidget):
         self._vpn_poll_timer.setInterval(2000)
         self._vpn_poll_timer.timeout.connect(self._poll_vpn_status)
         self._vpn_poll_timer.start()
+        _vpn_button_panels.add(self)
 
         content_layout.addLayout(header)
 
@@ -1475,10 +1528,11 @@ class DetailPanel(QWidget):
 
     def _vpn_profile_for_current(self):
         """Return matching VPN profile for current hospital (by name, case-insensitive), or None."""
-        if not self.current_hospital or not _vpn_session_profiles:
+        profiles = _session_vpn_profiles()
+        if not self.current_hospital or not profiles:
             return None
         name = self.current_hospital.name.strip().lower()
-        for p in _vpn_session_profiles:
+        for p in profiles:
             if p.name.strip().lower() == name:
                 return p
         return None
@@ -1488,7 +1542,7 @@ class DetailPanel(QWidget):
 
         In a thread (D-07); skipped while the window is hidden in the tray —
         nobody sees the button — and while the previous probe still runs."""
-        if not _vpn_session_loaded:
+        if not _vpn_available():
             return
         if not self.isVisible():
             return
@@ -1526,7 +1580,7 @@ class DetailPanel(QWidget):
         *this* profile is used and a fresh probe is asked for — the UI thread
         no longer queries the VPN client itself (D-07)."""
         profile = self._vpn_profile_for_current()
-        if not _vpn_session_loaded:
+        if not _vpn_available():
             # Not loaded yet — neutral grey
             self._vpn_btn.setStyleSheet(
                 "QToolButton { background: transparent; border: 1px solid #30363d;"
@@ -1596,8 +1650,7 @@ class DetailPanel(QWidget):
         return True
 
     def _on_vpn_btn_clicked(self):
-        global _vpn_session_loaded
-        if not _vpn_session_loaded:
+        if not _vpn_available():
             if not self._load_vpn_vault():
                 return
             self._update_vpn_btn()

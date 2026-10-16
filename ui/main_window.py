@@ -16,7 +16,7 @@ from vault_io import discard_backup, write_vault_atomic
 from config import (save_last_vault,
                     load_ssh_start_maximized, save_ssh_start_maximized,
                     load_hospital_sort_order, save_hospital_sort_order,
-                    load_theme, save_theme)
+                    load_theme, save_theme, save_personal_vpn_vault)
 from ui.detail_panel import DetailPanel
 from ui.vpn_panel import VpnPanel
 from ui.dialogs import (
@@ -127,6 +127,12 @@ class MainWindow(QMainWindow):
             self._vpn_panel = VpnPanel(self._hospitals)
             self._vpn_panel.data_changed.connect(self._on_data_changed)
             main_layout.addWidget(self._vpn_panel)
+            # The hospital windows' VPN button uses this vault while it is
+            # open — no separate unlock there (2026-10-16).
+            from ui import detail_panel as _dp
+            self._vpn_panel.data_changed.connect(_dp.vpn_profiles_changed)
+            _dp.share_vpn_window(self._vpn_panel)
+            save_personal_vpn_vault(self._vault_path)
             return
 
         # Modern slim scrollbars for the whole main vault (replaces the chunky
@@ -734,6 +740,9 @@ class MainWindow(QMainWindow):
     def destroy_cleanup(self):
         """Stop all background timers/workers before final destruction."""
         self._admin_lock_timer.stop()
+        if self._vpn_panel is not None:
+            from ui import detail_panel as _dp
+            _dp.unshare_vpn_window(self._vpn_panel)
         if self._vpn_panel and hasattr(self._vpn_panel, 'cleanup'):
             self._vpn_panel.cleanup()
         if self._detail_panel and hasattr(self._detail_panel, 'cleanup'):

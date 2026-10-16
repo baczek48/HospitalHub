@@ -607,3 +607,14 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   połączenie i per ścieżka zdalna — potwierdzone testami `test_sftp_edit_collisions.py`
   (133 PASS z `test_ssh_sftp_safety.py`).
 - **1916 PASS / 0 FAIL**. Build + instalator 22:26.
+
+### 2026-10-16 (noc) — okno VPN vault zasila przycisk VPN w oknie szpitali
+
+- Prośba właściciela: gdy vault VPN jest otwarty jako osobne okno, przycisk „VPN” w nagłówku
+  szpitala ma działać od razu. `detail_panel.share_vpn_window()` — otwarte okno VPN użycza
+  swoich profili (słaba referencja, czytane na żywo, odświeżane po `data_changed`); bez okna
+  odblokowania. Zamknięcie do zasobnika (X) nie odbiera profili; „Zamknij całkowicie”
+  (`destroy_cleanup`) odbiera — przycisk wraca do vaulta odblokowanego ręcznie (jeśli był) albo
+  do „wskaż vault”. Ścieżka vaulta VPN zapamiętywana jako osobisty VPN vault.
+- Logika połączenia (connect/disconnect/2FA) bez zmian.
+- **1921 PASS / 0 FAIL**; mutacja (bez `share_vpn_window`) → 4 FAIL. Build + instalator.
