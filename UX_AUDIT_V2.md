@@ -78,7 +78,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
 | V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
 | V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
-| V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | REDESIGN | 71C — stany puste |
+| V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | NAPRAWIONE | R3 — EmptyHint: tabele, lista szpitali (brak wyników / pusty vault / ukryte przez admina); kontrast VPN; „Nie połączono” w SFTP zostaje (to etykieta ścieżki) |
 | V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | NAPRAWIONE | R1 — przyciski danger |
 | V-17 | P3 | placeholder portu „22 (dom…” | NAPRAWIONE | pakiet dialogów |
 | V-18 | P3 | nagłówek SFTP „UPRAWNIENI” | NAPRAWIONE | pakiet okna SSH — „Prawa” |

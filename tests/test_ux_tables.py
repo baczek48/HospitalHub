@@ -101,3 +101,19 @@ def test_the_key_button_still_copies_the_password(panel, monkeypatch):
     btn = next(b for b in cell.findChildren(QPushButton) if b.text().startswith("🔑"))
     btn.click()
     assert copied == ["pw1"]
+
+
+def test_v15_empty_tables_and_lists_say_so(app, tmp_path):
+    import models
+    from ui.detail_panel import DetailPanel
+    from ui.main_window import MainWindow
+    h = models.Hospital(name="Pusty", machines=[models.Machine(ip="1.1.1.1", admin_only=True)])
+    p = DetailPanel()
+    p.show_hospital(h, [h])
+    assert "odblokuj tryb admina" in p._machines_table.empty_hint
+    assert p._db_table.empty_hint.startswith("Brak baz danych")
+    w = MainWindow(str(tmp_path / "x.vault"), "pw", [h])
+    w._search_edit.setText("nic-takiego")
+    assert w._hospital_list.empty_hint == "Brak wyników dla „nic-takiego”."
+    w._search_edit.setText("")
+    w._unsaved = False

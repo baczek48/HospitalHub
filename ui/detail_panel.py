@@ -100,7 +100,10 @@ class _HeaderMenuFilter(QObject):
         return False
 
 
-class _DraggableTable(QTableWidget):
+from ui.utils import EmptyHint  # noqa: E402 (needed before the class)
+
+
+class _DraggableTable(EmptyHint, QTableWidget):
     """QTableWidget with reliable row drag-and-drop via custom dropEvent."""
     rows_reordered = pyqtSignal(int, int)  # from_row, to_row
 
@@ -134,7 +137,7 @@ from crypto import decrypt
 from ui import theme
 from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard_copy
 from ui.thread_retire import retire_thread
-from ui.utils import ElidedLabel, confirm, plural
+from ui.utils import ElidedLabel, EmptyHint, confirm, plural
 from ui.style import FormStyled
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
@@ -942,6 +945,12 @@ class DetailPanel(QWidget):
     def _refresh_machines(self):
         self._machines_table.setRowCount(0)
         visible = self._visible_machines()
+        h = self.current_hospital
+        hidden = h is not None and len(h.machines) > len(visible)
+        self._machines_table.empty_hint = (
+            "Maszyny tego szpitala są ukryte — odblokuj tryb admina." if hidden
+            else "Brak maszyn — dodaj pierwszą przyciskiem „+ Dodaj maszynę”.")
+        self._machines_table.viewport().update()
         for i, machine in enumerate(visible):
             self._machines_table.insertRow(i)
 
@@ -1149,6 +1158,12 @@ class DetailPanel(QWidget):
     def _refresh_databases(self):
         self._db_table.setRowCount(0)
         visible = self._visible_databases()
+        h = self.current_hospital
+        hidden = h is not None and len(h.databases) > len(visible)
+        self._db_table.empty_hint = (
+            "Bazy tego szpitala są ukryte — odblokuj tryb admina." if hidden
+            else "Brak baz danych — dodaj pierwszą przyciskiem „+ Dodaj bazę danych”.")
+        self._db_table.viewport().update()
         for i, db in enumerate(visible):
             self._db_table.insertRow(i)
             texts = [db.host, db.port, db.name, db.db_type, db.note]

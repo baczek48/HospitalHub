@@ -85,3 +85,26 @@ def split_host_port(text: str) -> tuple[str, str]:
         if host and port.isdigit():
             return host, port
     return text, ""
+
+
+class EmptyHint:
+    """Mixin for item views (put before the Qt class): a centred, grey line
+    while the view has no rows — an empty frame looked like a failed load
+    (UX audit V-15, REDESIGN_V2.md R3).  Set ``empty_hint`` and call
+    ``viewport().update()``."""
+
+    empty_hint = ""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        model = self.model()
+        if not self.empty_hint or model is None or model.rowCount() > 0:
+            return
+        from PyQt6.QtGui import QColor, QPainter
+        from ui import theme
+        painter = QPainter(self.viewport())
+        painter.setPen(QColor(theme.paint("#8b949e")))
+        painter.drawText(self.viewport().rect().adjusted(12, 8, -12, -8),
+                         Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                         self.empty_hint)
+        painter.end()

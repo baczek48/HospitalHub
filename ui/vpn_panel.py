@@ -911,7 +911,7 @@ class VpnPanel(QWidget):
         if not self._profiles:
             lbl = QLabel("Brak profili VPN.\nDodaj nowy przyciskiem powyżej.")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("color: #484f58; font-size: 12px; padding: 30px;")
+            lbl.setStyleSheet("color: #8b949e; font-size: 12px; padding: 30px;")   # V-15: was ~2:1
             self._cards_layout.insertWidget(0, lbl)
             return
 

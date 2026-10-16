@@ -23,7 +23,11 @@ from ui.dialogs import (
     HospitalDialog, ChangePasswordDialog,
     AdminSetupDialog, AdminUnlockDialog,
 )
-from ui.utils import confirm
+from ui.utils import EmptyHint, confirm
+
+class _HospitalList(EmptyHint, QListWidget):
+    """The hospital list, with a line for "nothing here" (V-15)."""
+
 
 _ADMIN_LOCK_TIMEOUT_MS = 5 * 60 * 1000  # auto-lock after 5 minutes
 
@@ -175,7 +179,7 @@ class MainWindow(QMainWindow):
         self._search_edit.installEventFilter(self)
         left_layout.addWidget(self._search_edit)
 
-        self._hospital_list = QListWidget()
+        self._hospital_list = _HospitalList()
         self._hospital_list.setStyleSheet("""
             QListWidget {
                 background: #0d1117; border: 1px solid #30363d;
@@ -371,6 +375,11 @@ class MainWindow(QMainWindow):
             self._hospital_list.item(i).text() == name
             and self._hospital_list.item(i).data(Qt.ItemDataRole.UserRole) == hit
             for i, (name, hit) in enumerate(wanted)))
+        query = self._search_edit.text().strip()
+        self._hospital_list.empty_hint = (
+            f"Brak wyników dla „{query}”." if query
+            else "Vault jest pusty — dodaj szpital przyciskiem poniżej.")
+        self._hospital_list.viewport().update()
         if not same:
             # Rebuilt only when names, order or matches changed — not on
             # every character typed in the notes (E-26).
