@@ -69,17 +69,17 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-02 | P1 | okno VPN: długie nazwy wypychają Połącz/Login/Hasło poza okno | NAPRAWIONE | pakiet okna głównego — ElidedLabel, bez poziomego paska |
 | V-03 | P2 | nagłówek szpitala ucięty w pół litery; licznik „ukrytych” znika | NAPRAWIONE | pakiet okna głównego — elipsa + tooltip; plakietka chowa się na wąskim panelu |
 | V-04 | P2 | lista szpitali: brak elipsy, poziomy pasek, brak tooltipa | NAPRAWIONE | pakiet okna głównego |
-| V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | POTWIERDZONE | |
+| V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | REDESIGN | 71C — tabela maszyn |
 | V-07 | P2 | odmiana liczebników („1 ukrytych”, „22 maszyn”, „Pobrano 2 plików”, „tunel(i)”) | NAPRAWIONE | `44814c5` — wspólne plural() |
 | V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | NAPRAWIONE | pakiet dialogów — test pilnuje braku ASCII-polszczyzny w ui/ |
 | V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | NAPRAWIONE | = E-16 |
 | V-10 | P2 | jasny motyw: wyłączony „Wgraj” = czarny prostokąt | NAPRAWIONE | pakiet okna SSH |
-| V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | POTWIERDZONE | |
+| V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | REDESIGN | 71C — ikony |
 | V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
 | V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
 | V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
-| V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | POTWIERDZONE | |
-| V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | POTWIERDZONE | |
+| V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | REDESIGN | 71C — stany puste |
+| V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | REDESIGN | 71C — wspólne style przycisków |
 | V-17 | P3 | placeholder portu „22 (dom…” | NAPRAWIONE | pakiet dialogów |
 | V-18 | P3 | nagłówek SFTP „UPRAWNIENI” | NAPRAWIONE | pakiet okna SSH — „Prawa” |
 | V-19 | P2 | okno VPN: rozmiar dryfuje po edycji, min. 640 zostaje | NAPRAWIONE | pakiet okna głównego |
@@ -88,7 +88,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-22 | P3 | Ustawienia VPN: lista ścieżek zapada się | RĘCZNY TEST | |
 | V-23 | P2 | domyślne rozmiary okien nie mieszczą się na 1366×768 @150% | RĘCZNY TEST | |
 | V-24 | P3 | drobne teksty („tutaj aby”, „<-  Wróć”) | NAPRAWIONE | pakiet okna SSH |
-| V-25 | P3 | nagłówki tabeli maszyn | POTWIERDZONE | |
+| V-25 | P3 | nagłówki tabeli maszyn | REDESIGN | 71C — tabela maszyn |
 
 ## Ergonomia (A3)
 
@@ -101,7 +101,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-05 | P0 | prawy klik wkleja wieloliniowy schowek (także do wszystkich sesji multi-exec) | NAPRAWIONE | = T-18 |
 | E-06 | P1 | duplikat nazwy szpitala; po dodaniu zaznaczony STARY | NAPRAWIONE | pakiet okna głównego — ostrzeżenie (domyślnie Anuluj), zaznaczenie po obiekcie |
 | E-07 | P0 | potwierdzenia usunięcia z domyślnym „Tak/Yes” — Enter kasuje szpital | NAPRAWIONE | `44814c5` — domyślnie Nie/Anuluj (Enter i Esc), liczby w pytaniu o szpital |
-| E-08 | P1 | przycisk z loginem kopiuje hasło; loginu nie da się skopiować | POTWIERDZONE | |
+| E-08 | P1 | przycisk z loginem kopiuje hasło; loginu nie da się skopiować | REDESIGN | 71C — tabela maszyn (kopiuj login/hasło) |
 | E-09 | P2 | tylko pierwsze poświadczenie dostępne z widoku | REDESIGN | |
 | E-10 | P2 | wyszukiwarka tylko po nazwie szpitala; Enter/↓ nic; filtr gubi zaznaczenie | NAPRAWIONE | pakiet okna głównego — po IP/nazwie/opisie maszyny i bazie, Enter/↓, powrót zaznaczenia |
 | E-11 | P2 | brak Delete/F2/Enter/F5 na listach i w SFTP | NAPRAWIONE | pakiet okna SSH — SFTP: Enter, Backspace, F2, Delete, F5 (lista szpitali: bez zmian, zob. redesign) |
@@ -116,9 +116,9 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-20 | P2 | VPN w nagłówku: pierwszy klik tylko wczytuje vault; status synchronicznie | NIEROZWIĄZANE | dotyka legacy VPN (niezmiennik) |
 | E-21 | P2 | pierwsze RDP: synchroniczne PowerShell bez informacji zwrotnej | RĘCZNY TEST | |
 | E-22 | P2 | SFTP: „Usuń” na jednym, „Pobierz” na zaznaczeniu | NAPRAWIONE | pakiet okna SSH — pozycja menu nazywa usuwany plik |
-| E-23 | P2 | VPN: „+ Dodaj” tworzy profil od razu; „Wróć” zostawia śmieć; Esc nie wraca | POTWIERDZONE | |
+| E-23 | P2 | VPN: „+ Dodaj” tworzy profil od razu; „Wróć” zostawia śmieć; Esc nie wraca | NAPRAWIONE | nietknięty nowy profil znika przy „Wróć”, Esc = Wróć |
 | E-24 | P3 | klik w komórkę kopiuje jak sekret (czyszczony po 15 s); wyjątek w animacji | NAPRAWIONE | pakiet okna głównego — animacja odporna na odświeżenie tabeli (kopiowanie IP jako sekret: bez zmian, decyzja w redesignie) |
-| E-25 | P2 | multi-exec: „Duplikuj” ignorowane, aktywna = zawsze pierwsza sesja | POTWIERDZONE | |
+| E-25 | P2 | multi-exec: „Duplikuj” ignorowane, aktywna = zawsze pierwsza sesja | NAPRAWIONE | „Duplikuj” wyszarzone w multi-exec; aktywna sesja = pierwsza: REDESIGN (model multi-exec) |
 | E-26 | P3 | każdy znak w notatkach przebudowuje listę szpitali | NAPRAWIONE | pakiet okna głównego |
 
 ## Znalezione podczas napraw (spoza raportów audytorów)

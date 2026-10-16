@@ -147,3 +147,20 @@ def test_v19_entering_and_leaving_edit_keeps_a_shrinkable_window(app):
     VpnPanel._resize_window(fake, 420, 700)      # back to the list
     assert host.width() == 420 and host.height() == 700
     assert host.minimumHeight() == 640 and host.minimumWidth() == 360
+
+
+def test_e23_add_then_back_leaves_no_empty_profile(app, monkeypatch):
+    import models
+    from ui.vpn_panel import VpnPanel
+    # Status polling asks the real VPN clients — not in a test.
+    monkeypatch.setattr(VpnPanel, "_poll_status", lambda self: None)
+    p = VpnPanel([models.VpnProfile(name="P")])
+    p._add_profile()
+    assert len(p._profiles) == 2
+    p._exit_edit()
+    assert [x.name for x in p._profiles] == ["P"]
+    p._add_profile()
+    p._name_edit.setText("Szpital X")
+    p._exit_edit()
+    assert [x.name for x in p._profiles] == ["P", "Szpital X"]
+    p.cleanup()

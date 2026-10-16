@@ -8143,6 +8143,10 @@ class SshDialog(QDialog):
             "QMenu::separator { height:1px; background:#2a2d3a; margin:4px 10px; }"
         )
         act_dup = menu.addAction("Duplikuj")
+        if self._multiexec:
+            # Not available in multi-exec — greyed out, not silently ignored (E-25).
+            act_dup.setEnabled(False)
+            act_dup.setText("Duplikuj (niedostępne w trybie Multi-exec)")
         menu.addSeparator()
         act_close = menu.addAction("Zamknij")
         chosen = menu.exec(tab_bar.mapToGlobal(pos))

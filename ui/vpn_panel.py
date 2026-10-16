@@ -1448,6 +1448,9 @@ class VpnPanel(QWidget):
             return
         p = models.VpnProfile(name="Nowy profil VPN")
         self._profiles.append(p)
+        # Left untouched, it goes again on "Wróć" (UX audit E-23).
+        from dataclasses import asdict
+        self._fresh_profile = (p, asdict(p))
         self._enter_edit(len(self._profiles) - 1)
         self._name_edit.selectAll()
         self.data_changed.emit()
@@ -1480,10 +1483,28 @@ class VpnPanel(QWidget):
         self._name_edit.setFocus()
 
     def _exit_edit(self):
+        fresh = getattr(self, '_fresh_profile', None)
+        self._fresh_profile = None
+        if fresh is not None:
+            from dataclasses import asdict
+            p, pristine = fresh
+            if asdict(p) == pristine and p in self._profiles:
+                # "+ Dodaj" then "Wróć" without typing anything: no empty
+                # "Nowy profil VPN" left behind.
+                self._profiles.remove(p)
+                self.data_changed.emit()
         self._edit_idx = -1
         self._rebuild_cards()
         self._stack.setCurrentIndex(0)
         self._resize_window(*_LIST_SIZE)
+
+    def keyPressEvent(self, event):
+        # Escape on the edit page = "Wróć" (E-23).
+        if event.key() == Qt.Key.Key_Escape and self._stack.currentIndex() == 1:
+            self._exit_edit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _load_detail(self):
         self._updating = True
