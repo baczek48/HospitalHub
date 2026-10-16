@@ -556,3 +556,20 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   `vpn_log.txt`). Legacy `vpn_connect.py` nietknięty.
 - Mutacje: cofnięcie poprawek okna SSH i szerokości → 2 FAIL. **1877 PASS / 0 FAIL.** Build exe +
   instalator 17:10. Smoke startu exe nie wykonany — działa zainstalowana kopia użytkownika.
+
+### 2026-10-16 (wieczór, cd.) — okno SSH po powrocie z minimalizacji, limit ponownych prób
+
+- **Zmaksymalizowane okno SSH po powrocie z minimalizacji wystawało dołem za ekran** —
+  odtworzone na prawdziwym pulpicie (Win32 SC_MINIMIZE/SC_RESTORE, pomiar `GetClientRect`):
+  Windows sam przywraca okno zmaksymalizowane, a nasz `changeEvent` dodatkowo wołał
+  `setGeometry(availableGeometry)`; Qt miał potem geometrię (0,0,1920,1032), a rzeczywisty
+  obszar klienta (0,23,1920,1009) — treść 23 px poza ekranem. Teraz okno, które wróciło
+  zmaksymalizowane na swoim monitorze, zostaje w spokoju (`_restore_maximized`); po poprawce
+  Qt = klient (0,23,1920,1009).
+- **Auto-reconnect: maks. 3 próby** (prośba właściciela), potem karta „Brak połączenia z …”
+  z klawiszami **R** (kolejna runda, przewijanie zachowane) / **Esc** (zamknij kartę). Próby
+  w jednej nadpisywanej linii; po powrocie zostaje „─── Przerwa w połączeniu od–do” i
+  „Połączono z …”. Nowa karta błędu (ramka, tytuł, błąd, podpowiedź, klawisze) także dla
+  pierwszego nieudanego połączenia. Wiersze do podmiany szukane po treści (zmiana rozmiaru
+  okna w trakcie nie psuje ekranu — test), wszystko dopasowane do szerokości terminala.
+- Mutacja (limit 1000) → 4 FAIL. **1891 PASS / 0 FAIL** (dwa przebiegi). Build 18:0x.

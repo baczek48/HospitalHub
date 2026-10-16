@@ -54,6 +54,8 @@ izolacji. Każde trafienie w prawdziwy system = test FAIL (lub sesja FAIL, gdy p
 | Wydajność: zapis vaulta bez zamrożenia, 8 sesji SSH × godzina | pomiar na maszynie | ręcznie |
 | **2026-10-16:** jedno okno SSH na szpital (karta zamiast nowego okna), wyrównane przyciski akcji niezależnie od loginu | `test_ssh_one_window.py` | regression | zrzut offscreen przed/po |
 | **2026-10-16:** log VPN działań i błędów (opcja w ⚙ Ustawienia VPN): domyślnie wyłączony, bez haseł/loginów, maskowanie serwerów, rotacja 1 MB × 4, ślady i wyjątki w logu, paczka ZIP | `test_vpn_actionlog.py` | regression, security | nie |
+| **2026-10-16:** auto-reconnect SSH: maks. 3 próby, potem karta R (nowa runda, przewijanie zachowane) / Esc; próby w jednej linii, po powrocie „Przerwa w połączeniu od–do”; karta i linie dopasowane do szerokości, wiersze szukane po treści (odporność na zmianę rozmiaru) | `test_ssh_reconnect_limit.py` (fałszywy serwer SSH w procesie) | regression | zrzuty offscreen 3 stanów |
+| **2026-10-16:** okno SSH zmaksymalizowane → zminimalizowane → przywrócone: geometria Qt = rzeczywisty obszar klienta | `test_ssh_window_restore.py` + pomiar na pulpicie (Win32) | regression | zmierzone na prawdziwym oknie |
 | **Etap 71:** tmux 3.2+ na prawdziwym serwerze (panele, `seq 1 500`, pasek statusu, `mouse on`, detach/attach), vim/htop/mc/less; Alt+litera, Shift+Tab, AltGr (ą, ę, @) na polskiej klawiaturze | prawdziwy serwer, klawiatura Windows | ręcznie |
 | **Etap 71:** zerwanie VPN/sieci w trakcie sesji SSH → auto-reconnect, edycja pliku w edytorze przez zerwanie | sieć | ręcznie |
 | **Etap 71:** wygląd na prawdziwym ekranie: 1366×768 przy 125/150 %, 4K przy 200 %, emoji/ikony Win10 vs Win11, „!” w banerze terminala | ekran, DirectWrite | ręcznie |

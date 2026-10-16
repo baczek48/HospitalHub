@@ -3,7 +3,7 @@
 > Aktualizowane po każdym checkpoincie. Plan: `ROADMAP_V2.md`. Historia: `EXECUTION_LOG.md`.
 > Gotowość: `RELEASE_READINESS_V2.md`. Testy: `TEST_MATRIX_V2.md`.
 
-**Ostatnia aktualizacja:** 2026-10-16 (Etap 71 UX) · **Testy:** 1877 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
+**Ostatnia aktualizacja:** 2026-10-16 (Etap 71 UX) · **Testy:** 1891 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
 (`py -3.13 -m pytest tests -q -p no:cacheprovider`) · **Build:** exe + instalator 2026-10-15 20:05,
 cykl instalacja → start → aktualizacja → deinstalacja (per-user, bez UAC) PASS
 
@@ -63,7 +63,7 @@ instalator 2026-10-16 (po przeglądzie). Czeka na użytkownika: ręczna weryfika
 
 1. Przeczytaj ten plik, potem `RELEASE_READINESS_V2.md`.
 2. Sprawdź niezmienniki (flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, sha `vpn_connect.py`,
-   V1 nietknięte), `git -C C:/claude/hospital_hub_v2 status`, uruchom testy — oczekiwane 1877 PASS.
+   V1 nietknięte), `git -C C:/claude/hospital_hub_v2 status`, uruchom testy — oczekiwane 1891 PASS.
 3. Zapytaj o G1b i o G10.
 4. Przed szerokimi zmianami: commit w repo V2 (a dodatkowo migawka `.tgz` + dopisanie do `SHA256SUMS`).
 5. Po zmianach: testy, build (`build_v2.bat` — buduje też instalator), smoke startu exe offscreen,

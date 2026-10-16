@@ -7371,19 +7371,24 @@ class _TerminalPane(QWidget):
         self.term._scroll_offset = new_offset
         self.term.update()
 
-    def show_error(self, msg: str):
-        """Print styled error block into the terminal and enable R/Esc intercept."""
+    def show_error(self, msg: str, title: str = "Połączenie nieudane",
+                   hint: str = "") -> None:
+        """Print the error card into the terminal and enable the R/Esc
+        intercept.  Remembers how many lines it took (`_error_lines`), so a
+        retry can take it off the screen again."""
         self._error_mode = True
-        self.term.feed(
-            f"\r\n"
-            f"\x1b[31m  ╔══════════════════════════════════════╗\x1b[0m\r\n"
-            f"\x1b[31m  ║   !  POŁĄCZENIE NIEUDANE             ║\x1b[0m\r\n"
-            f"\x1b[31m  ╚══════════════════════════════════════╝\x1b[0m\r\n"
-            f"\x1b[90m  {msg}\x1b[0m\r\n"
-            f"\r\n"
-            f"  \x1b[97;44m R \x1b[0m \x1b[97m Połącz ponownie\x1b[0m"
-            f"     \x1b[97;100m Esc \x1b[0m \x1b[90m Zamknij\x1b[0m\r\n"
-        )
+        self.term.feed(_error_card(title, msg, hint, self.term.terminal_size()[0]))
+
+    def clear_error(self) -> None:
+        """Remove the card printed by show_error — from the blank row above
+        its top border to the end of the screen — and leave the intercept."""
+        if self._error_mode:
+            y = _find_row(self.term, lambda t: t.lstrip().startswith("╭"))
+            if y is not None:
+                if y > 0 and not _screen_row_text(self.term, y - 1).strip():
+                    y -= 1
+                self.term.feed(f"\x1b[{y + 1};1H\x1b[J")
+        self._error_mode = False
 
     def show_terminal(self):
         """Disable error intercept (terminal resumes normal input)."""
@@ -7405,11 +7410,76 @@ class _TerminalPane(QWidget):
     close_requested = pyqtSignal()
 
 
+def _screen_row_text(term, y: int) -> str:
+    row = term._screen.buffer[y]
+    return "".join(row[x].data for x in range(term._screen.columns))
+
+
+def _find_row(term, match) -> 'int | None':
+    """The lowest visible row whose text satisfies `match` (None: gone —
+    scrolled off or overwritten).  Rows are found by what they say, not by
+    counting back from the cursor: a resize or a scroll in between would
+    otherwise make the rewrite land on someone else's line."""
+    term.flush_now()
+    for y in range(term._screen.lines - 1, -1, -1):
+        if match(_screen_row_text(term, y)):
+            return y
+    return None
+
+
+def _fit(text: str, cols: int) -> str:
+    """One terminal row: lines that wrapped would throw off the in-place
+    rewrites (cursor-up counts rows, not lines)."""
+    limit = max(8, cols - 1)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _error_card(title: str, msg: str, hint: str, cols: int) -> str:
+    """The "connection failed" card: a rounded frame with the title, the
+    error and a hint, then the two keys as caps.  Width follows the
+    terminal (up to 72 columns) and every row fits in it — a wrapped row
+    would break clear_error(), which counts rows."""
+    import textwrap
+    indent = 2 if cols >= 40 else 0
+    width = max(16, min(72, cols - indent - 1))
+    inner = width - 4
+    pad = " " * indent
+    border, reset = "\x1b[38;5;167m", "\x1b[0m"
+    lines = [("\x1b[1;38;5;210m", part)
+             for part in textwrap.wrap("●  " + title, inner) or [""]]
+    lines.append(("", ""))
+    for para in msg.split("\n"):
+        for part in textwrap.wrap(para, inner) or [""]:
+            lines.append(("\x1b[38;5;250m", part))
+    if hint:
+        for part in textwrap.wrap(hint, inner):
+            lines.append(("\x1b[38;5;244m", part))
+    out = ["\r\n", f"{pad}{border}╭{'─' * (width - 2)}╮{reset}\r\n"]
+    for color, text in lines:
+        out.append(f"{pad}{border}│{reset} {color}{text.ljust(inner)}{reset} "
+                   f"{border}│{reset}\r\n")
+    out.append(f"{pad}{border}╰{'─' * (width - 2)}╯{reset}\r\n")
+    key_r = f"\x1b[1;38;5;231;48;5;25m  R  {reset} \x1b[38;5;252mPołącz ponownie{reset}"
+    key_esc = f"\x1b[1;38;5;231;48;5;240m Esc {reset} \x1b[38;5;246mZamknij kartę{reset}"
+    out.append("\r\n")
+    if cols >= 52:          # both keys on one row: 3 + 21 + 6 + 19 columns
+        out.append(f" {pad}{key_r}      {key_esc}\r\n")
+    else:
+        out.append(f" {pad}{key_r}\r\n {pad}{key_esc}\r\n")
+    return "".join(out)
+
+
+#: Automatic reconnect attempts after a dropped link before the tab stops
+#: and offers R (try again) / Esc (close) — a VPN that is gone stays gone.
+_AUTO_RECONNECT_TRIES = 3
+
+
 class _Session:
     """One SSH session: terminal pane + worker + optional SFTP connection."""
     __slots__ = ('pane', 'worker', 'label', 'sftp', 'sftp_client', 'sftp_path',
                  'sftp_history', 'stats_worker', 'last_stats', 'has_unread',
-                 'reconnecting', 'reconnect_attempts')
+                 'reconnecting', 'reconnect_attempts', 'reconnect_exhausted',
+                 'reconnect_line', 'dropped_at')
 
     def __init__(self, pane: _TerminalPane, worker: '_SshWorker', label: str):
         self.pane         = pane
@@ -7424,6 +7494,9 @@ class _Session:
         self.has_unread   = False              # set when output arrives on inactive tab
         self.reconnecting = False              # auto-reconnect loop active after a drop
         self.reconnect_attempts = 0            # consecutive failed reconnects (backoff)
+        self.reconnect_exhausted = False       # gave up after _AUTO_RECONNECT_TRIES; R restarts
+        self.reconnect_line = False            # the one-line attempt status is on screen
+        self.dropped_at = ''                   # HH:MM:SS of the drop, for the banner
 
     @property
     def term(self) -> 'TerminalWidget':
@@ -8078,6 +8151,22 @@ class SshDialog(QDialog):
                          | Qt.WindowState.WindowMaximized)):
             self._saved_geometry = self.saveGeometry()
 
+    def _restore_maximized(self, scr) -> None:
+        """Back from minimized, it was maximized before.
+
+        Windows itself brings such a window back maximized.  setGeometry() on
+        that window desynced Qt from the real client area (measured: Qt
+        0…1032, real 23…1032 below the title bar), so the bottom of the
+        content sat under the screen edge.  Only a window that came back
+        un-maximized or on another monitor is moved — while normal."""
+        if self.isMaximized() and (scr is None or self.screen() is scr):
+            return
+        if self.isMaximized():
+            self.showNormal()
+        if scr is not None:
+            self.move(scr.availableGeometry().topLeft())
+        self.showMaximized()
+
     def changeEvent(self, event):
         if event.type() == event.Type.ActivationChange and self.isActiveWindow():
             self._activated_seq = next(SshDialog._activations)
@@ -8103,12 +8192,8 @@ class SshDialog(QDialog):
                 self._is_minimized = False
                 if self._was_maximized:
                     target_screen = getattr(self, '_pre_minimize_screen', None)
-                    def _restore_maximized(scr=target_screen):
-                        if scr is not None:
-                            geo = scr.availableGeometry()
-                            self.setGeometry(geo)
-                        self.showMaximized()
-                    QTimer.singleShot(0, _restore_maximized)
+                    QTimer.singleShot(
+                        0, lambda scr=target_screen: self._restore_maximized(scr))
                 elif getattr(self, '_saved_geo_rect', None) is not None:
                     QTimer.singleShot(0,
                         lambda g=self._saved_geo_rect: self.setGeometry(g))
@@ -8160,7 +8245,7 @@ class SshDialog(QDialog):
             lambda c, r, s=session: self._resize_pty_worker(s.worker, c, r))
 
         pane.retry_requested.connect(
-            lambda s=session: self._retry_session(s))
+            lambda s=session: self._on_retry_key(s))
         pane.close_requested.connect(
             lambda s=session: self._close_session_by_ref(s))
 
@@ -8607,8 +8692,7 @@ class SshDialog(QDialog):
         worker.done.connect(lambda w=worker: self._auto_close_session(w))
         # Overwrite "Łączenie z ip…" line with success message
         worker.connected.connect(
-            lambda t=term, i=ip: t.feed(
-                f"\r\x1b[A\x1b[2K\x1b[32mPołączono z {i}\x1b[0m\r\n"))
+            lambda t=term, i=ip, s=session: self._show_connected(t, i, s))
         if session is not None:
             # Re-send correct PTY size after channel is open — terminal_size()
             # called before layout returns 80x24, which may be dropped if the
@@ -8623,6 +8707,15 @@ class SshDialog(QDialog):
         worker.error.connect(
             lambda e, p=pane, f=is_first, s=session: self._on_session_error(e, p, f, s))
 
+    def _show_connected(self, term, ip: str, session) -> None:
+        """Turn the "Łączenie…" line into "Połączono z …".  After a drop it
+        is the attempt line under the banner, found by its text."""
+        done = f"\x1b[32mPołączono z {ip}\x1b[0m"
+        if session is not None and session.reconnecting and session.reconnect_line:
+            if self._replace_status_row(session, done):
+                return
+        term.feed(f"\r\x1b[A\x1b[2K{done}\r\n")
+
     def _on_session_error(self, msg: str, pane: _TerminalPane, is_first: bool,
                           session: '_Session | None' = None):
         # If this fired while auto-reconnecting after a drop, don't show the
@@ -8634,15 +8727,30 @@ class SshDialog(QDialog):
             if ('autentykacj' in low or 'hasł' in low
                     or ('host' in low and 'klucz' in low)):
                 session.reconnecting = False
-                pane.term.feed(f"\x1b[31m✗ {msg}\x1b[0m\r\n")
-                pane.show_error(msg)
+                self._reconnect_status(session, None)
+                pane.show_error(msg, title="Logowanie odrzucone")
                 return
-            pane.term.feed(
-                f"\x1b[90m  …próba nieudana ({msg}) — ponawiam\x1b[0m\r\n")
+            if session.reconnect_attempts >= _AUTO_RECONNECT_TRIES:
+                # VPN gone or host down for good: stop knocking and let the
+                # user choose — R starts another round, Esc closes the tab.
+                session.reconnecting = False
+                session.reconnect_exhausted = True
+                self._reconnect_status(session, None)
+                from ui.utils import plural
+                tries = plural(_AUTO_RECONNECT_TRIES, 'próba', 'próby', 'prób')
+                pane.show_error(
+                    f"{tries} ponownego połączenia bez powodzenia.\n"
+                    f"Ostatni błąd: {msg}",
+                    title=f"Brak połączenia z {session.worker._host}",
+                    hint="Sprawdź, czy VPN i sieć działają.")
+                return
+            self._reconnect_status(
+                session, f"Próba {session.reconnect_attempts}/"
+                f"{_AUTO_RECONNECT_TRIES} nieudana — ponawiam…")
             self._schedule_reconnect(session)
             return
-        pane.term.feed(f"\x1b[31m✗ Błąd połączenia: {msg}\x1b[0m\r\n")
-        pane.show_error(msg)
+        pane.show_error(msg, title=f"Nie udało się połączyć z "
+                                   f"{session.worker._host if session else ''}".strip())
         # The terminal already shows it, with R / Esc: no second, modal copy
         # titled "SFTP" on top of that (UX audit V-12, E-15).
         if is_first:
@@ -8652,7 +8760,8 @@ class SshDialog(QDialog):
     #
     # Goal: a connection that dies on its own (idle NAT/firewall timeout,
     # network blip, VPN flap) must NOT kill the tab or demand a manual retry.
-    # The tab silently keeps reconnecting until the user closes it himself.
+    # The tab reconnects by itself — _AUTO_RECONNECT_TRIES times, then it
+    # stops and offers R (another round) / Esc (close the tab).
 
     def _on_session_dropped(self, session: '_Session'):
         if session not in self._sessions or session.reconnecting:
@@ -8669,11 +8778,52 @@ class SshDialog(QDialog):
         # screen and scroll region, hidden cursor, app keypad, mouse
         # reporting) must not carry over into the new shell (T-20).
         session.term.feed_discontinuity()
+        session.dropped_at = ts
+        session.reconnect_line = False
+        banner = _fit(f"─── Połączenie utracone [{ts}]", session.term.terminal_size()[0])
         session.term.feed(
-            _TERM_SOFT_RESET
-            + f"\r\n\x1b[33m─── Połączenie utracone [{ts}] — automatyczne "
-            f"ponawianie…\x1b[0m\r\n")
+            _TERM_SOFT_RESET + f"\r\n\x1b[33m{banner}\x1b[0m\r\n")
         self._schedule_reconnect(session)
+
+    def _reconnect_status(self, session: '_Session', text) -> None:
+        """The single line under the drop banner that says which attempt is
+        running — rewritten in place, never a growing list; None removes it."""
+        if text is None:
+            self._replace_status_row(session, None)
+            session.reconnect_line = False
+            return
+        line = f"\x1b[38;5;244m{_fit(text, session.term.terminal_size()[0])}\x1b[0m"
+        if not (session.reconnect_line and self._replace_status_row(session, line)):
+            session.term.feed(line + "\r\n")
+        session.reconnect_line = True
+
+    @staticmethod
+    def _replace_status_row(session: '_Session', ansi_text) -> bool:
+        """Rewrite (or, with None, blank) the attempt line and leave the
+        cursor at the start of the row after it.  False: not on screen."""
+        y = _find_row(session.term, lambda t: t.startswith(
+            ("Ponowne łączenie z ", "Próba ")))
+        if y is None:
+            return False
+        if ansi_text is None:
+            session.term.feed(f"\x1b[{y + 1};1H\x1b[2K")
+        else:
+            session.term.feed(f"\x1b[{y + 1};1H\x1b[2K{ansi_text}\r\n")
+        return True
+
+    def _on_retry_key(self, session: '_Session'):
+        """R on the error block.  After a dropped link gave up: another round
+        of automatic attempts, keeping the scrollback; otherwise the plain
+        manual retry (fresh screen)."""
+        if session.reconnect_exhausted:
+            session.reconnect_exhausted = False
+            session.reconnecting = True
+            session.reconnect_attempts = 0
+            session.pane.clear_error()          # back to the drop banner
+            session.reconnect_line = False
+            self._do_auto_reconnect(session)
+            return
+        self._retry_session(session)
 
     def _schedule_reconnect(self, session: '_Session'):
         if session not in self._sessions or not session.reconnecting:
@@ -8693,9 +8843,24 @@ class SshDialog(QDialog):
     def _on_reconnect_success(self, session: '_Session'):
         # The connected handler already prints the green "Połączono z {ip}";
         # we only need to leave the reconnect loop and reset the backoff.
+        session.reconnect_exhausted = False
         if session.reconnecting:
             session.reconnecting = False
             session.reconnect_attempts = 0
+            # The connected handler has just turned the attempt line into
+            # "Połączono z …"; the banner above it now says when it came back.
+            if session.reconnect_line and session.dropped_at:
+                back = datetime.now().strftime('%H:%M:%S')
+                banner = _fit(f"─── Przerwa w połączeniu {session.dropped_at}–{back}",
+                              session.term.terminal_size()[0])
+                lost = f"utracone [{session.dropped_at}]"
+                y = _find_row(session.term, lambda t: lost in t)
+                if y is not None:
+                    # ESC 7 / ESC 8: the cursor stays where the shell needs it.
+                    session.term.feed(
+                        f"\x1b7\x1b[{y + 1};1H\x1b[2K\x1b[38;5;108m{banner}"
+                        f"\x1b[0m\x1b8")
+            session.reconnect_line = False
 
     def _make_connect_banner(self, ip: str, user: str) -> str:
         ts = datetime.now().strftime('%H:%M:%S')
@@ -8751,7 +8916,12 @@ class SshDialog(QDialog):
         # Always print the "Łączenie…" line: the connected handler overwrites it
         # in place (\r ↑ erase) with the green "Połączono z {ip}", so on an
         # auto-reconnect it must exist or that overwrite would eat a log line.
-        term.feed(f"\x1b[90mŁączenie z {ip}…\x1b[0m\r\n")
+        if auto:
+            self._reconnect_status(
+                session, f"Ponowne łączenie z {ip} — próba "
+                f"{session.reconnect_attempts}/{_AUTO_RECONNECT_TRIES}…")
+        else:
+            term.feed(f"\x1b[90mŁączenie z {ip}…\x1b[0m\r\n")
         new_worker.start()
 
     def _close_session_by_ref(self, session: '_Session'):
