@@ -636,3 +636,17 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   `HospitalHubV2.exe` i znacznik w starym `_internal` usunięte; przemianowany exe startuje
   (proces/okno „HospitalHub”); deinstalacja testowej czysta. Instalacja admin na prawdziwych
   wpisach — u użytkownika (UAC).
+
+### 2026-10-16 (noc) — ustawienia 1.x przechodzą do nowej wersji
+
+- Zgłoszenie właściciela: po instalacji na laptopie „zniknęły mi konfigi” — 1.x trzyma
+  ustawienia w `%APPDATA%\HospitalHub`, 2.x w `%APPDATA%\HospitalHubV2`.
+- `config.import_v1_settings_once()` (wołane w `main()` po kontroli pojedynczej instancji):
+  jednorazowo (znacznik `v1_settings_imported`) przejmuje z 1.x znane klucze, których 2.x
+  jeszcze nie ma — lista vaultów (dopisywane typy, których 2.x nie ma; jeden vault na typ),
+  ostatni vault, osobisty VPN vault, ścieżki klientów VPN, własni providerzy, autouzupełnianie,
+  SSH zmaksymalizowane, szerokości kolumn, sortowanie, motyw. Plik 1.x tylko czytany; nieznane
+  klucze pomijane.
+- Próba na kopii prawdziwych ustawień: dochodzi test3.vault (prywatny), osobisty VPN vault,
+  ścieżki FortiClient/Hillstone, autouzupełnianie, kolumny; ustawienia 2.x bez zmian.
+- **1926 PASS / 0 FAIL**. Build + instalator 23:15.

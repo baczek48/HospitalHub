@@ -37,6 +37,69 @@ def _save_all(data: dict) -> None:
             pass
 
 
+# Settings of HospitalHub 1.x that 2.x understands the same way.
+_V1_KEYS = ("last_vault", "vault_list", "active_vault_index", "column_widths",
+            "sqldeveloper_path", "personal_vpn_vault", "vpn_provider_paths",
+            "custom_vpn_providers", "vpn_autofill_enabled", "ssh_start_maximized",
+            "hospital_sort_order", "theme")
+
+
+def import_v1_settings_once() -> list:
+    """Take over the settings of HospitalHub 1.x, once (2026-10-16).
+
+    The installer replaces 1.x, but 1.x kept its settings in
+    %APPDATA%/HospitalHub and 2.x in %APPDATA%/HospitalHubV2, so the
+    registered vaults, the personal VPN vault and the VPN client paths were
+    lost.  Only what 2.x has not set yet is taken; a vault 1.x knew is added
+    to the list unless 2.x already has a vault of that type (one per type).
+    The V1 file is only read.  Returns the keys taken.
+    """
+    data = _load_all()
+    if data.get("v1_settings_imported"):
+        return []
+    app_data = os.environ.get("APPDATA") or Path.home()
+    taken = []
+    try:
+        with open(Path(app_data) / "HospitalHub" / "config.json", "r",
+                  encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = None
+    if isinstance(old, dict):
+        for key in _V1_KEYS:
+            if key not in old:
+                continue
+            if key == "vault_list":
+                mine = data.get("vault_list")
+                mine = mine if isinstance(mine, list) else []
+                theirs = old.get("vault_list")
+                if not isinstance(theirs, list):
+                    continue
+                paths = {os.path.normcase(os.path.normpath(v.get("path") or ""))
+                         for v in mine if isinstance(v, dict)}
+                types = {v.get("type") for v in mine if isinstance(v, dict)}
+                added = [v for v in theirs
+                         if isinstance(v, dict) and v.get("path")
+                         and v.get("type") not in types
+                         and os.path.normcase(os.path.normpath(v["path"])) not in paths]
+                if added:
+                    data["vault_list"] = mine + added
+                    taken.append(key)
+            elif key == "active_vault_index":
+                continue          # below: it points into 1.x's list
+            elif key not in data:
+                data[key] = old[key]
+                taken.append(key)
+        if ("active_vault_index" not in data
+                and isinstance(old.get("active_vault_index"), int)
+                and data.get("vault_list") == old.get("vault_list")):
+            data["active_vault_index"] = old["active_vault_index"]
+            taken.append("active_vault_index")
+    data["v1_settings_imported"] = True
+    _save_all(data)
+    return taken
+
+
 def load_last_vault() -> str | None:
     """Returns last used vault path, or None if not set / file missing."""
     data = _load_all()

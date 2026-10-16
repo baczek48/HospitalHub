@@ -653,6 +653,11 @@ def main():
     # Single-instance: try to activate a running instance via IPC
     if _try_activate_existing():
         sys.exit(0)
+    try:
+        from config import import_v1_settings_once
+        import_v1_settings_once()
+    except Exception:
+        pass
 
     app.setApplicationDisplayName("")
     # Theme: dark (default) keeps apply_dark_theme; the others install their
