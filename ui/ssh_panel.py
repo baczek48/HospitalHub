@@ -7181,12 +7181,16 @@ class _EnvironmentPanel(QWidget):
 
     def __init__(self, hospital=None, all_hospitals=None,
                  initial_ip: str = '', admin_unlocked: bool = False,
-                 parent=None):
+                 parent=None, initial_machine=None):
         super().__init__(parent)
-        self._cards: dict[str, QFrame] = {}   # ip → card widget
-        self._machines: dict[str, object] = {}  # ip → machine object
-        self._active_ip: str = ''
-        self._selected_ips: set[str] = set()
+        # Keyed by the machine itself (id), not by its IP: two machines of
+        # a hospital may share an address (e.g. SSH and RDP entries, or two
+        # logins) and the second card used to replace the first — a click
+        # on one lit up the other (owner's report 2026-10-16).
+        self._cards: dict[int, QFrame] = {}     # machine key → card widget
+        self._machines: dict[int, object] = {}  # machine key → machine
+        self._active_key: int | None = None
+        self._selected: set[int] = set()
         self._all_hospitals = all_hospitals or []
         self._current_hospital = hospital
         self._admin_unlocked = admin_unlocked
@@ -7229,7 +7233,7 @@ class _EnvironmentPanel(QWidget):
         self._build_machine_list(hospital)
 
         if initial_ip:
-            self.set_active(initial_ip)
+            self.set_active(initial_ip, initial_machine)
 
     def _show_hospital_menu(self):
         menu = QMenu(self)
@@ -7258,13 +7262,14 @@ class _EnvironmentPanel(QWidget):
         if unlocked == self._admin_unlocked:
             return
         self._admin_unlocked = unlocked
-        old_active = self._active_ip
+        old_active = self._machines.get(self._active_key)
         self._cards.clear()
         self._machines.clear()
-        self._selected_ips.clear()
+        self._selected.clear()
+        self._active_key = None
         self._build_machine_list(self._current_hospital)
-        if old_active and old_active in self._cards:
-            self.set_active(old_active)
+        if old_active is not None:
+            self.set_active(old_active.ip, old_active)
 
     def _select_hospital(self, h):
         if h is self._current_hospital:
@@ -7272,13 +7277,14 @@ class _EnvironmentPanel(QWidget):
         self._current_hospital = h
         self._hospital_btn.setText(
             f"  {h.name}" if h.name else "  (bez nazwy)")
-        old_active = self._active_ip
+        old_active = self._machines.get(self._active_key)
         self._cards.clear()
         self._machines.clear()
-        self._selected_ips.clear()
+        self._selected.clear()
+        self._active_key = None
         self._build_machine_list(h)
-        if old_active and old_active in self._cards:
-            self.set_active(old_active)
+        if old_active is not None:
+            self.set_active(old_active.ip, old_active)
 
     def _build_machine_list(self, hospital):
         # Clear old content
@@ -7342,8 +7348,8 @@ class _EnvironmentPanel(QWidget):
         card.setStyleSheet(self._STYLE_IDLE)
         card.setCursor(Qt.CursorShape.PointingHandCursor)
         card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._cards[m.ip] = card
-        self._machines[m.ip] = m
+        self._cards[id(m)] = card
+        self._machines[id(m)] = m
 
         # Store machine ref on card for event handling
         card.setProperty('_machine', m)
@@ -7415,13 +7421,13 @@ class _EnvironmentPanel(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self._toggle_select(machine.ip)
+            self._toggle_select(id(machine))
         else:
             # Selects only.  A single click used to log in at once — and
             # every further click opened another session or mstsc window on
             # a hospital server (UX audit E-04).
             self._clear_selection()
-            self._toggle_select(machine.ip)
+            self._toggle_select(id(machine))
         self.setFocus()
 
     def _card_double_clicked(self, machine, event):
@@ -7430,32 +7436,32 @@ class _EnvironmentPanel(QWidget):
         self._clear_selection()
         self._dblclick_connect(machine)
 
-    def _toggle_select(self, ip: str):
-        if ip in self._selected_ips:
-            self._selected_ips.discard(ip)
+    def _toggle_select(self, key: int):
+        if key in self._selected:
+            self._selected.discard(key)
         else:
-            self._selected_ips.add(ip)
-        self._refresh_card_style(ip)
+            self._selected.add(key)
+        self._refresh_card_style(key)
 
     def _clear_selection(self):
-        for ip in list(self._selected_ips):
-            self._selected_ips.discard(ip)
-            self._refresh_card_style(ip)
+        for key in list(self._selected):
+            self._selected.discard(key)
+            self._refresh_card_style(key)
 
-    def _refresh_card_style(self, ip: str):
-        if ip not in self._cards:
+    def _refresh_card_style(self, key: int):
+        if key not in self._cards:
             return
-        if ip in self._selected_ips:
-            self._cards[ip].setStyleSheet(self._STYLE_SELECTED)
-        elif ip == self._active_ip:
-            self._cards[ip].setStyleSheet(self._STYLE_ACTIVE)
+        if key in self._selected:
+            self._cards[key].setStyleSheet(self._STYLE_SELECTED)
+        elif key == self._active_key:
+            self._cards[key].setStyleSheet(self._STYLE_ACTIVE)
         else:
-            self._cards[ip].setStyleSheet(self._STYLE_IDLE)
+            self._cards[key].setStyleSheet(self._STYLE_IDLE)
 
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._selected_ips:
-            machines = [self._machines[ip] for ip in self._selected_ips
-                        if ip in self._machines]
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._selected:
+            machines = [self._machines[k] for k in self._selected
+                        if k in self._machines]
             self._clear_selection()
             for m in machines:
                 self._dblclick_connect(m)
@@ -7494,15 +7500,28 @@ class _EnvironmentPanel(QWidget):
             a.triggered.connect(lambda: self.open_machine.emit(machine))
         menu.exec(card.mapToGlobal(pos))
 
-    def set_active(self, ip: str):
-        """Highlight the card for ip, de-highlight the previous one."""
-        if ip == self._active_ip:
+    def _key_for(self, ip: str, machine=None):
+        """The card of `machine` if it is listed, else the first card with
+        this IP (a session opened by hand), else None."""
+        if machine is not None and id(machine) in self._cards:
+            return id(machine)
+        if ip:
+            for key, m in self._machines.items():
+                if m.ip == ip:
+                    return key
+        return None
+
+    def set_active(self, ip: str, machine=None):
+        """Highlight the card of the active session, de-highlight the
+        previous one."""
+        key = self._key_for(ip, machine)
+        if key == self._active_key:
             return
-        if self._active_ip and self._active_ip in self._cards:
-            self._cards[self._active_ip].setStyleSheet(self._STYLE_IDLE)
-        self._active_ip = ip
-        if ip and ip in self._cards:
-            self._cards[ip].setStyleSheet(self._STYLE_ACTIVE)
+        old, self._active_key = self._active_key, key
+        if old is not None:
+            self._refresh_card_style(old)
+        if key is not None:
+            self._refresh_card_style(key)
 
 
 # ──────────────────────────────────────── Terminal pane & session ─────────────
@@ -7689,12 +7708,16 @@ class _Session:
     __slots__ = ('pane', 'worker', 'label', 'sftp', 'sftp_client', 'sftp_path',
                  'sftp_history', 'stats_worker', 'last_stats', 'has_unread',
                  'reconnecting', 'reconnect_attempts', 'reconnect_exhausted',
-                 'reconnect_line', 'dropped_at')
+                 'reconnect_line', 'dropped_at', 'machine')
 
-    def __init__(self, pane: _TerminalPane, worker: '_SshWorker', label: str):
+    def __init__(self, pane: _TerminalPane, worker: '_SshWorker', label: str,
+                 machine=None):
         self.pane         = pane
         self.worker       = worker
         self.label        = label
+        #: The vault machine this tab was opened for (None: typed by hand) —
+        #: which card of the Environment tab to light up.
+        self.machine      = machine
         self.sftp         = None
         self.sftp_client  = None
         self.sftp_path    = '/'
@@ -8089,7 +8112,7 @@ class SshDialog(QDialog):
 
         self._env_panel = _EnvironmentPanel(
             self._hospital, all_hospitals=self._all_hospitals,
-            initial_ip=self._machine.ip,
+            initial_ip=self._machine.ip, initial_machine=self._machine,
             admin_unlocked=self._admin_unlocked)
         self._env_panel.open_machine.connect(self._open_extra_machine)
         self._env_panel.open_machine_cred.connect(self._open_machine_with_cred)
@@ -8430,11 +8453,11 @@ class SshDialog(QDialog):
         password = self._cred.password if self._cred else ''
         self._add_session(label=label, ip=self._machine.ip,
                           user=user, password=password,
-                          is_first=True, port=port)
+                          is_first=True, port=port, machine=self._machine)
 
     def _add_session(self, label: str = '', ip: str = '',
                      user: str = '', password: str = '',
-                     is_first: bool = False, port: int = 22):
+                     is_first: bool = False, port: int = 22, machine=None):
         if not ip:
             if not self._cred:
                 return
@@ -8452,7 +8475,7 @@ class SshDialog(QDialog):
 
         # Session created before signal connections so lambdas can capture it.
         # resize_pty uses session.worker so it stays correct after retry.
-        session = _Session(pane, worker, label)
+        session = _Session(pane, worker, label, machine)
 
         term.char_input.connect(
             lambda data, t=term: self._on_key(data, t))
@@ -8653,7 +8676,7 @@ class SshDialog(QDialog):
         # Drain anything that buffered while this tab was hidden (throttled
         # feed in TerminalWidget) so the user sees current state immediately.
         s.pane.term.flush_now()
-        self._env_panel.set_active(s.worker._host)
+        self._env_panel.set_active(s.worker._host, s.machine)
         self._sftp_panel.switch_sftp(s.sftp, s.sftp_client, s.sftp_path,
                                      s.sftp_history)
         # Immediately show cached stats for this session (no wait for next poll)
@@ -8684,7 +8707,8 @@ class SshDialog(QDialog):
         label = machine.ip + (f"  ({machine.name})" if machine.name else "")
         self._add_session(label=label, ip=machine.ip,
                           user=cred.login if cred else '',
-                          password=cred.password if cred else '')
+                          password=cred.password if cred else '',
+                          machine=machine)
         self._left_tabs.setCurrentWidget(self._sftp_panel)
 
     def _open_machine_with_cred(self, machine, cred):
@@ -8692,7 +8716,8 @@ class SshDialog(QDialog):
         label = machine.ip + (f"  ({machine.name})" if machine.name else "")
         label += f"  [{cred.login}]"
         self._add_session(label=label, ip=machine.ip,
-                          user=cred.login, password=cred.password)
+                          user=cred.login, password=cred.password,
+                          machine=machine)
         self._left_tabs.setCurrentWidget(self._sftp_panel)
 
     def _teardown_session(self, s: '_Session'):

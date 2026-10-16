@@ -670,3 +670,16 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   20 000 linii: 12,0 s → 2,8 s (bez koloru), 18,1 s → 4,2 s (kolor); log dockera 300 000 linii:
   119 s → 54 s. **Pamięć bez zmian**: ~70 MB przy pełnej historii 250 000 linii w obu wersjach.
 - **1940 PASS / 0 FAIL**. Build + instalator 23:52.
+
+### 2026-10-17 — Środowisko: maszyny o tym samym IP
+
+- Zgłoszenie: w oknie SSH, zakładka Środowisko, dwie maszyny z tym samym IP — klik w
+  pierwszą podświetlał tę niżej. Przyczyna: karty w słowniku po IP (druga nadpisywała
+  pierwszą). Teraz klucz = maszyna (`id`), zaznaczenie i Enter działają na konkretnej karcie;
+  sesja pamięta maszynę, z której ją otwarto (`_Session.machine`), i podświetla jej kartę;
+  sesja wpisana ręcznie — pierwsza karta z tym IP.
+- Testy: `test_env_same_ip.py` (4; na starym kodzie 4 FAIL), poprawione 2 stare testy
+  odwołujące się do kluczy po IP. Zrzut (jasny motyw) OK.
+- **1944 PASS / 0 FAIL** ×3. Jednorazowo w 1. przebiegu: `test_vpn_forticlient_launch`
+  (tripwire `time.sleep`) + ERROR w `test_vpn_forticlient_connect_plan` — nie powtórzyło się
+  w 3 kolejnych przebiegach; do obserwacji. Build + instalator 23:57.

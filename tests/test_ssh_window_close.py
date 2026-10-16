@@ -196,12 +196,12 @@ def test_s03_locking_admin_hides_admin_entries_in_open_ssh_windows(sp, world):
                        admin_unlocked=True, parent=inner)
     pump(200)
     assert dlg.owner_window() is win
-    assert "10.0.0.8" in dlg._env_panel._machines
+    assert "10.0.0.8" in [m.ip for m in dlg._env_panel._machines.values()]
     MainWindow._admin_to_ssh_windows(win, False)
-    assert "10.0.0.8" not in dlg._env_panel._machines
+    assert "10.0.0.8" not in [m.ip for m in dlg._env_panel._machines.values()]
     assert dlg._admin_unlocked is False
     MainWindow._admin_to_ssh_windows(win, True)
-    assert "10.0.0.8" in dlg._env_panel._machines
+    assert "10.0.0.8" in [m.ip for m in dlg._env_panel._machines.values()]
     dlg.close_without_asking()
     pump(300)
 

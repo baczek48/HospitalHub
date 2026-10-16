@@ -40,7 +40,7 @@ def test_e04_one_click_selects_a_double_click_connects(sp, dlg):
     opened = []
     env.open_machine.connect(opened.append)
     env._card_clicked(m, _click(None))
-    assert opened == [] and "10.9.9.9" in env._selected_ips
+    assert opened == [] and id(m) in env._selected
     env._card_double_clicked(m, _click(None, double=True))
     assert opened == [m]
 
