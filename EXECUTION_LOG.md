@@ -454,3 +454,21 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   (domyślny):** bez zmian, zachowanie utrwalone testem; decyzja użytkownika.
 - `SFTP_SAFE_REPLACE_ENABLED` nadal `False`. Wynik, ograniczenia i rekomendacja:
   `RELEASE_READINESS_V2.md` §G10. **1718 PASS / 0 FAIL.**
+
+---
+
+## 2026-10-16 — zapis SFTP z potwierdzeniem każdego bloku (wszystkie ścieżki)
+
+- Dokończona praca z końca 10-15 (niezacommitowana): tryb bezpośredni `upload_edit` (domyślny)
+  pisze przez `_write_acknowledged` — uchwyt bez buforowania i bez potokowania, każdy blok czeka
+  na status serwera — zamiast `sftp.put`.
+- Nowe: `upload_direct` (zapis w miejscu + kontrola rozmiaru) wspólne dla trybu bezpośredniego
+  i zwykłego uploadu `_TransferWorker` (przeciąganie, „Wgraj”), który też używał `sftp.put`.
+  W `ui/` nie ma już wywołań `sftp.put`.
+- Testy: fake w `test_sftp_edit_collisions.py` odrzuca `put` i potokowanie, model pełnego dysku;
+  `test_sftp_safe_replace_protocol.py` (22) — prawdziwy serwer paramiko: odrzucony blok w środku,
+  pełny dysk, anulowanie, nowy plik — dla edycji i dla uploadu. Mutacje: potokowanie → 4 FAIL,
+  powrót do `put` w uploadzie → 2 FAIL.
+- Bez zmian: tryb bezpośredni nadal ucina oryginał przy zerwaniu (ochrona = flaga G10, `False`).
+  Niezmienniki: flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, `vpn_connect.py` a929035e.
+  **1730 PASS / 0 FAIL.**

@@ -63,6 +63,7 @@ class FakeServer:
         self.chown_allowed = False
         self.readonly_dirs = set()
         self.break_put_after = None   # bytes written before the link drops
+        self.disk_full_after = None   # a write past this size is refused
         self.mtime = 1_000
 
     def add(self, path, data, mode=0o644, uid=None, gid=None):
@@ -105,7 +106,11 @@ class FakeHandle:
 
     def write(self, data):
         self.sftp._alive()
+        self.sftp.s.log.append(("write", self.path, len(data)))
         f = self.sftp.s.files[self.path]
+        full = self.sftp.s.disk_full_after
+        if full is not None and len(f["data"]) + len(data) > full:
+            raise OSError(28, "No space left on device")   # the server's status
         limit = self.sftp.s.break_put_after
         if limit is not None and len(f["data"]) + len(data) > limit:
             f["data"] += data[:max(0, limit - len(f["data"]))]
@@ -115,6 +120,8 @@ class FakeHandle:
 
     def close(self):
         self.sftp._alive()
+        self.sftp.s.mtime += 1
+        self.sftp.s.files[self.path]["mtime"] = self.sftp.s.mtime
 
 
 class FakeSftp:
@@ -128,14 +135,19 @@ class FakeSftp:
         if self.dead or self.closed:
             raise OSError("Socket is closed")
 
-    def open(self, path, mode="r"):
+    def open(self, path, mode="r", bufsize=-1):
         self._alive()
         self.s.log.append(("open", path, mode))
+        assert bufsize == 0, "zapis bez buforowania i bez potokowania"
+        real, existing = self._resolve(path)
+        if "x" in mode and existing is not None:
+            raise OSError("File exists")
+        if existing is not None:
+            existing["data"] = b""          # O_TRUNC: same file, same owner/mode
+            return FakeHandle(self, real)
         directory = path.rsplit("/", 1)[0] or "/"
         if directory in self.s.readonly_dirs:
             raise PermissionError(13, "Permission denied")
-        if "x" in mode and path in self.s.files:
-            raise OSError("File exists")
         self.s.files[path] = dict(data=b"", mode=st_mod.S_IFREG | 0o644,
                                   uid=self.s.uid, gid=self.s.gid, link=None,
                                   mtime=self.s.mtime)
@@ -180,28 +192,7 @@ class FakeSftp:
             callback(len(data), len(data))
 
     def put(self, local, remote, callback=None, confirm=True):
-        self.s.log.append(("put", remote))
-        directory = remote.rsplit("/", 1)[0] or "/"
-        if directory in self.s.readonly_dirs:
-            raise PermissionError(13, "Permission denied")
-        with open(local, "rb") as fh:
-            data = fh.read()
-        path, f = self._resolve(remote)
-        if f is None:
-            self.s.add(path, b"")
-            f = self.s.files[path]
-        f["data"] = b""                    # opened with O_TRUNC, like paramiko
-        limit = self.s.break_put_after
-        if limit is not None and limit < len(data):
-            f["data"] = data[:limit]
-            raise OSError("Socket is closed")
-        if callback:
-            callback(len(data) // 2, len(data))
-        f["data"] = data
-        self.s.mtime += 1
-        f["mtime"] = self.s.mtime
-        if callback:
-            callback(len(data), len(data))
+        raise AssertionError("sftp.put (zapis potokowy) nie może być używany")
 
     def chmod(self, path, mode):
         self._alive()
@@ -288,6 +279,15 @@ def open_file(panel, remote):
 _SAVES = __import__("itertools").count(1)
 
 
+def writes(server):
+    """Every write-open on `server` — an upload of any kind."""
+    return [e for e in server.log if e[0] in ("open", "put")]
+
+
+def opened_for_write(server, path):
+    return any(e[0] == "open" and e[1] == path for e in server.log)
+
+
 def save_in_editor(local, data):
     """What an editor does on Ctrl+S: new content, newer mtime."""
     with open(local, "wb") as fh:
@@ -355,8 +355,8 @@ def test_saves_in_any_order_reach_only_their_own_server_and_path(env):
     assert a.data("/opt/y/config.xml") == b"edit A /opt/y" * 10
     assert b.data("/opt/x/config.xml") == b"edit B /opt/x" * 10
     assert b.data("/opt/y/config.xml") == b"edit B /opt/y" * 10
-    assert {e[1] for e in a.log if e[0] == "put"} <= {"/opt/x/config.xml",
-                                                      "/opt/y/config.xml"}
+    assert {e[1] for e in a.log if e[0] == "open"} <= {"/opt/x/config.xml",
+                                                       "/opt/y/config.xml"}
 
 
 def test_two_windows_on_two_servers_never_write_to_each_other(env):
@@ -387,7 +387,7 @@ def test_a_closed_tab_uploads_nothing_and_a_reopen_starts_clean(env):
     save_in_editor(old, b"lost on purpose" * 9)
     p._poll_watched_files()
     p._flush_pending_edits()
-    assert [e for e in a.log if e[0] == "put"] == []
+    assert writes(a) == []
 
     reconnect = FakeClient(a)               # new session to the same server
     connect(p, reconnect)
@@ -396,7 +396,7 @@ def test_a_closed_tab_uploads_nothing_and_a_reopen_starts_clean(env):
     with open(new, "rb") as fh:
         assert fh.read() == b"A-x" * 40
     p._poll_watched_files()
-    assert [e for e in a.log if e[0] == "put"] == []
+    assert writes(a) == []
 
 
 def test_a_watch_under_the_wrong_connection_is_never_uploaded(env, sp):
@@ -414,7 +414,7 @@ def test_a_watch_under_the_wrong_connection_is_never_uploaded(env, sp):
     p._poll_watched_files()
     p._upload_changed_file(local, "/opt/x/config.xml")
     p._flush_pending_edits()
-    assert [e for e in b.log if e[0] == "put"] == []
+    assert writes(b) == []
     assert b.data("/opt/x/config.xml") == b"B-x" * 40
 
 
@@ -451,7 +451,7 @@ def test_a_redownload_is_never_uploaded_half_way(env, sp, monkeypatch):
     p._open_with("/opt/x/config.xml", "config.xml")
 
     assert polls and all(x != local for x in polls), "pobieranie do pliku .part"
-    assert [e for e in a.log if e[0] == "put"] == []
+    assert writes(a) == []
     with open(local, "rb") as fh:
         assert fh.read() == b"A-x" * 40
     assert local in p._watched_files and not p._download_active
@@ -542,7 +542,7 @@ def test_safe_replace_swaps_the_file_and_keeps_mode_and_owner(sp, xmlfile):
     assert f["data"] == open(local, "rb").read()
     assert st_mod.S_IMODE(f["mode"]) == 0o640 and (f["uid"], f["gid"]) == (1000, 50)
     assert server.leftovers() == []
-    assert ("put", "/data/out/config.xml") not in server.log, "nigdy put w oryginał"
+    assert not opened_for_write(server, "/data/out/config.xml"), "oryginał nigdy otwarty do zapisu"
 
 
 def test_the_temp_file_is_hidden_and_next_to_the_original(sp, xmlfile):
@@ -646,7 +646,7 @@ def test_no_posix_rename_means_a_clear_error_and_no_direct_write(sp, xmlfile):
     with pytest.raises(sp.SafeReplaceError, match="posix-rename"):
         sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
     assert server.data("/data/out/config.xml") == ORIGINAL
-    assert ("put", "/data/out/config.xml") not in server.log
+    assert not opened_for_write(server, "/data/out/config.xml")
     assert server.leftovers() == []
 
 
@@ -674,7 +674,7 @@ def test_a_directory_without_write_access_aborts_without_fallback(sp, xmlfile):
     with pytest.raises(sp.SafeReplaceError, match="tymczasowego"):
         sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
     assert server.data("/data/out/config.xml") == ORIGINAL
-    assert [e for e in server.log if e[0] == "put"] == [], "bez powrotu do put"
+    assert not opened_for_write(server, "/data/out/config.xml"), "bez powrotu do zapisu bezpośredniego"
 
 
 def test_a_symlink_is_kept_and_its_target_replaced(sp, xmlfile):
@@ -692,17 +692,81 @@ def test_something_that_is_not_a_file_is_refused(sp, xmlfile):
         sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=True)
 
 
-def test_direct_mode_is_the_old_put_and_its_risk_is_documented(sp, xmlfile):
-    """Flag off: what V2 does today.  A drop mid-transfer truncates the
-    original — the reason for G10."""
+def test_direct_mode_writes_in_place_with_acknowledged_writes(sp, xmlfile):
+    """Flag off (the default): the file is truncated and written in place —
+    through an unbuffered handle, never paramiko's pipelined put."""
     server, sftp, local = xmlfile
-    sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
-    assert server.log == [("put", "/data/out/config.xml")]
-    server.add("/data/out/config.xml", ORIGINAL)
+    final = sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
+    assert [e for e in server.log if e[0] == "open"] == [
+        ("open", "/data/out/config.xml", "wb")]
+    f = server.files["/data/out/config.xml"]
+    assert f["data"] == open(local, "rb").read() and final.st_size == len(f["data"])
+    assert st_mod.S_IMODE(f["mode"]) == 0o640 and (f["uid"], f["gid"]) == (1000, 50), \
+        "zapis w miejscu: ten sam plik, ten sam właściciel i tryb"
+
+
+def test_direct_mode_reports_a_full_disk_at_once(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.disk_full_after = 1000
+    with pytest.raises(OSError, match="No space"):
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
+    # Honest: in place, the original is already cut — the error says so to
+    # the caller, it does not pretend the file is intact.
+    assert len(server.data("/data/out/config.xml")) <= 1000
+
+
+def test_direct_mode_does_not_protect_the_original_on_a_drop(sp, xmlfile):
+    """The reason SFTP_SAFE_REPLACE_ENABLED exists: a drop mid-transfer
+    truncates the original in direct mode."""
+    server, sftp, local = xmlfile
     server.break_put_after = 100
     with pytest.raises(OSError):
         sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
     assert server.data("/data/out/config.xml") != ORIGINAL
+
+
+def test_direct_mode_catches_bytes_the_server_lost(sp, xmlfile, monkeypatch):
+    server, sftp, local = xmlfile
+    real = FakeHandle.write
+
+    def lossy(self, data):
+        real(self, data[:-1] if len(data) > 1 else data)   # OK, but short
+    monkeypatch.setattr(FakeHandle, "write", lossy)
+    with pytest.raises(IOError, match="weryfikacja po zapisie"):
+        sp.upload_edit(sftp, local, "/data/out/config.xml", safe_replace=False)
+
+
+def test_direct_mode_cancel_stops_the_writes(sp, xmlfile):
+    server, sftp, local = xmlfile
+
+    def cb(done, total):
+        raise sp._CancelledError()
+    with pytest.raises(sp._CancelledError):
+        sp.upload_edit(sftp, local, "/data/out/config.xml", callback=cb,
+                       safe_replace=False)
+    assert len([e for e in server.log if e[0] == "write"]) == 1
+
+
+def test_the_panel_in_direct_mode_reports_a_full_disk(env):
+    a, _ = servers()
+    ca = FakeClient(a)
+    p = env.panel()
+    connect(p, ca)
+    local = open_file(p, "/opt/x/config.xml")
+    messages = []
+    p.status_msg.connect(lambda text, err: messages.append((text, err)))
+    a.disk_full_after = 50
+    save_in_editor(local, b"new content" * 20)
+
+    p._poll_watched_files()
+
+    assert p._watched_files[local]["dirty"] is True
+    assert any(err and "No space" in text for text, err in messages)
+    a.disk_full_after = None                # space freed: the next save goes
+    save_in_editor(local, b"new content 2" * 20)
+    p._poll_watched_files()
+    assert a.data("/opt/x/config.xml") == b"new content 2" * 20
+    assert p._watched_files[local]["dirty"] is False
 
 
 def test_the_panel_with_safe_replace_keeps_the_server_file_on_a_drop(env, sp,

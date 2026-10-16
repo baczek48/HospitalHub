@@ -133,9 +133,14 @@ sprawdza odpowiedzi serwera tylko co ~100 żądań — zapis odrzucony w środku
 quota), po którym serwer przyjął ostatni blok, dawał plik o **poprawnym rozmiarze z dziurą** i bez
 błędu. Bezpieczny zapis pisze teraz bez potokowania (każdy blok czeka na potwierdzenie; wolniej
 na łączach o dużym opóźnieniu, bez znaczenia dla edytowanych plików konfiguracyjnych).
-**Ten sam mechanizm ma domyślny tryb bezpośredni** (`sftp.put` paramiko) — utrwala to test
-`test_direct_mode_can_hide_a_refused_write_behind_the_right_size`. Nie zmieniono go — decyzja
-użytkownika.
+**2026-10-16: naprawione też poza trybem bezpiecznym.** Ten sam mechanizm miał domyślny tryb
+bezpośredni edycji i zwykły upload (przeciąganie, „Wgraj”) — oba szły przez `sftp.put` paramiko.
+Teraz oba używają `upload_direct`: zapis w miejscu, każdy blok potwierdzany, kontrola rozmiaru;
+`sftp.put` nie jest już używany do zapisu (fake w testach rzuca przy próbie). Odrzucony blok
+i pełny dysk dają błąd od razu. Test `test_paramiko_put_hides_a_refused_write_behind_the_right_size`
+utrwala wadę samej biblioteki (gdy aktualizacja paramiko ją naprawi, test padnie i można go
+usunąć). Mutacja (potokowanie / powrót do `put`): 4 i 2 FAIL. **Tryb bezpośredni nadal nie chroni
+oryginału** przed zerwaniem w trakcie — to robi wyłącznie bezpieczna podmiana (flaga G10).
 
 **Właściciel, uprawnienia, ACL (ograniczenia — rename tworzy nowy plik):**
 - Właściciel: zachowany tylko, gdy serwer pozwala (`chown` na siebie i własną grupę albo root);

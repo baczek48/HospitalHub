@@ -386,23 +386,125 @@ def test_direct_mode_replaces_in_place_when_nothing_fails(sp, files):
     assert [op[1] for op in faults.ops if op[0] == "open"] == ["/data/config.xml"]
 
 
-def test_direct_mode_can_hide_a_refused_write_behind_the_right_size(sp, files):
-    """Known limit of the default path (paramiko ``put`` writes pipelined and
-    only compares sizes): a write refused in the middle followed by an
-    accepted last chunk is NOT reported and leaves a damaged file.  Pinned
-    here so a change to the default is a decision, not an accident."""
-    client, root, faults, local = files
-    tail = len(EDITED) % 32768 or 32768
+def _refuse_middle_writes(tail):
+    """Server answer: refuse writes past 30 kB except the last block (the
+    'hole with the right size' case)."""
     real_write = _Handle.write
 
     def write(self, offset, data):
         if 30_000 < offset + len(data) and offset < len(EDITED) - tail:
             return SFTP_FAILURE
         return real_write(self, offset, data)
-    _Handle.write = write
+    return real_write, write
+
+
+def test_paramiko_put_hides_a_refused_write_behind_the_right_size(files):
+    """Why the default no longer uses ``sftp.put``: the library pipelines the
+    writes and drops the server's refusals — no error, right size, a hole.
+    (If a paramiko upgrade fixes this, this test fails and can go.)"""
+    client, root, faults, local = files
+    real, refusing = _refuse_middle_writes(len(EDITED) % 32768 or 32768)
+    _Handle.write = refusing
     try:
-        sp.upload_edit(client, local, "/data/config.xml")      # no error raised
+        client.put(local, "/data/config.xml")           # no error raised
     finally:
-        _Handle.write = real_write
+        _Handle.write = real
     damaged = (root / "data" / "config.xml").read_bytes()
     assert len(damaged) == len(EDITED) and damaged != EDITED
+
+
+def test_direct_mode_reports_a_refused_write_in_the_middle(sp, files):
+    client, root, faults, local = files
+    real, refusing = _refuse_middle_writes(len(EDITED) % 32768 or 32768)
+    _Handle.write = refusing
+    try:
+        with pytest.raises(OSError):
+            sp.upload_edit(client, local, "/data/config.xml")
+    finally:
+        _Handle.write = real
+
+
+def test_direct_mode_reports_a_full_disk(sp, files):
+    client, root, faults, local = files
+    faults.write_fails_after = 30_000
+    progress = []
+    with pytest.raises(OSError):
+        sp.upload_edit(client, local, "/data/config.xml",
+                       callback=lambda done, total: progress.append(done))
+    assert progress == [], "błąd zgłoszony przy pierwszym odrzuconym bloku"
+
+
+def test_direct_mode_writes_the_whole_content_and_reports_progress(sp, files):
+    client, root, faults, local = files
+    progress = []
+    final = sp.upload_edit(client, local, "/data/config.xml",
+                           callback=lambda done, total: progress.append((done, total)))
+    assert (root / "data" / "config.xml").read_bytes() == EDITED
+    assert final.st_size == len(EDITED)
+    assert progress[-1] == (len(EDITED), len(EDITED))
+    assert all(b[0] > a[0] for a, b in zip(progress, progress[1:]))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Plain uploads (drag-drop, "Wgraj") — same acknowledged writes, no sftp.put
+# ══════════════════════════════════════════════════════════════════════════
+
+class _OneSftp:
+    """ssh_client stand-in: the worker opens its private channel here."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def open_sftp(self):
+        return self.client
+
+
+def _run_upload(sp, client, local, remote, cancel_at=None):
+    w = sp._TransferWorker(_OneSftp(client), 'put', remote, local,
+                           total=os.path.getsize(local))
+    got = {"done": [], "error": [], "cancelled": [], "progress": []}
+    w.done.connect(got["done"].append)
+    w.error.connect(got["error"].append)
+    w.cancelled.connect(lambda: got["cancelled"].append(True))
+
+    def progress(pct):
+        got["progress"].append(pct)
+        if cancel_at is not None and pct >= cancel_at:
+            w._cancel = True
+    w.progress.connect(progress)
+    w.run()                                  # synchronously, in this thread
+    return got
+
+
+def test_an_upload_creates_a_new_file_whole(sp, server, tmp_path):
+    client, root, faults = server
+    local = tmp_path / "new.xml"
+    local.write_bytes(EDITED)
+    got = _run_upload(sp, client, str(local), "/data/new.xml")
+    assert got["error"] == [] and len(got["done"]) == 1
+    assert (root / "data" / "new.xml").read_bytes() == EDITED
+    assert got["progress"][-1] == 100
+
+
+def test_an_upload_reports_a_refused_write_in_the_middle(sp, files):
+    client, root, faults, local = files
+    real, refusing = _refuse_middle_writes(len(EDITED) % 32768 or 32768)
+    _Handle.write = refusing
+    try:
+        got = _run_upload(sp, client, local, "/data/config.xml")
+    finally:
+        _Handle.write = real
+    assert got["done"] == [] and len(got["error"]) == 1
+
+
+def test_an_upload_reports_a_full_disk(sp, files):
+    client, root, faults, local = files
+    faults.write_fails_after = 30_000
+    got = _run_upload(sp, client, local, "/data/config.xml")
+    assert got["done"] == [] and len(got["error"]) == 1
+
+
+def test_an_upload_can_be_cancelled(sp, files):
+    client, root, faults, local = files
+    got = _run_upload(sp, client, local, "/data/config.xml", cancel_at=1)
+    assert got["cancelled"] == [True] and got["done"] == [] and got["error"] == []

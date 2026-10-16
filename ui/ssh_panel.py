@@ -2608,7 +2608,9 @@ class _TransferWorker(QThread):
                     self._sftp.get(self._remote, self._local, callback=cb)
                     self.done.emit(f"Pobrano: {os.path.basename(self._local)}")
                 else:
-                    self._sftp.put(self._local, self._remote, callback=cb)
+                    # Not sftp.put: its pipelined writes hide a block the
+                    # server refused (G10, 2026-10-15) — see upload_direct.
+                    upload_direct(self._sftp, self._local, self._remote, callback=cb)
                     self.done.emit(f"Wgrano: {os.path.basename(self._local)}")
             finally:
                 try:
@@ -3283,30 +3285,76 @@ def remote_part_path(target: str) -> str:
     return posixpath.join(head, f".{base}.hhv2-{os.urandom(4).hex()}.part")
 
 
+#: One SFTP write request: paramiko's own cap per request.
+_ACK_WRITE_CHUNK = 32768
+
+
+def _write_acknowledged(sftp, local: str, remote: str, mode: str, total: int,
+                        callback, before_data=None) -> None:
+    """Write `local` to `remote`, every block confirmed by the server.
+
+    2026-10-15 (G10 protocol test): paramiko pipelines writes — ``put`` turns
+    it on by itself — and reads the server's answers only every ~100
+    requests; answers still pending when the file is closed are dropped
+    unread.  A write the server refused in the middle (disk full, quota, an
+    I/O error) was therefore never reported, and when a later block landed
+    the file even had the right size.  Here the handle is unbuffered and not
+    pipelined: each ``write`` sends one request and waits for its status, so
+    the first refused block raises at once.  Slower on a high-latency link —
+    one round trip per 32 kB — which edited files do not notice.
+
+    `mode` is ``'wb'`` (truncate and write in place: a broken transfer can
+    still leave the file cut short) or ``'wbx'`` (a new file only).
+    `before_data` runs on the open handle before the first byte.
+    """
+    with open(local, 'rb') as src:
+        f = sftp.open(remote, mode, bufsize=0)
+        try:
+            if before_data is not None:
+                before_data(f)
+            done = 0
+            while True:
+                chunk = src.read(_ACK_WRITE_CHUNK)
+                if not chunk:
+                    break
+                f.write(chunk)              # waits for the server's status
+                done += len(chunk)
+                if callback is not None:
+                    callback(done, total)
+        except BaseException:
+            try:
+                f.close()
+            except Exception:
+                pass                        # the first error is the one to report
+            raise
+        f.close()
+
+
 def _write_private_temp(sftp, local: str, tmp: str, total: int, callback):
     """Create `tmp` (never an existing file) readable by its owner only, then
     write `local` into it — the edited content is never readable by other
     users, not even for the length of the transfer (review 2026-10-15 L5)."""
-    with open(local, 'rb') as src:
-        f = sftp.open(tmp, 'wbx')
-        try:
-            f.chmod(0o600)
-            # NOT pipelined (G10 protocol test, 2026-10-15): paramiko checks
-            # the server's status for a pipelined write only every ~100
-            # requests, so a refused write in the middle (disk full, quota)
-            # went unnoticed — and when a later write landed, the file still
-            # had the right size.  Unpipelined, every write waits for its OK.
-            done = 0
-            while True:
-                chunk = src.read(32768)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if callback is not None:
-                    callback(done, total)
-        finally:
-            f.close()
+    _write_acknowledged(sftp, local, tmp, 'wbx', total, callback,
+                        before_data=lambda f: f.chmod(0o600))
+
+
+def upload_direct(sftp, local: str, remote: str, callback=None):
+    """Create or overwrite `remote` in place with `local`, every block
+    acknowledged, then compare sizes; return the final stat (None when the
+    server cannot be asked after a successful write).  Used by plain uploads
+    and by `upload_edit` in direct mode.  A broken transfer leaves `remote`
+    cut short — that is what the safe-replace mode is for."""
+    local_size = os.path.getsize(local)
+    _write_acknowledged(sftp, local, remote, 'wb', local_size, callback)
+    try:
+        final = sftp.stat(remote)
+    except Exception:
+        return None                     # as before: unverifiable is not failure
+    if (final.st_size or 0) != local_size:
+        raise IOError(
+            f"weryfikacja po zapisie: rozmiar zdalny {final.st_size} B "
+            f"!= lokalny {local_size} B")
+    return final
 
 
 def _remote_state(sftp, path: str):
@@ -3326,8 +3374,11 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
     """Send an edited local copy back to `remote`; return the final stat
     (None when the server cannot be asked after a successful write).
 
-    Direct mode (``safe_replace`` False) is the old behaviour: ``put`` writes
-    over the file in place, then the size is compared.  Safe mode writes a
+    Direct mode (``safe_replace`` False, the default) writes over the file in
+    place — every block acknowledged by the server (no pipelining, so a
+    refused write is reported, not hidden), then the size is compared.  It
+    does NOT protect the original: a transfer that breaks or is cancelled
+    leaves the server file truncated.  Safe mode writes a
     new, owner-only temp file in the same directory, checks its size, gives
     it the original's owner and permissions, and posix-renames it over the
     original.  Anything it cannot do — no posix-rename on the server, no
@@ -3342,16 +3393,7 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
         safe_replace = SFTP_SAFE_REPLACE_ENABLED
     local_size = os.path.getsize(local)
     if not safe_replace:
-        sftp.put(local, remote, callback=callback)
-        try:
-            final = sftp.stat(remote)
-        except Exception:
-            return None                 # as before: unverifiable is not failure
-        if (final.st_size or 0) != local_size:
-            raise IOError(
-                f"weryfikacja po zapisie: rozmiar zdalny {final.st_size} B "
-                f"!= lokalny {local_size} B")
-        return final
+        return upload_direct(sftp, local, remote, callback)
 
     untouched = "plik na serwerze nie został zmieniony."
     try:

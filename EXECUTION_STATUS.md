@@ -3,7 +3,7 @@
 > Aktualizowane po każdym checkpoincie. Plan: `ROADMAP_V2.md`. Historia: `EXECUTION_LOG.md`.
 > Gotowość: `RELEASE_READINESS_V2.md`. Testy: `TEST_MATRIX_V2.md`.
 
-**Ostatnia aktualizacja:** 2026-10-15 (G10) · **Testy:** 1718 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
+**Ostatnia aktualizacja:** 2026-10-16 (zapis SFTP z potwierdzeniem) · **Testy:** 1730 PASS / 0 FAIL / 0 ERROR, bez skip/xfail
 (`py -3.13 -m pytest tests -q -p no:cacheprovider`) · **Build:** exe + instalator 2026-10-15 20:05,
 cykl instalacja → start → aktualizacja → deinstalacja (per-user, bez UAC) PASS
 
@@ -60,8 +60,8 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 
 1. Przeczytaj ten plik, potem `RELEASE_READINESS_V2.md`.
 2. Sprawdź niezmienniki (flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, sha `vpn_connect.py`,
-   V1 nietknięte), `git -C C:/claude/hospital_hub_v2 status`, uruchom testy — oczekiwane 1703 PASS.
-3. Zapytaj o wynik G1 i o G10.
+   V1 nietknięte), `git -C C:/claude/hospital_hub_v2 status`, uruchom testy — oczekiwane 1730 PASS.
+3. Zapytaj o odpowiedzi do G1 (pkt 5–6 w dzienniku), G1b i o G10.
 4. Przed szerokimi zmianami: commit w repo V2 (a dodatkowo migawka `.tgz` + dopisanie do `SHA256SUMS`).
 5. Po zmianach: testy, build (`build_v2.bat` — buduje też instalator), smoke startu exe offscreen,
    wpis w `EXECUTION_LOG.md`.
@@ -69,7 +69,7 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 ## Kolejka
 
 1. Po G1: korekta `_select_profile` wg zmierzonych stanów; ocena gotowości do G2.
-2. G10: decyzja użytkownika o włączeniu bezpiecznej podmiany (rekomendacja w `RELEASE_READINESS_V2.md` §G10) oraz o trybie bezpośrednim (zapis potokowy paramiko maskuje odrzucony zapis — patrz §G10).
+2. G10: decyzja użytkownika o włączeniu bezpiecznej podmiany (rekomendacja w `RELEASE_READINESS_V2.md` §G10). Maskowanie odrzuconego zapisu przez zapis potokowy — naprawione 2026-10-16 we wszystkich ścieżkach zapisu.
 3. Pozostawione znaleziska z `RELEASE_READINESS_V2.md` (L8 z Etapu 70, C1-16/18/19, D-08/D-10…).
 4. Ręczne scenariusze Windows z `TEST_MATRIX_V2.md` (Win+V, multi-window, RDP).
 5. PHASE F (redesign) — po stabilizacji (decyzja G9).
