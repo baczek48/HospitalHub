@@ -328,18 +328,24 @@ class MainWindow(QMainWindow):
     # Hospital list                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _search_hit(h, text: str) -> str:
+    def _search_hit(self, h, text: str) -> str:
         """Why `h` matches `text` ("" = it does not).  Hospital name, and —
         tickets name a server, not a hospital — machine IP / name /
-        description and database host / name (UX audit E-10)."""
+        description and database host / name (UX audit E-10).  Admin-only
+        entries count only while admin is unlocked: the result and its
+        tooltip must not reveal what the lock hides (review 71, R-01)."""
         if text in h.name.lower():
             return "name"
+        admin = getattr(self, '_admin_unlocked', False)
         for m in h.machines:
+            if m.admin_only and not admin:
+                continue
             if (text in (m.ip or "").lower() or text in (m.name or "").lower()
                     or text in (m.description or "").lower()):
                 return f"maszyna: {m.name or m.ip} ({m.ip})"
         for d in h.databases:
+            if d.admin_only and not admin:
+                continue
             if text in (d.host or "").lower() or text in (d.name or "").lower():
                 return f"baza: {d.name} ({d.host})"
         return ""
@@ -652,6 +658,7 @@ class MainWindow(QMainWindow):
         if self._detail_panel:
             self._detail_panel.set_admin_mode(True)
         self._admin_to_ssh_windows(True)
+        self._refresh_hospital_list()
         # Admin stays unlocked for the whole session — no auto-lock timer.
         # The user re-locks manually by clicking the 🔓 Admin button.
 
@@ -668,6 +675,7 @@ class MainWindow(QMainWindow):
         if self._detail_panel:
             self._detail_panel.set_admin_mode(False)
         self._admin_to_ssh_windows(False)
+        self._refresh_hospital_list()      # search hits follow the lock (R-01)
 
     def _admin_to_ssh_windows(self, unlocked: bool) -> None:
         """This vault's SSH windows follow its admin lock (UX audit S-03)."""

@@ -24,15 +24,20 @@ class _DiscardGuard:
 
     _initial = None
 
+    def _own(self, kind):
+        # Not the fields of a child dialog (an add-credential window opened
+        # from this one) — review 71, R-10.
+        return [w for w in self.findChildren(kind) if w.window() is self]
+
     def _snapshot(self) -> list:
         vals = []
-        for w in self.findChildren(QLineEdit):
+        for w in self._own(QLineEdit):
             vals.append(w.text())
-        for w in self.findChildren(QComboBox):
+        for w in self._own(QComboBox):
             vals.append(w.currentText())
-        for w in self.findChildren(QCheckBox):
+        for w in self._own(QCheckBox):
             vals.append(w.isChecked())
-        for w in self.findChildren((QTextEdit, QPlainTextEdit)):
+        for w in self._own((QTextEdit, QPlainTextEdit)):
             vals.append(w.toPlainText())
         model = getattr(self, '_machine', None) or getattr(self, '_db', None)
         if model is not None:
@@ -376,12 +381,14 @@ class MachineDialog(_DiscardGuard, FormStyled, QDialog):
 
     def _add_credential(self):
         dlg = CredentialDialog(self, admin_mode=self._admin_mode)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)   # no password left in a hidden child
         if dlg.exec():
             self._machine.credentials.append(dlg.get_credential())
             self._refresh_credentials()
 
     def _edit_credential(self, cred: models.Credential):
         dlg = CredentialDialog(self, cred, admin_mode=self._admin_mode)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         if dlg.exec():
             updated = dlg.get_credential()
             cred.login = updated.login
@@ -580,12 +587,14 @@ class DatabaseDialog(_DiscardGuard, FormStyled, QDialog):
 
     def _add_credential(self):
         dlg = CredentialDialog(self, admin_mode=self._admin_mode)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)   # no password left in a hidden child
         if dlg.exec():
             self._db.credentials.append(dlg.get_credential())
             self._refresh_credentials()
 
     def _edit_credential(self, cred: models.Credential):
         dlg = CredentialDialog(self, cred, admin_mode=self._admin_mode)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         if dlg.exec():
             updated = dlg.get_credential()
             cred.login    = updated.login

@@ -126,3 +126,22 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | ID | P | Znalezisko | Status | Commit / uwagi |
 |---|---|---|---|---|
 | X-01 | P0 | kolejka transferów SFTP po przełączeniu karty wysyłała pozostałe pliki przez połączenie nowej karty — na INNY serwer | NAPRAWIONE | pakiet SFTP — każda pozycja kolejki pamięta swoje połączenie; test + mutacja |
+
+## Przegląd kodu Etapu 71 (niezależny recenzent, 2026-10-16)
+
+Werdykt pierwszy: REQUEST CHANGES → wszystkie znaleziska poprawione, test `tests/test_review_71.py`
+(12; bez poprawek 11 FAIL).
+
+| ID | Waga | Znalezisko | Status |
+|---|---|---|---|
+| R-01 | wysoka | wyszukiwanie (i tooltip) ujawniało maszyny/bazy admin-only przy zablokowanym adminie | NAPRAWIONE |
+| R-02 | średnia | prawy klik w tabelę maszyn otwierał dwa menu (stare „Duplikuj” + nowe) | NAPRAWIONE |
+| R-03 | średnia | zamknięcie vaulta z transferem: „Nie zamykaj” ignorowane, okno SSH osierocone | NAPRAWIONE — vault zostaje |
+| R-04 | średnia | zamknięcie okna w trakcie pobierania zostawiało ucięty plik pod docelową nazwą | NAPRAWIONE — fragment usuwany |
+| R-05 | średnia | SGR: wartość koloru 58 brana za atrybut; `4:0` włączało podkreślenie | NAPRAWIONE |
+| R-06 | średnia/niska | multi-exec: bracketed paste brany z jednej sesji | NAPRAWIONE — tylko gdy wszystkie |
+| R-07 | niska | `exit` + serwer bez exit-status → automatyczne ponowne logowanie | NAPRAWIONE |
+| R-08 | niska | wyścig `isRunning()` w kolejce transferów | NAPRAWIONE — jawna flaga |
+| R-09 | niska | „Zapisz szerokości kolumn” zapisywało ściśnięte/0 | NAPRAWIONE |
+| R-10 | niska | fałszywe „Odrzucić zmiany?” po anulowanym oknie poświadczenia | NAPRAWIONE (+ okno zwalniane — bez hasła w pamięci) |
+| R-11 | niska | brak SI w miękkim resecie; znaczniki zawinięcia przy SU/SD | NAPRAWIONE |

@@ -331,7 +331,9 @@ def _setup_table_columns(
     # instead, which is a stable Python object held by the DetailPanel instance.
     table._header_ctx_menu_filter = _HeaderMenuFilter(
         hh,
-        lambda: save_column_widths(key, [table.columnWidth(c) for c in interactive_cols]),
+        # The user's widths, not the ones squeezed to fit a narrow window or
+        # the 0 of a hidden column (review 71, R-09).
+        lambda: save_column_widths(key, list(table._fit_spec[1])),
     )
     table._truncation_tooltip_filter = _TruncationTooltipFilter(table)
 
@@ -621,8 +623,6 @@ class DetailPanel(QWidget):
             }
         """)
         self._machines_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self._machines_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._machines_table.customContextMenuRequested.connect(self._on_machine_context_menu)
         self._machines_table.cellClicked.connect(self._on_machine_cell_clicked)
         self._machines_table.rows_reordered.connect(self._on_machines_reordered)
         self._machines_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1023,6 +1023,7 @@ class DetailPanel(QWidget):
                            lambda c=c: _clipboard_copy(c.password))
         menu.addSeparator()
         if kind == 'machine':
+            menu.addAction("📑  Duplikuj", lambda m=item: self._duplicate_machine(m))
             menu.addAction("⚙  Edytuj maszynę…", lambda m=item: self._edit_machine(m))
             menu.addAction("Usuń maszynę…", lambda m=item: self._delete_machine(m))
         else:

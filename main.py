@@ -484,7 +484,8 @@ class AppManager:
         try:
             from ui.ssh_panel import SshDialog
             for dlg in SshDialog.windows_of(window):
-                dlg.close_for_vault()
+                if not dlg.close_for_vault():
+                    return       # a transfer kept its window: the vault stays (R-03)
         except Exception:
             pass
         self.remove_window(window)

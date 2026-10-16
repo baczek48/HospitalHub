@@ -413,15 +413,24 @@ try:
                         flat.extend((head, 5, g[2]))
                     elif len(g) >= 5 and g[1] == 2:
                         flat.extend((head, 2, g[-3], g[-2], g[-1]))
+                elif head == 4:
+                    flat.append(24 if g[1] == 0 else 4)   # 4:0 off, 4:3 curly → on
                 elif head != 58:
-                    flat.append(head)          # e.g. 4:3 curly → underline
+                    flat.append(head)
         if final == 'm' and 58 in flat:
+            # Drop the underline-colour attribute (58;5;n / 58;2;r;g;b) by
+            # position — a 58 that is a colour VALUE (38;5;58) stays (R-05).
             out, i = [], 0
             while i < len(flat):
-                if flat[i] == 58:
-                    i += 3 if flat[i + 1:i + 2] == [5] else 5
+                v = flat[i]
+                if v in (38, 48, 58):
+                    kind = flat[i + 1] if i + 1 < len(flat) else None
+                    size = 3 if kind == 5 else 5 if kind == 2 else 1
+                    if v != 58:
+                        out.extend(flat[i:i + size])
+                    i += size
                     continue
-                out.append(flat[i])
+                out.append(v)
                 i += 1
             flat = out
         return flat
@@ -638,7 +647,7 @@ try:
                 buf.pop(y, None)
             self._soft_wrapped = {
                 (r - n if top <= r <= bottom else r) for r in self._soft_wrapped
-                if not (top <= r <= bottom) or r - n > top}
+                if not (top <= r <= bottom) or r - n >= top}
             self.dirty.update(range(top, bottom + 1))
 
         def scroll_down(self, count=None, *args, **kwargs):
@@ -654,7 +663,7 @@ try:
                 buf.pop(y, None)
             self._soft_wrapped = {
                 (r + n if top <= r <= bottom else r) for r in self._soft_wrapped
-                if not (top <= r <= bottom) or (r > top and r + n <= bottom)}
+                if not (top <= r <= bottom) or r + n <= bottom}
             self.dirty.update(range(top, bottom + 1))
 
         def repeat_last(self, count=None, *args, **kwargs):
@@ -1125,6 +1134,12 @@ class TerminalWidget(QWidget):
         self.alt_screen = False
         #: How many sessions a paste reaches (multi-exec); set by SshDialog.
         self.paste_targets = lambda: 1
+        #: In multi-exec: did EVERY receiving session ask for bracketed
+        #: paste?  Otherwise the text goes unwrapped, with the warning that
+        #: each line runs at once (review 71, R-06).
+        self.paste_bracketed_everywhere = lambda: True
+        #: The last command line sent with Enter, and Ctrl+D (R-07).
+        self.last_command = b''
         self._mouse_button = None
 
         # Buffer of bytes typed on the current input line. Used by
@@ -1307,8 +1322,11 @@ class TerminalWidget(QWidget):
                 if b == 0x0c:  # Ctrl+L — shell turns this into a clear sequence
                     screen._user_clear_pending = True
                     self._typed_line.clear()
+                elif b == 0x04:  # Ctrl+D — the shell may end
+                    self.last_command = b'^d'
                 elif b in (0x0d, 0x0a):  # Enter
                     line = bytes(self._typed_line).strip().lower()
+                    self.last_command = line
                     for sep in (b';', b'&', b'|', b'`'):
                         line = line.replace(sep, b' ')
                     tokens = line.split()
@@ -1955,7 +1973,8 @@ class TerminalWidget(QWidget):
             return
         text = text.replace('\r\n', '\r').replace('\n', '\r')
         bracketed = (self._screen is not None
-                     and (2004 << 5) in self._screen.mode)
+                     and (2004 << 5) in self._screen.mode
+                     and self.paste_bracketed_everywhere())
         lines = text.rstrip('\r').count('\r') + 1
         targets = max(1, int(self.paste_targets() or 1))
         if (lines > 1 and not bracketed) or targets > 1:
@@ -3244,7 +3263,7 @@ class _CancelledError(Exception):
 #: Leaves whatever a dead session switched on: alternate screen, scroll
 #: region, application cursor keys, hidden cursor, attributes, bracketed
 #: paste, mouse reporting, autowrap off (T-20).
-_TERM_SOFT_RESET = ('\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[r\x1b[?1l'
+_TERM_SOFT_RESET = ('\x0f\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[r\x1b[?1l'
                     '\x1b[?25h\x1b(B\x1b[0m\x1b[?2004l\x1b[?1000l'
                     '\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h')
 
@@ -3260,6 +3279,19 @@ def _own_signals(obj) -> list:
             if isinstance(value, pyqtSignal):
                 out.append(getattr(obj, name))
     return out
+
+
+def _remove_partial_download(path: str, tries: int = 10) -> None:
+    """Delete a cut download; while the retired worker still holds the file
+    open (Windows locks it), try again a little later."""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    except OSError:
+        pass
+    if tries > 0:
+        QTimer.singleShot(500, lambda: _remove_partial_download(path, tries - 1))
 
 
 def _unplug_and_retire(workers, budget_ms: int = 1000) -> None:
@@ -5437,6 +5469,8 @@ class SftpPanel(QWidget):
         self._enqueue_transfers([(mode, remote, local, size)])
 
     def _transfer_busy(self) -> bool:
+        if getattr(self, '_transfer_in_progress', False):
+            return True
         w = self._active_transfer_worker
         try:
             return w is not None and w.isRunning()
@@ -5527,6 +5561,10 @@ class SftpPanel(QWidget):
             self._list(self._path)
 
     def _start_single_transfer(self, mode, remote, local, size):
+        # Set until the queue ends or is cancelled: a request arriving
+        # between a worker's end and its queued "done" joins the queue
+        # instead of starting a second transfer (review 71, R-08).
+        self._transfer_in_progress = True
         self._transfer_current_mode   = mode
         self._transfer_current_remote = remote
         self._transfer_current_owner  = self._ssh_client
@@ -5549,6 +5587,9 @@ class SftpPanel(QWidget):
             target_existed = self._remote_exists(remote)
         else:
             target_existed = os.path.exists(local)
+        # What stop() must clean up if the window closes mid-transfer (R-04).
+        self._transfer_partial = (local if mode == 'get' and not target_existed
+                                  else None)
         w = _TransferWorker(self._ssh_client, mode, remote, local, size,
                             open_lock=self._sftp_open_lock)
         self._active_transfer_worker = w
@@ -5664,6 +5705,7 @@ class SftpPanel(QWidget):
             self.status_msg.emit("Transfer anulowany", False)
 
     def _transfer_finished_cleanup(self):
+        self._transfer_in_progress = False
         self._progress.setRange(0, 100)
         self._progress.setFormat("%p%")
         self._progress.setVisible(False)
@@ -6873,14 +6915,21 @@ class SftpPanel(QWidget):
         self._watched_files.clear()
         self._upload_active.clear()
         w = self._active_transfer_worker
+        partial = None
         if w is not None:
             try:
                 if w.isRunning():
                     w.cancel()      # stops at the next block, closes its channel
+                    partial = getattr(self, '_transfer_partial', None)
             except RuntimeError:
                 pass
         _unplug_and_retire(self._workers)
         self._workers = []
+        if partial:
+            # The cancelled download's slot no longer runs (signals cut): a
+            # file that did not exist before must not stay behind looking
+            # complete (review 71, R-04).
+            _remove_partial_download(partial)
         # sftp / ssh_client are owned by _Session objects — closed there
 
     def transfer_running(self) -> bool:
@@ -8100,6 +8149,7 @@ class SshDialog(QDialog):
         term.term_reply.connect(lambda data, s=session: s.worker.send(data))
         term.search_requested.connect(self._open_search)
         term.paste_targets = lambda t=term: self._paste_target_count(t)
+        term.paste_bracketed_everywhere = lambda t=term: self._paste_bracketed_everywhere(t)
         term.resize_pty.connect(
             lambda c, r, s=session: self._resize_pty_worker(s.worker, c, r))
 
@@ -8601,6 +8651,11 @@ class SshDialog(QDialog):
     def _on_session_dropped(self, session: '_Session'):
         if session not in self._sessions or session.reconnecting:
             return
+        last = getattr(session.term, 'last_command', b'')
+        if last in (b'exit', b'logout', b'^d') or last.endswith((b' exit', b';exit')):
+            # The user logged out; some servers (network devices) close
+            # without an exit status — not a dropped link (review 71, R-07).
+            return
         session.reconnecting = True
         session.reconnect_attempts = 0
         ts = datetime.now().strftime('%H:%M:%S')
@@ -8770,6 +8825,17 @@ class SshDialog(QDialog):
         else:
             self._search_edit.setFocus()
             self._search_edit.selectAll()
+
+    def _paste_bracketed_everywhere(self, term) -> bool:
+        if not self._multiexec:
+            return True
+        for s in self._sessions:
+            if s.excluded:
+                continue
+            scr = s.term._screen
+            if scr is None or (2004 << 5) not in scr.mode:
+                return False
+        return True
 
     def _paste_target_count(self, term) -> int:
         """Sessions a paste from `term` reaches: all non-excluded ones in
@@ -8988,13 +9054,16 @@ class SshDialog(QDialog):
             self._cred = vis[0] if vis else None
         self._env_panel.set_admin_mode(unlocked)
 
-    def close_for_vault(self) -> None:
+    def close_for_vault(self) -> bool:
         """The vault this window came from is closing.  A running transfer
-        still gets its question; otherwise the window simply goes."""
+        still gets its question; otherwise the window simply goes.  False
+        when the user kept the window — the vault must then stay open too,
+        or the window would outlive it with its passwords (review 71, R-03)."""
         if self._sftp_panel.transfer_running():
             self.close()
-        else:
-            self.close_without_asking()
+            return not self.isVisible()
+        self.close_without_asking()
+        return True
 
     def close_without_asking(self) -> None:
         """Close for the application (quit, vault closed): no questions."""
