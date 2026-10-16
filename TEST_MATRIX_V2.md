@@ -24,6 +24,10 @@ izolacji. Każde trafienie w prawdziwy system = test FAIL (lub sesja FAIL, gdy p
 | SFTP — edycja w zewnętrznym edytorze: pliki o tej samej nazwie (serwery, katalogi, okna, karty), wiązanie z połączeniem, ponowne pobranie, niewysłane edycje, anulowanie, zerwanie transferu, bezpieczna podmiana (tmp + posix-rename, właściciel, symlink, brak rozszerzenia) | `test_sftp_edit_collisions.py` (36; prawdziwy `SftpPanel`, workery synchronicznie, serwery in-memory) | regression, security | nie — test zapisu SFTP G10 w wierszu niżej |
 | SFTP — bezpieczny zapis na prawdziwym protokole (G10): zastąpienie pliku, zerwanie połączenia, anulowanie, błąd zapisu serwera (też „dziura” przy poprawnym rozmiarze), brak/odmowa posix-rename, brak prawa tworzenia, `O_EXCL`, tryb bezpośredni dla porównania | `test_sftp_safe_replace_protocol.py` (15; serwer paramiko w procesie przez `socketpair`, pliki XML w katalogu tymczasowym) | integration, regression | nie (żywy serwer POSIX — nie) |
 | SSH — X11 domyślnie włączony (G8): żądanie przed PTY, odmowa serwera, brak lokalnego X | `test_ssh_x11_default.py` | regression | nie |
+| **Etap 71 (UX):** terminal vs tmux/vim/less — SU/SD, alt-screen, BCE, ACS, REP, odpowiedzi DA/CPR, klawisze xterm, bracketed paste i potwierdzenie wklejania, mysz, UTF-8 na granicy odczytu, kolorowanie | `test_terminal_emulation.py` (40) | regression, security | nie (prawdziwy tmux — ręcznie) |
+| **Etap 71:** cykl sesji SSH — zerwanie łącza → auto-reconnect, `exit` ≠ zerwanie; zamykanie okna w trakcie transferu/listowania, Esc, blokada admina i zamknięcie vaulta | `test_ssh_session_lifecycle.py`, `test_ssh_window_close.py` (serwer SSH/SFTP paramiko w procesie, `tests/ssh_fake_server.py`) | integration, regression | nie |
+| **Etap 71:** SFTP — kolejka z właścicielem połączenia, dopisywanie, jedno podsumowanie przy zerwaniu, nazwy spoza UTF-8, zmiana nazwy z „/”, klawisze tabeli, tytuł okna, szerokość panelu | `test_sftp_queue_and_listing.py`, `test_ux_ssh_window.py` | integration, regression | nie |
+| **Etap 71:** okno główne i dialogi — wyszukiwanie po IP/maszynie/bazie, duplikat szpitala, potwierdzenia „Nie” domyślnie, odmiana, elipsy, porty, pytanie o porzucenie zmian, tłumaczenia Qt, styl formularzy, tabele (dopasowanie kolumn, menu kont), stany puste, VPN dodaj/wróć | `test_ux_main_window.py`, `test_ux_dialogs.py`, `test_ux_confirm_plural.py`, `test_ux_tables.py` | regression | zrzuty offscreen (oba motywy, 1.0–2.0) |
 | Instalator: instalacja, start, aktualizacja, deinstalacja, izolacja danych | ręcznie, per-user do scratch (`/CURRENTUSER /VERYSILENT /DIR=`) | e2e | **tak, 2026-10-15** (admin/UAC — nie) |
 | RDP i schowek | `test_rdp_clipboard_safety.py` | unit, security | nie (Win+V do weryfikacji) |
 | Diagnostyka i redakcja | `test_diagnostics.py`, `test_vpn_trace.py` | unit, security | nie |
@@ -48,6 +52,11 @@ izolacji. Każde trafienie w prawdziwy system = test FAIL (lub sesja FAIL, gdy p
 | SSH/SFTP na realnym serwerze: edycja zdalna, anulowanie uploadu, reconnect | sieć | ręcznie |
 | Instalator: instalacja obok V1, aktualizacja, odinstalowanie | brak Inno Setup + zmiana systemu | G6/G7 |
 | Wydajność: zapis vaulta bez zamrożenia, 8 sesji SSH × godzina | pomiar na maszynie | ręcznie |
+| **Etap 71:** tmux 3.2+ na prawdziwym serwerze (panele, `seq 1 500`, pasek statusu, `mouse on`, detach/attach), vim/htop/mc/less; Alt+litera, Shift+Tab, AltGr (ą, ę, @) na polskiej klawiaturze | prawdziwy serwer, klawiatura Windows | ręcznie |
+| **Etap 71:** zerwanie VPN/sieci w trakcie sesji SSH → auto-reconnect, edycja pliku w edytorze przez zerwanie | sieć | ręcznie |
+| **Etap 71:** wygląd na prawdziwym ekranie: 1366×768 przy 125/150 %, 4K przy 200 %, emoji/ikony Win10 vs Win11, „!” w banerze terminala | ekran, DirectWrite | ręcznie |
+| **Etap 71:** wylogowanie Windows z niezapisanymi zmianami w vaulcie (S-13) | sesja Windows | ręcznie |
+| **Etap 71:** smoke startu zbudowanego exe — gdy żadna inna instancja HospitalHub V2 nie działa (mechanizm pojedynczej instancji) | proces | ręcznie / automatycznie przy zamkniętej aplikacji |
 
 ## Procedura przed wydaniem
 

@@ -122,11 +122,11 @@ skale 1.0–2.0). Migawka przed etapem: `hh_v2_snapshot_2026-10-16_pre_ux.tgz`.
 
 | Krok | Zakres | Stan |
 |---|---|---|
-| 71A | audyt (4 niezależnych audytorów: terminal/tmux, wizualny, ergonomia, scenariusze) | w toku |
-| 71B | reprodukcja → test regresji → minimalna poprawka → pełny zestaw → weryfikacja wizualna | — |
-| 71C | redesign: inwentaryzacja ekranów, problemy UX, zasady wizualne, wdrażanie modułami | — |
-| 71D | walidacja wizualna i użytkowa (przed/po) | — |
-| 71E | dokumentacja, statusy znalezisk (UX-xx), kryteria zamknięcia | — |
+| 71A | audyt (4 niezależnych audytorów: terminal/tmux, wizualny, ergonomia, scenariusze) — 89 znalezisk | **DONE** |
+| 71B | reprodukcja → test regresji → minimalna poprawka → pełny zestaw → weryfikacja wizualna | **DONE** (P0 ×6, terminal, SFTP, okno główne, dialogi, okno SSH) |
+| 71C | redesign (`REDESIGN_V2.md`): R1 paleta formularzy, R2 tabele, R3 stany puste, R4 ikony | **DONE**; 4 decyzje strukturalne czekają na właściciela |
+| 71D | walidacja wizualna (zrzuty offscreen przed/po, oba motywy, 1.0–2.0) | **DONE** offscreen; ekran/serwer — ręcznie |
+| 71E | dokumentacja, statusy w `UX_AUDIT_V2.md`, przegląd kodu (REQUEST CHANGES → 11/11 poprawione) | **DONE** |
 
 Rejestr znalezisk: `UX_AUDIT_V2.md` (statusy: potwierdzony / naprawiony i zweryfikowany /
 nierozwiązany / wymaga ręcznego testu).

@@ -495,3 +495,41 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   5. Odczekaj 5 s, zatrzymaj sondę (Ctrl+C), nie zamykaj okna przed końcem zapisu.
   Do zmierzenia: FOCUSED po drugim Shift+Tab, EXPANDED po Spacji, wartość po Enterze = profil
   docelowy, stan końcowy COLLAPSED.
+
+---
+
+## 2026-10-16 — Etap 71: UX polish, drobne defekty, redesign
+
+- **71A audyt:** czterech niezależnych audytorów (terminal/tmux, wizualny, ergonomia, scenariusze
+  codzienne), offscreen z prawdziwymi fontami (harness: Segoe UI 9 pt, oba motywy, skale
+  1.0–2.0) i serwerem SSH/SFTP paramiko w procesie (socketpair, bez sieci). 89 znalezisk →
+  `UX_AUDIT_V2.md` (statusy, commity). Migawka przed etapem: `hh_v2_snapshot_2026-10-16_pre_ux.tgz`.
+- **P0 (bezpieczeństwo, utrata danych, crash):** S-01 zerwane łącze SSH = „exit” (paramiko
+  `exit_status_ready()`/`status_event` prawdziwe dla każdego zamkniętego kanału) — auto-reconnect
+  nigdy nie działał, a zapisy z edytora ginęły; S-02 zamknięcie okna SSH w trakcie transferu
+  zabijało cały proces (0xC0000374); S-03 okna SSH ignorowały blokadę admina i przeżywały
+  zamknięcie vaulta; T-18/E-05 wklejanie wielu linii (także do wszystkich sesji multi-exec) bez
+  potwierdzenia; E-07 usuwanie z domyślnym „Tak”; **X-01** (znalezione przy naprawie): kolejka
+  SFTP po przełączeniu karty wysyłała resztę plików na INNY serwer.
+- **Terminal** (`64a327a`): parser i ekran pod tmux/vim/less (SU/SD, alt-screen, BCE, ACS, REP,
+  DA/CPR, prefiksy `>`/`=`, SGR z dwukropkiem), worker (dekoder przyrostowy, bez kolorowania w
+  aplikacjach pełnoekranowych, Ctrl+C), klawisze xterm, mysz, kursor, atrybuty, rozmiar PTY (V-01).
+- **Pakiety 71B:** SFTP (kolejka, nazwy spoza UTF-8, komunikaty), okno główne (wyszukiwanie po
+  IP/maszynie/bazie, duplikat szpitala, elipsy), dialogi (polskie znaki, tłumaczenia Qt, porty,
+  pytanie o porzucenie zmian), okno SSH (klik zaznacza, klawisze, tytuły, szerokość panelu).
+- **71C redesign** (`REDESIGN_V2.md`): R1 jedna paleta formularzy (`ui/style.py`), R2 tabele
+  (zwarte akcje, dopasowanie kolumn, menu wszystkich kont, „Połącz jako”), R3 stany puste,
+  R4 ikony w jasnym motywie. Decyzje strukturalne (jedno okno SSH na szpital, profil VPN w
+  szpitalu, model edycji, aktywna sesja multi-exec) — u właściciela.
+- **Weryfikacja:** każda poprawka z testem regresji; mutacje (cofnięcie poprawki → FAIL) dla
+  S-01, S-02, S-03, E-07, terminala (3), kolejki SFTP, okna głównego; zrzuty przed/po.
+  **1863 PASS / 0 FAIL.** Build exe + instalator po przeglądzie. Smoke startu exe NIE wykonany: działała
+  zainstalowana przez użytkownika instancja (Program Files, od 11:04) i mechanizm pojedynczej
+  instancji przekazał aktywację — do powtórzenia przy zamkniętej aplikacji.
+- **Przegląd kodu** (niezależny recenzent): REQUEST CHANGES — R-01 (wysoka: wyszukiwanie ujawniało
+  maszyny/bazy admin-only przy zablokowanym adminie), R-02 (dwa menu przy prawym kliku) i 9
+  mniejszych; wszystkie poprawione (`1cfd4ad`, `tests/test_review_71.py`, bez poprawek 11/12 FAIL).
+  Przy okazji: wyjątek w konstruktorze widżetu w testach kończył proces pytest po cichu (kod 127,
+  hak wyjątków aplikacji) — objaw „zawieszonego” zestawu; przyczyna była w łatce, nie w testach.
+- Niezmienniki: flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, `vpn_connect.py` a929035e,
+  `HospitalHubV2.spec` bez zmian, V1 nietknięte.

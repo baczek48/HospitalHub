@@ -7,7 +7,10 @@
 
 ## Werdykt
 
-**V2 NIE jest gotowe do wdrożenia.** Zmiany etapów 63–70 są zaimplementowane, pokryte testami
+**V2 NIE jest gotowe do wdrożenia.** Etap 71 (UX, 2026-10-16): 89 znalezisk audytu — 81
+naprawionych i zweryfikowanych (test regresji, mutacja lub zrzut), reszta jawnie opisana w
+`UX_AUDIT_V2.md`; 1863 PASS; wymaga ręcznej weryfikacji na prawdziwym ekranie i serwerze (tmux,
+reconnect, DPI) — lista w `TEST_MATRIX_V2.md`. Zmiany etapów 63–70 są zaimplementowane, pokryte testami
 fake (1718 PASS, bez skip/xfail) i każda przeszła niezależny przegląd (APPROVE WITH NOTES, po
 dwóch REJECT poprawionych). Żadna z nich nie była sprawdzona na żywym systemie poza smoke startem
 exe i instalatora. Kluczowe ścieżki VPN V2 nie mają weryfikacji live (G1/G2). Instalator buduje
@@ -68,6 +71,15 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 6. IPsec w FortiClient V2 zawsze BLOCKED (L10); zawieszony FortiClient = „Trwa inne łączenie”
    dla wszystkich kart do restartu (N2).
 7. V2 ma lokalne repo Git (bez remote) + migawki `.tgz` z `SHA256SUMS`; brak kopii poza tym dyskiem.
+8. **Etap 71 (2026-10-16) zmienia zachowania widoczne dla użytkownika** (wszystkie świadome,
+   z rejestru `UX_AUDIT_V2.md`): Esc nie zamyka okna SSH; zamknięcie okna z transferem lub ≥ 2
+   sesjami pyta; zerwane łącze SSH łączy się ponownie zamiast zamykać kartę; wklejenie wielu
+   linii bez bracketed paste lub do wielu sesji (multi-exec) pyta; klik w karcie Środowiska
+   zaznacza (łączy dwuklik/Enter); potwierdzenia usunięcia mają domyślnie „Nie/Anuluj”; prawy
+   klik w terminalu, gdy aplikacja (tmux `mouse on`) prosi o mysz, idzie do aplikacji (wklejenie:
+   Shift+prawy klik lub Ctrl+Shift+V); tabele chowają mniej ważne kolumny na wąskim ekranie.
+9. Terminal: parser pyte uzupełniony o własną kopię FSM (`_TermStream`) — przy aktualizacji pyte
+   sprawdzić zgodność (`test_terminal_emulation.py`).
 
 ## Pozostawione znaleziska (świadomie, z przeglądów i audytów)
 
