@@ -79,11 +79,11 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
 | V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
 | V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | REDESIGN | 71C — stany puste |
-| V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | REDESIGN | 71C — wspólne style przycisków |
+| V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | NAPRAWIONE | R1 — przyciski danger |
 | V-17 | P3 | placeholder portu „22 (dom…” | NAPRAWIONE | pakiet dialogów |
 | V-18 | P3 | nagłówek SFTP „UPRAWNIENI” | NAPRAWIONE | pakiet okna SSH — „Prawa” |
 | V-19 | P2 | okno VPN: rozmiar dryfuje po edycji, min. 640 zostaje | NAPRAWIONE | pakiet okna głównego |
-| V-20 | — | niespójne dialogi (paleta, kolejność przycisków, etykiety) | REDESIGN | |
+| V-20 | — | niespójne dialogi (paleta, kolejność przycisków, etykiety) | NAPRAWIONE | R1 — ui/style.py FormStyled: jedna paleta, akcja główna z akcentem, Anuluj | Akcja |
 | V-21 | — | ikony-glify i emoji | REDESIGN | |
 | V-22 | P3 | Ustawienia VPN: lista ścieżek zapada się | RĘCZNY TEST | |
 | V-23 | P2 | domyślne rozmiary okien nie mieszczą się na 1366×768 @150% | RĘCZNY TEST | |

@@ -14,6 +14,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import models
 from ui.utils import confirm, parse_port
+from ui.style import FormStyled
 
 
 class _DiscardGuard:
@@ -104,7 +105,7 @@ def clear_secret_from_clipboard() -> None:
         pass
 
 
-class HospitalDialog(QDialog):
+class HospitalDialog(FormStyled, QDialog):
     def __init__(self, parent=None, name: str = ""):
         super().__init__(parent)
         self._name = name
@@ -144,7 +145,7 @@ class HospitalDialog(QDialog):
         return self._name
 
 
-class CredentialDialog(_DiscardGuard, QDialog):
+class CredentialDialog(_DiscardGuard, FormStyled, QDialog):
     def __init__(self, parent=None, credential: models.Credential = None,
                  admin_mode: bool = False):
         super().__init__(parent)
@@ -218,7 +219,7 @@ class CredentialDialog(_DiscardGuard, QDialog):
         return self._cred
 
 
-class MachineDialog(_DiscardGuard, QDialog):
+class MachineDialog(_DiscardGuard, FormStyled, QDialog):
     def __init__(self, parent=None, machine: models.Machine = None,
                  admin_mode: bool = False):
         super().__init__(parent)
@@ -367,7 +368,7 @@ class MachineDialog(_DiscardGuard, QDialog):
 
         btn_del = QPushButton("Usuń")
         btn_del.setMaximumWidth(58)
-        btn_del.setStyleSheet("color: #c0392b;")
+        btn_del.setProperty("danger", True)
         btn_del.clicked.connect(lambda _, c=cred: self._delete_credential(c))
         row.addWidget(btn_del)
 
@@ -448,7 +449,7 @@ class MachineDialog(_DiscardGuard, QDialog):
         return self._machine
 
 
-class DatabaseDialog(_DiscardGuard, QDialog):
+class DatabaseDialog(_DiscardGuard, FormStyled, QDialog):
     def __init__(self, parent=None, database: models.Database = None,
                  admin_mode: bool = False):
         super().__init__(parent)
@@ -571,7 +572,7 @@ class DatabaseDialog(_DiscardGuard, QDialog):
 
         btn_del = QPushButton("Usuń")
         btn_del.setMaximumWidth(58)
-        btn_del.setStyleSheet("color: #c0392b;")
+        btn_del.setProperty("danger", True)
         btn_del.clicked.connect(lambda _, c=cred: self._delete_credential(c))
         row.addWidget(btn_del)
 
@@ -620,7 +621,7 @@ class DatabaseDialog(_DiscardGuard, QDialog):
         return self._db
 
 
-class ChangePasswordDialog(QDialog):
+class ChangePasswordDialog(FormStyled, QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._result = None
@@ -684,7 +685,7 @@ class ChangePasswordDialog(QDialog):
         return self._result
 
 
-class AdminSetupDialog(QDialog):
+class AdminSetupDialog(FormStyled, QDialog):
     """Dialog to set or change the admin password."""
     def __init__(self, parent=None, is_change: bool = False):
         super().__init__(parent)
@@ -749,7 +750,7 @@ class AdminSetupDialog(QDialog):
         return self._password
 
 
-class AdminUnlockDialog(QDialog):
+class AdminUnlockDialog(FormStyled, QDialog):
     """Dialog to enter admin password to unlock hidden items.
 
     With `verify`, a wrong password is said under the field and the dialog

@@ -131,3 +131,19 @@ def test_v09_qt_buttons_in_polish(app):
     box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
     texts = {b.text().replace("&", "") for b in box.buttons()}
     assert "Tak" in texts and "Anuluj" in texts
+
+
+def test_r1_forms_get_one_style_with_a_marked_primary_action(app):
+    import models
+    from PyQt6.QtWidgets import QPushButton
+    from ui.dialogs import MachineDialog
+    d = MachineDialog(None, models.Machine(ip="1.2.3.4", credentials=[
+        models.Credential(login="a", password="b")]))
+    d.show()
+    app.processEvents()
+    assert "QPushButton[primary" in d.styleSheet()
+    primary = [b.text() for b in d.findChildren(QPushButton) if b.property("primary")]
+    danger = [b.text() for b in d.findChildren(QPushButton) if b.property("danger")]
+    assert primary == ["Zapisz maszynę"] and danger == ["Usuń"]
+    d._initial = None
+    d.reject()

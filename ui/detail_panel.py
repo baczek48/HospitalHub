@@ -131,6 +131,7 @@ from ui import theme
 from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard_copy
 from ui.thread_retire import retire_thread
 from ui.utils import ElidedLabel, confirm, plural
+from ui.style import FormStyled
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
 from ui.db_connect import launch_sqldeveloper
@@ -319,7 +320,7 @@ def _vpn_status_key(profile) -> tuple:
     return (profile.provider, profile.app_path, profile.profile_name)
 
 
-class _VpnUnlockDialog(QDialog):
+class _VpnUnlockDialog(FormStyled, QDialog):
     """Dialog to pick a personal VPN vault file and enter its password."""
 
     def __init__(self, parent=None):

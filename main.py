@@ -219,6 +219,7 @@ def apply_dark_theme(app: QApplication):
     palette.setColor(QPalette.ColorRole.Link, highlight)
     palette.setColor(QPalette.ColorRole.Highlight, highlight)
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(110, 118, 129))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, dim_text)
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, dim_text)
     palette.setColor(QPalette.ColorRole.Mid, light_bg)

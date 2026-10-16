@@ -13,6 +13,7 @@ from PyQt6.QtSvg import QSvgRenderer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crypto import encrypt, decrypt
 import models
+from ui.style import FormStyled
 from vault_io import vault_kind_error
 from config import (load_last_vault, save_last_vault, load_vault_list,
                      register_vault, load_active_vault_index, save_active_vault_index)
@@ -418,7 +419,7 @@ class LoginDialog(QDialog):
 # Sub-dialogs                                                         #
 # ------------------------------------------------------------------ #
 
-class _CreateVaultDialog(QDialog):
+class _CreateVaultDialog(FormStyled, QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._result = None
@@ -568,7 +569,7 @@ class _CreateVaultDialog(QDialog):
         return self._vault_type
 
 
-class _OpenVaultDialog(QDialog):
+class _OpenVaultDialog(FormStyled, QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._result = None
