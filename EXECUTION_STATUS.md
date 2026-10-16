@@ -44,7 +44,8 @@ cykl instalacja → start → aktualizacja → deinstalacja (per-user, bez UAC) 
 
 ## Aktywne
 
-Brak — kolejne kroki wymagają użytkownika (niżej).
+**Etap 71 — UX polish + redesign** (zlecenie 2026-10-16, `ROADMAP_V2.md` §Etap 71, rejestr
+`UX_AUDIT_V2.md`). 71A audyt w toku.
 
 ## Zablokowane (wymagają użytkownika)
 

@@ -104,7 +104,7 @@ Zakres zgodny z dyrektywą i `AUDYT_V2.md` (§3 wydajność P1–P12, §9 bezpie
 | G6 | instalacja/odinstalowanie instalatora na maszynie | per-user (scratch) **zrobione 10-15**; instalacja admin wymaga UAC |
 | G7 | **ROZSTRZYGNIĘTE 10-15:** Inno Setup 6.7.1 zainstalowany przez użytkownika | — |
 | G8 | **ROZSTRZYGNIĘTE 10-15 (korekta):** X11 domyślnie WŁĄCZONY, zachowanie bez zmian, testy regresji | — |
-| G9 | **ROZSTRZYGNIĘTE 10-15:** redesign odłożony do końca stabilizacji i testów przedwdrożeniowych | — |
+| G9 | **ROZSTRZYGNIĘTE 10-15:** redesign odłożony do końca stabilizacji; **10-16: właściciel uruchomił Etap 71 (UX polish + redesign)** | — |
 | G10 | włączenie bezpiecznej podmiany SFTP (tmp + posix-rename) | test bezpieczeństwa i zgodności zapisu SFTP wykonany 10-15 (pliki XML, bez prawdziwych serwerów); włączenie flagi = decyzja użytkownika |
 
 ## Etap 70 (2026-10-15) — SFTP: edycja w zewnętrznym edytorze
@@ -112,3 +112,21 @@ Zakres zgodny z dyrektywą i `AUDYT_V2.md` (§3 wydajność P1–P12, §9 bezpie
 Zakres wąski (bez przebudowy SSH/SFTP): kolizje plików o tej samej nazwie, wiązanie
 edycji z serwerem/sesją/ścieżką, bezpieczny zapis. Stan: **DONE**, review APPROVE WITH
 NOTES ×2. Włączenie bezpiecznej podmiany — bramka G10 (test zapisu SFTP 10-15 PASS, flaga wyłączona). Szczegóły: `EXECUTION_LOG.md`.
+
+## Etap 71 (od 2026-10-16) — UX polish, drobne defekty i redesign (= PHASE F)
+
+Zlecenie właściciela 2026-10-16. Zasady: tylko V2; bez zmian logiki biznesowej, zabezpieczeń
+i integracji pod wygląd; bez live VPN i danych produkcyjnych; zielone testy ≠ działający UI —
+każda zmiana wizualna sprawdzana na zrzucie (harness offscreen, Segoe UI 9 pt, oba motywy,
+skale 1.0–2.0). Migawka przed etapem: `hh_v2_snapshot_2026-10-16_pre_ux.tgz`.
+
+| Krok | Zakres | Stan |
+|---|---|---|
+| 71A | audyt (4 niezależnych audytorów: terminal/tmux, wizualny, ergonomia, scenariusze) | w toku |
+| 71B | reprodukcja → test regresji → minimalna poprawka → pełny zestaw → weryfikacja wizualna | — |
+| 71C | redesign: inwentaryzacja ekranów, problemy UX, zasady wizualne, wdrażanie modułami | — |
+| 71D | walidacja wizualna i użytkowa (przed/po) | — |
+| 71E | dokumentacja, statusy znalezisk (UX-xx), kryteria zamknięcia | — |
+
+Rejestr znalezisk: `UX_AUDIT_V2.md` (statusy: potwierdzony / naprawiony i zweryfikowany /
+nierozwiązany / wymaga ręcznego testu).

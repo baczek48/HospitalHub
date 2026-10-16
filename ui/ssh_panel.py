@@ -2333,20 +2333,18 @@ class _SshWorker(QThread):
                     # else: UI is behind; let the kernel buffer absorb it.
                     # We loop back, drain _send_q again (so Ctrl+C still goes
                     # out without delay), then re-check back-pressure.
-                if self._channel.exit_status_ready():
-                    break    # shell exited normally (user typed exit / script ended)
+                if (self._channel.exit_status != -1
+                        and not self._channel.recv_ready()):
+                    # The server sent an exit status: the shell ended
+                    # (exit, Ctrl+D, a script finished).  Not
+                    # exit_status_ready() nor status_event — paramiko sets
+                    # both for ANY closed channel, so a dropped link looked
+                    # like a logout and auto-reconnect never ran (UX audit
+                    # S-01).  exit_status stays -1 until the message arrives.
+                    break
                 if self._channel.closed:
-                    # Channel closed without an exit status. Tell a clean logout
-                    # apart from a connection that dropped under us (idle NAT /
-                    # firewall timeout, network change) by checking the whole
-                    # transport: still active → normal shell exit, just break;
-                    # dead → fire `dropped` so the UI silently auto-reconnects
-                    # and the tab keeps living until the user closes it himself
-                    # (instead of vanishing or nagging for a manual retry).
-                    transport = self._client.get_transport()
-                    if transport is not None and transport.is_active():
-                        break
-                    self.dropped.emit()
+                    if self._session_dropped():
+                        self.dropped.emit()
                     break
                 # Idle wait — but wake immediately when send() pushes a
                 # keystroke (e.g. Ctrl+C). Without this we could spend 20 ms
@@ -2376,6 +2374,25 @@ class _SshWorker(QThread):
             self.error.emit(f"Błąd połączenia: {type(e).__name__}")
         finally:
             self.done.emit()
+
+    def _session_dropped(self) -> bool:
+        """The channel closed without an exit status: did the link drop
+        (idle NAT / firewall timeout, network change, server gone) or did
+        the server close only this channel?
+
+        paramiko unlinks the channel *before* it marks the transport dead,
+        so a dead link can read "transport active" for a moment — wait for
+        it briefly before calling it a clean close.
+        """
+        import time
+        if self._channel.exit_status != -1:
+            return False
+        transport = self._client.get_transport() if self._client else None
+        deadline = time.monotonic() + 0.5
+        while (transport is not None and transport.is_active()
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+        return transport is None or not transport.is_active()
 
     def _drain_and_emit(self, max_total: int = 131072):
         """Drain up to `max_total` bytes from the channel, decode once, and
@@ -4893,6 +4910,40 @@ class SftpPanel(QWidget):
             for b in (self._btn_up, self._btn_home, self._btn_ref,
                       self._btn_mkdir, self._btn_ul):
                 b.setEnabled(False)
+
+    def rebind_connection(self, old_client, new_client) -> None:
+        """One session reconnected to the same server: move its watched edits
+        to the new connection instead of dropping them (UX audit S-01).
+
+        Only for the reconnect of a single session — same host, port and
+        user, the host key checked again by the new connection — so a watch
+        still never reaches another server.  Without this an editor left open
+        across a dropped link lost every later save without a word.  The
+        entries wait under the new connection; the panel picks them up when
+        it switches to it (switch_sftp), as for any inactive tab.
+        """
+        if old_client is None or new_client is None or old_client is new_client:
+            return
+        try:
+            new_ref = weakref.ref(new_client)
+        except TypeError:
+            self.forget_connection(old_client)
+            return
+        moved = self._recall_watches(old_client)
+        if self.bound_to(old_client):
+            moved.update(self._watched_files)
+            self._watch_poll.stop()
+            self._watched_files = {}
+            self._ssh_client = None
+            self._sftp = None       # nothing may run over the dead connection
+        for entry in moved.values():
+            entry['owner'] = new_ref
+        if moved:
+            kept = self._watch_store.get(id(new_client))
+            if kept is not None and kept[0]() is new_client:
+                kept[1].update(moved)
+            else:
+                self._watch_store[id(new_client)] = (new_ref, moved)
 
     def _invalidate_open_remote_cache(self, remote: str, owner=None):
         """Drop the watch of `remote` on the connection `owner` (default: the
@@ -7715,9 +7766,12 @@ class SshDialog(QDialog):
             return
         old, old_sftp = session.sftp_client, session.sftp
         if old is not None and old is not client:
-            # Edits watched over the old connection must not wait for a
-            # client that may later reuse its id (review 66/S1).
-            self._sftp_panel.forget_connection(old)
+            # The same session reconnected (same host, port, user): its
+            # watched edits move to the new connection — an editor open
+            # across the drop keeps uploading (UX audit S-01).  Keyed by the
+            # new client, so a recycled id of the old one finds nothing
+            # (review 66/S1).
+            self._sftp_panel.rebind_connection(old, client)
             # A reconnect replaced it; close it rather than leave it logged
             # in with keepalives until the app exits (C1-08).
             _close_sftp_pair(old_sftp, old)

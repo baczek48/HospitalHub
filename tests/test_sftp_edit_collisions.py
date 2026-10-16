@@ -952,3 +952,53 @@ def test_unknown_state_is_reported_even_after_a_cancel(env, sp, monkeypatch):
 
     p._poll_watched_files()
     assert any(err and "NIEZNANY" in text for text, err in messages)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# UX audit 2026-10-16, S-01: a reconnect keeps the editor's later saves
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_reconnect_of_the_session_keeps_uploading_saves(env):
+    a, _ = servers()
+    old = FakeClient(a)
+    p = env.panel()
+    connect(p, old)
+    local = open_file(p, "/opt/x/config.xml")
+    old.server = None                       # the link is gone
+
+    new = FakeClient(a)                     # same session, same server
+    p.rebind_connection(old, new)
+    assert p._sftp is None, "nic nie biegnie przez martwe połączenie"
+    connect(p, new)
+    save_in_editor(local, b"after the drop" * 10)
+    p._poll_watched_files()
+    assert a.data("/opt/x/config.xml") == b"after the drop" * 10
+
+
+def test_a_reconnect_of_an_inactive_tab_waits_for_that_tab(env):
+    a, b = servers()
+    old_a, cb = FakeClient(a), FakeClient(b)
+    p = env.panel()
+    connect(p, old_a)
+    local = open_file(p, "/opt/x/config.xml")
+    connect(p, cb)                          # user is on tab B meanwhile
+    new_a = FakeClient(a)
+    p.rebind_connection(old_a, new_a)
+    save_in_editor(local, b"edit for A" * 10)
+    p._poll_watched_files()
+    assert b.data("/opt/x/config.xml") == b"B-x" * 40, "nigdy na inny serwer"
+    connect(p, new_a)                       # back on tab A
+    p._poll_watched_files()
+    assert a.data("/opt/x/config.xml") == b"edit for A" * 10
+
+
+def test_closing_the_tab_still_forgets_its_watches(env):
+    a, _ = servers()
+    c = FakeClient(a)
+    p = env.panel()
+    connect(p, c)
+    local = open_file(p, "/opt/x/config.xml")
+    p.forget_connection(c)
+    save_in_editor(local, b"lost on purpose" * 9)
+    p._poll_watched_files()
+    assert a.data("/opt/x/config.xml") == b"A-x" * 40
