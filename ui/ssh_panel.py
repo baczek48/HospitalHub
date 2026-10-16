@@ -2584,6 +2584,57 @@ class _CancelledError(Exception):
     pass
 
 
+def _own_signals(obj) -> list:
+    """The signals `obj` declares in this module's classes — not the ones
+    QThread itself has (``finished`` keeps :func:`retire_thread` working)."""
+    out = []
+    for cls in type(obj).__mro__:
+        if cls.__module__ != __name__:
+            continue
+        for name, value in vars(cls).items():
+            if isinstance(value, pyqtSignal):
+                out.append(getattr(obj, name))
+    return out
+
+
+def _unplug_and_retire(workers, budget_ms: int = 1000) -> None:
+    """Closing a window: cut every worker's signals, then give the running
+    ones one shared `budget_ms` and keep the rest alive until they end.
+
+    UX audit 2026-10-16, S-02/S-08: the windows waited 0.8–1 s per thread in
+    turn and left the signals plugged in.  A transfer or listing that outlived
+    the wait then reported into the deleted window — a QMessageBox on a
+    destroyed parent took the whole process down (0xC0000374), unsaved vaults
+    included.  Signals go first, for finished threads too: what they emitted
+    last may still be queued.
+    """
+    import time
+    from ui.thread_retire import retire_thread
+    alive = []
+    for w in workers:
+        if w is None:
+            continue
+        for signal in _own_signals(w):
+            try:
+                signal.disconnect()
+            except Exception:
+                pass
+        try:
+            if w.isRunning():
+                alive.append(w)
+        except RuntimeError:
+            pass                    # the C++ object is already gone
+    deadline = time.monotonic() + budget_ms / 1000.0
+    for w in alive:
+        left = int((deadline - time.monotonic()) * 1000)
+        try:
+            if left > 0:
+                w.wait(left)
+            retire_thread(w)
+        except RuntimeError:
+            pass
+
+
 class _TransferWorker(QThread):
     progress  = pyqtSignal(int)
     done      = pyqtSignal(str)
@@ -6028,10 +6079,26 @@ class SftpPanel(QWidget):
         self._watch_poll.stop()
         self._watched_files.clear()
         self._upload_active.clear()
-        for w in self._workers:
-            if w.isRunning():
-                w.wait(800)
+        w = self._active_transfer_worker
+        if w is not None:
+            try:
+                if w.isRunning():
+                    w.cancel()      # stops at the next block, closes its channel
+            except RuntimeError:
+                pass
+        _unplug_and_retire(self._workers)
+        self._workers = []
         # sftp / ssh_client are owned by _Session objects — closed there
+
+    def transfer_running(self) -> bool:
+        """Is a file going to or from the server right now?"""
+        if self._upload_active:
+            return True
+        w = self._active_transfer_worker
+        try:
+            return w is not None and w.isRunning()
+        except RuntimeError:
+            return False
 
 
 # ──────────────────────────────────────── Environment panel ──────────────────
@@ -6808,6 +6875,13 @@ class SshDialog(QDialog):
                 cur = self._tab_widget.currentIndex()
                 step = -1 if (shift or key == Qt.Key.Key_Backtab) else 1
                 self._tab_widget.setCurrentIndex((cur + step) % cnt)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape:
+            # A QDialog closes on Escape — here that ended every session at
+            # once when the focus sat outside the terminal (SFTP table, tab
+            # bar).  The window closes only by its title-bar button
+            # (UX audit E-01).
             event.accept()
             return
         super().keyPressEvent(event)
@@ -7975,22 +8049,71 @@ class SshDialog(QDialog):
         # the user kept editing convinced everything was saved — until the
         # next session re-downloaded the original. Surface real failures
         # as a modal so the user can react; ignore success notifications.
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return              # a late report into a closed window (S-02)
         if err and text:
             QMessageBox.warning(self, "SFTP", text)
 
+    def close_without_asking(self) -> None:
+        """Close for the application (quit, vault closed): no questions."""
+        self._close_confirmed = True
+        self.close()
+
+    def _confirm_close(self) -> bool:
+        """Ask before ending a transfer or several live sessions (UX audit
+        S-02, E-02).  One open session closes without a question."""
+        if getattr(self, '_close_confirmed', False):
+            return True
+        transfer = self._sftp_panel.transfer_running()
+        live = sum(1 for s in self._sessions
+                   if getattr(s.worker, '_running', False))
+        if not transfer and live < 2:
+            return True
+        if transfer:
+            uploading = (bool(self._sftp_panel._upload_active) or getattr(
+                self._sftp_panel, '_transfer_current_mode', 'put') == 'put')
+            text = ("Trwa przesyłanie pliku.\n\nZamknięcie okna przerwie "
+                    "transfer — " + (
+                        "plik na serwerze może zostać niepełny."
+                        if uploading else
+                        "pobierany plik nie zostanie zapisany w całości."))
+        else:
+            text = (f"Otwarte sesje SSH: {live}.\n\nZamknięcie okna "
+                    "rozłączy wszystkie.")
+        return self._ask_close(text)
+
+    def _ask_close(self, text: str) -> bool:
+        """The question itself; "Nie zamykaj" is the default and Escape."""
+        box = QMessageBox(QMessageBox.Icon.Warning, "Zamknąć okno SSH?",
+                          text, parent=self)
+        close_btn = box.addButton("Zamknij okno",
+                                  QMessageBox.ButtonRole.DestructiveRole)
+        keep_btn = box.addButton("Nie zamykaj",
+                                 QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.setEscapeButton(keep_btn)
+        box.exec()
+        return box.clickedButton() is close_btn
+
     def closeEvent(self, event):
+        if not self._confirm_close():
+            event.ignore()
+            return
         # The SFTP panel first: its last flush needs the connections the loop
         # below closes (C1-04).
         self._sftp_panel.stop()
         for s in self._sessions:
             s.worker.stop()
+        # One shared wait for every thread, the rest retired (S-02, S-08).
+        _unplug_and_retire(
+            [s.worker for s in self._sessions]
+            + [s.stats_worker for s in self._sessions]
+            + list(self._workers))
         for s in self._sessions:
-            s.worker.wait(1000)
             self._teardown_session(s)
         self._sessions.clear()
-        for w in self._workers:
-            if w.isRunning():
-                w.wait(800)
+        self._workers = []
         # Clean up this window's temp SFTP files — and only this window's:
         # another SSH window may still be editing its own (C1-01).  The
         # process directory goes when the application exits (main.py).

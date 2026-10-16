@@ -404,7 +404,7 @@ class AppManager:
             return
         for dlg in list(SshDialog._alive):
             try:
-                dlg.close()
+                dlg.close_without_asking()
             except Exception:
                 pass
 
