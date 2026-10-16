@@ -332,6 +332,8 @@ try:
                 fg_idx, bg_idx, attrs = f, b, a
             return _HistCell(ch, _COLOR_POOL[fg_idx], _COLOR_POOL[bg_idx], attrs)
 
+    _PyteChar = pyte.screens.Char
+
     def _row_to_hist(row) -> '_HistRow':
         """Convert a pyte buffer row (dict[int, Char]) into a compact _HistRow."""
         if not row:
@@ -352,11 +354,31 @@ try:
         run_records = []   # list of (start, fg_idx, bg_idx, attrs)
         prev_style = None
         all_default = True
+        get = row.get if hasattr(row, 'get') else (lambda _x: None)
         for x in range(last_col + 1):
-            cell = row.get(x) if hasattr(row, 'get') else None
+            cell = get(x)
             if cell is None:
                 chars.append(' ')
                 style = (0, 0, 0)   # default fg, default bg, no attrs
+            elif type(cell) is _PyteChar:
+                # Fast path (2026-10-16): a pyte Char is a namedtuple — one
+                # unpack instead of ten getattr calls per cell.
+                d, fg, bg, bold, italics, under, strike, rev, blink = cell
+                chars.append(d or ' ')
+                if (fg == 'default' and bg == 'default' and not (
+                        bold or italics or under or strike or rev or blink)):
+                    style = (0, 0, 0)
+                else:
+                    attrs = ((_ATTR_BOLD if bold else 0)
+                             | (_ATTR_REVERSE if rev else 0)
+                             | (_ATTR_ITALIC if italics else 0)
+                             | (_ATTR_UNDERSCORE if under else 0)
+                             | (_ATTR_STRIKETHROUGH if strike else 0)
+                             | (_ATTR_BLINK if blink else 0))
+                    style = (_color_id(fg or 'default'),
+                             _color_id(bg or 'default'), attrs)
+                    if style != (0, 0, 0):
+                        all_default = False
             else:
                 chars.append(cell.data or ' ')
                 attrs = 0
@@ -964,6 +986,32 @@ try:
                     and not self._in_alt_screen()):
                 self._leave_alt()
 
+    def _wrap_history_events(cls):
+        """Terminal speed (2026-10-16): pyte's HistoryScreen routes EVERY
+        attribute read (self.cursor, self.buffer, self.columns …) through a
+        Python-level __getattribute__ that wraps event methods in
+        before_event/after_event — ~950 calls per printed line, the largest
+        cost of a long `cat`.  Same wrapping, done once on the class: each
+        event method (ours where we override it) is replaced by a wrapper
+        and the plain attribute lookup is restored."""
+        for name in pyte.HistoryScreen._wrapped:
+            impl = getattr(cls, name, None)
+            if impl is None:
+                continue
+
+            def wrapper(self, *args, _impl=impl, _name=name, **kwargs):
+                self.before_event(_name)
+                result = _impl(self, *args, **kwargs)
+                self.after_event(_name)
+                return result
+
+            wrapper.__name__ = name
+            wrapper.__doc__ = impl.__doc__
+            setattr(cls, name, wrapper)
+        cls.__getattribute__ = object.__getattribute__
+
+    _wrap_history_events(_TermScreen)
+
 except ImportError:
     _PYTE_OK = False
 
@@ -1306,8 +1354,13 @@ class TerminalWidget(QWidget):
             self.update()
             self._last_paint_t = now
         self._emit_scroll()
-        # If the timeslice expired with leftover work, schedule another pass.
+        # If the timeslice expired with leftover work, schedule another pass —
+        # at once (after the event loop has run, so keys still get through):
+        # waiting the usual 8 ms left the parser idle half the time and a
+        # long `cat` took twice as long (2026-10-16).  Hidden tabs keep
+        # their slow pace.
         if self._pending_data and not self._coalesce_timer.isActive():
+            self._coalesce_timer.setInterval(1 if self.isVisible() else 250)
             self._coalesce_timer.start()
 
     _CLEAR_COMMANDS = frozenset([b'clear', b'cls', b'reset', b'tput'])
@@ -2052,8 +2105,13 @@ class TerminalWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             col, row = self._cell_at_pos(event.position())
             arow = self._vrow_to_arow(row)
+            # A plain click only clears the old selection; a selection (and
+            # the copy to the clipboard) starts once the mouse is dragged,
+            # as in MobaXterm — clicking to type must not replace what the
+            # clipboard holds (owner's request 2026-10-16).
             self._sel_start = (col, arow)
-            self._sel_end   = (col, arow)
+            self._sel_end   = None
+            self._sel_press_pos = event.position()
             self._sel_mouse_col = col
             self._selecting = True
             self.update()
@@ -2070,6 +2128,8 @@ class TerminalWidget(QWidget):
                 self._mouse_report(self._mouse_button, col, row, motion=True)
             return
         if self._selecting and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._sel_end is None and not self._dragged_far(event.position()):
+                return
             col, vrow_raw = self._cell_at_pos_unclamped(event.position())
             self._sel_mouse_col = col
 
@@ -2093,6 +2153,15 @@ class TerminalWidget(QWidget):
             arow = self._vrow_to_arow(vrow)
             self._sel_end = (col, arow)
             self.update()
+
+    def _dragged_far(self, pos) -> bool:
+        """Has the mouse left the pressed cell by a real drag?"""
+        start = getattr(self, '_sel_press_pos', None)
+        if start is None:
+            return True
+        d = pos - start
+        return (abs(d.x()) + abs(d.y())) >= max(
+            QApplication.startDragDistance() // 2, min(self._cw, self._ch) / 2)
 
     def _sel_auto_scroll(self):
         """Timer callback: scroll terminal while dragging outside bounds."""
@@ -2125,6 +2194,11 @@ class TerminalWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._selecting:
             self._sel_scroll_timer.stop()
             self._sel_scroll_dir = 0
+            if self._sel_end is None:           # a click, not a drag
+                self._selecting = False
+                self._sel_start = None
+                self.update()
+                return
             col, vrow_raw = self._cell_at_pos_unclamped(event.position())
             vrow = max(0, min(vrow_raw, self._rows - 1))
             arow = self._vrow_to_arow(vrow)
@@ -4497,7 +4571,7 @@ class SftpPanel(QWidget):
         root.addWidget(self._table, 1)
 
         # Drag & drop hint
-        hint = QLabel("Upuść pliki tutaj, aby wgrać")
+        hint = QLabel("Upuść tu pliki lub foldery, aby wgrać")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color:#30363d; font-size:10px; padding:2px;")
         root.addWidget(hint)
@@ -4525,7 +4599,16 @@ class SftpPanel(QWidget):
             "font-size:11px;}"
             "QPushButton:hover{background:#152540;border-color:#2a4a6a;}"
             "QPushButton:disabled{color:#484f58;background:#1c2128;}")
-        self._btn_ul.clicked.connect(self._upload_browse)
+        # Files or a whole folder (owner's request 2026-10-16).
+        ul_menu = QMenu(self._btn_ul)
+        ul_menu.setStyleSheet(
+            "QMenu{background:#161b22;color:#e6edf3;border:1px solid #30363d;"
+            "padding:4px;font-size:11px;}"
+            "QMenu::item{padding:4px 16px;border-radius:3px;}"
+            "QMenu::item:selected{background:#1f6feb;}")
+        ul_menu.addAction(icon("file", "#c9d1d9"), "Pliki…", self._upload_browse)
+        ul_menu.addAction(icon("folder", "#c9d1d9"), "Folder…", self._upload_browse_folder)
+        self._btn_ul.setMenu(ul_menu)
 
         self._progress = QProgressBar()
         self._progress.setFixedHeight(16)
@@ -5332,6 +5415,68 @@ class SftpPanel(QWidget):
             return
         self._begin_uploads(paths)
 
+    def _upload_browse_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Wybierz folder do wgrania")
+        if not path or not self._sftp:
+            return
+        self._begin_uploads([path])
+
+    #: A folder this big asks before anything is sent.
+    _FOLDER_CONFIRM_FILES = 200
+    _FOLDER_CONFIRM_BYTES = 500 * 1024 * 1024
+    #: Walking stops here — a dropped drive or home folder must not freeze.
+    _FOLDER_MAX_FILES = 20000
+
+    def _expand_upload_sources(self, locals_list: list[str]):
+        """Files and folders → ((remote, local, size) files, remote dirs).
+
+        A folder keeps its name and structure under the current directory;
+        the directories come parents first, so creating them in order works.
+        Symbolic links to folders are not followed.  Returns None when the
+        folder holds more than _FOLDER_MAX_FILES files.
+        """
+        base = self._path.rstrip('/')
+        items: list[tuple[str, str, int]] = []
+        dirs: list[str] = []
+        seen: set[str] = set()
+
+        def add(remote, local):
+            if remote in seen:
+                return
+            try:
+                size = os.path.getsize(local)
+            except OSError:
+                return
+            seen.add(remote)
+            items.append((remote, local, size))
+
+        for p in locals_list:
+            p = os.path.normpath(p)
+            name = os.path.basename(p)
+            if not name:
+                continue
+            if os.path.isdir(p) and not os.path.islink(p):
+                top = base + '/' + name
+                if top not in dirs:
+                    dirs.append(top)
+                for root, dnames, fnames in os.walk(p):
+                    dnames[:] = sorted(
+                        d for d in dnames
+                        if not os.path.islink(os.path.join(root, d)))
+                    rel = os.path.relpath(root, p)
+                    rbase = top if rel == '.' else (
+                        top + '/' + rel.replace(os.sep, '/'))
+                    dirs.extend(rbase + '/' + d for d in dnames)
+                    for f in sorted(fnames):
+                        lp = os.path.join(root, f)
+                        if os.path.isfile(lp):
+                            add(rbase + '/' + f, lp)
+                    if len(items) > self._FOLDER_MAX_FILES:
+                        return None
+            elif os.path.isfile(p):
+                add(base + '/' + name, p)
+        return items, dirs
+
     def _upload_file(self, local: str):
         # Kept as a compat shim — every caller (drag-drop, single-file
         # upload) now flows through _begin_uploads so the same overwrite
@@ -5353,25 +5498,27 @@ class SftpPanel(QWidget):
         """
         if not self._sftp or not self._ssh_client or not locals_list:
             return
-        items: list[tuple[str, str, int]] = []
-        seen_remotes: set[str] = set()
-        for p in locals_list:
-            if not os.path.isfile(p):
-                continue
-            fname = os.path.basename(p)
-            if not fname:
-                continue
-            remote = self._path.rstrip('/') + '/' + fname
-            if remote in seen_remotes:
-                continue                       # de-dup if user picked the same file twice
-            seen_remotes.add(remote)
-            try:
-                sz = os.path.getsize(p)
-            except OSError:
-                continue
-            items.append((remote, p, sz))
-        if not items:
+        expanded = self._expand_upload_sources(locals_list)
+        if expanded is None:
+            QMessageBox.warning(
+                self, "Za dużo plików",
+                f"Folder ma ponad {self._FOLDER_MAX_FILES} plików — nie wgrano "
+                "niczego. Spakuj go (np. do ZIP) albo wgraj mniejsze części.")
             return
+        items, dirs = expanded
+        if not items and not dirs:
+            return
+        if dirs:
+            from ui.utils import confirm
+            total = sum(it[2] for it in items)
+            if (len(items) > self._FOLDER_CONFIRM_FILES
+                    or total > self._FOLDER_CONFIRM_BYTES):
+                if not confirm(
+                        self, "Wgrać folder?",
+                        f"Do {self._path} trafi {len(items)} plików "
+                        f"({total / 1024 / 1024:.0f} MB) w {len(dirs)} folderach.",
+                        "Wgraj"):
+                    return
 
         def after_scan(conflicts: list[tuple[str, str, int]]):
             chosen = items
@@ -5382,11 +5529,15 @@ class SftpPanel(QWidget):
                 if action == 'skip':
                     skip_set = {c[0] for c in conflicts}
                     chosen = [it for it in items if it[0] not in skip_set]
-                    if not chosen:
+                    if not chosen and not dirs:
                         self.status_msg.emit(
                             "Wszystkie pliki istnieją — pominięto", False)
                         return
-            self._start_uploads(chosen)
+            if dirs:
+                self._make_remote_dirs(
+                    dirs, lambda: bool(chosen) and (self._start_uploads(chosen) or True))
+            else:
+                self._start_uploads(chosen)
 
         self._scan_conflicts_async(items, after_scan)
 
@@ -5427,6 +5578,52 @@ class SftpPanel(QWidget):
         w.start()
         self._workers.append(w)
 
+    def _make_remote_dirs(self, dirs: list[str], then) -> None:
+        """Create the folders of a folder upload (parents first), then go on.
+
+        An existing folder is used as it is (its files are compared like any
+        others); a FILE where a folder should be stops the upload.
+        """
+        ssh_client = self._ssh_client
+        lock = self._sftp_open_lock
+        created = [0]
+
+        def work():
+            import stat as _stat
+            with lock:
+                sftp = ssh_client.open_sftp()
+            try:
+                for d in dirs:
+                    try:
+                        st = sftp.stat(d)
+                    except IOError:
+                        sftp.mkdir(d)
+                        created[0] += 1
+                        continue
+                    if not _stat.S_ISDIR(st.st_mode or 0):
+                        raise IOError(
+                            f"Na serwerze jest plik „{d}”, a ma tam być folder.")
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        def done():
+            # No listing here: it would share the navigation channel with
+            # the transfer that starts now (paramiko is not thread-safe —
+            # it hung).  The queue refreshes the listing when it ends; with
+            # nothing to send, refresh now.
+            if not then() and created[0]:
+                self._list(self._path)
+
+        w = _SimpleWorker(work)
+        w.done.connect(done)
+        w.error.connect(lambda e: QMessageBox.warning(
+            self, "Wgrywanie folderu", f"Nie udało się utworzyć folderów:\n{e}"))
+        w.start()
+        self._workers.append(w)
+
     def _start_uploads(self, items: list[tuple[str, str, int]]):
         """Kick off transfer(s) once conflicts are resolved."""
         if not items:
@@ -5436,6 +5633,11 @@ class SftpPanel(QWidget):
             self._run_transfer('put', remote, local, size)
         else:
             self._enqueue_transfers([('put', r, l, s) for (r, l, s) in items])
+
+    def _shown_name(self, remote: str) -> str:
+        """A remote path as the user knows it: relative to the folder open."""
+        base = self._path.rstrip('/') + '/'
+        return remote[len(base):] if remote.startswith(base) else os.path.basename(remote)
 
     def _ask_overwrite(self, conflict_paths: list[str]) -> str:
         """Modal for name conflicts (upload or move). Returns
@@ -5454,7 +5656,7 @@ class SftpPanel(QWidget):
         else:
             word = "plików"
         preview_n = 10
-        names = "\n".join(f"  • {os.path.basename(p)}" for p in conflict_paths[:preview_n])
+        names = "\n".join(f"  • {self._shown_name(p)}" for p in conflict_paths[:preview_n])
         if n > preview_n:
             names += f"\n  …+{n - preview_n} więcej"
         box = QMessageBox(self)
@@ -6867,7 +7069,7 @@ class SftpPanel(QWidget):
         files = []
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if os.path.isfile(path):
+            if os.path.isfile(path) or os.path.isdir(path):
                 files.append(path)
         if files:
             self._begin_uploads(files)

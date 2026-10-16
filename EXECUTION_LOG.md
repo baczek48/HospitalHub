@@ -650,3 +650,23 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
 - Próba na kopii prawdziwych ustawień: dochodzi test3.vault (prywatny), osobisty VPN vault,
   ścieżki FortiClient/Hillstone, autouzupełnianie, kolumny; ustawienia 2.x bez zmian.
 - **1926 PASS / 0 FAIL**. Build + instalator 23:15.
+
+### 2026-10-16 (noc) — klik w terminalu, foldery na SFTP, szybszy terminal
+
+- **Klik w terminalu nie kopiuje** (właściciel: „przypadkowo już coś mogę skopiować i tracę to
+  co w schowku”): zaznaczenie i kopia dopiero po przeciągnięciu (`_dragged_far`), zwykły klik
+  tylko czyści stare zaznaczenie — jak w MobaXterm. Mutacja (stare zachowanie) → 2 FAIL.
+- **Foldery na SFTP:** „Wgraj” ma menu Pliki…/Folder…, upuszczenie folderu z Eksploratora też
+  działa. Struktura zachowana (`_expand_upload_sources`, foldery tworzone od góry
+  `_make_remote_dirs`, istniejący folder scalany, kolizje pytane ze ścieżką względną, PLIK w
+  miejscu folderu przerywa). Potwierdzenie przy >200 plikach lub >500 MB, odmowa przy >20 000.
+  Testy na prawdziwym serwerze paramiko (7, ×5 bez flaków). Znaleziony i usunięty wyścig:
+  odświeżanie listy po mkdir dzieliło kanał nawigacji z transferem → zawieszenie.
+- **Wydajność terminala:** profil: pyte `HistoryScreen.__getattribute__` (~950 wywołań/linię),
+  przerwy 8 ms między porcjami przy zaległościach, konwersja wierszy do historii. Poprawki:
+  zawijanie zdarzeń raz na klasie (`_wrap_history_events`, te same before/after_event),
+  kolejna porcja od razu (1 ms) gdy kolejka niepusta i karta widoczna, szybka ścieżka
+  `_row_to_hist` dla pyte Char (przy okazji: kursywa nie ginie już w historii).
+  20 000 linii: 12,0 s → 2,8 s (bez koloru), 18,1 s → 4,2 s (kolor); log dockera 300 000 linii:
+  119 s → 54 s. **Pamięć bez zmian**: ~70 MB przy pełnej historii 250 000 linii w obu wersjach.
+- **1940 PASS / 0 FAIL**. Build + instalator 23:52.
