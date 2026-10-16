@@ -199,7 +199,9 @@ class MainWindow(QMainWindow):
         self._hospital_list.customContextMenuRequested.connect(self._on_hospital_context_menu)
         left_layout.addWidget(self._hospital_list)
 
-        btn_add = QPushButton("＋  Dodaj szpital")
+        from ui.icons import set_icon
+        btn_add = QPushButton("Dodaj szpital")
+        set_icon(btn_add, "plus", "#58a6ff", active="#ffffff", size=14)
         btn_add.setStyleSheet(
             "QPushButton { background: #1a2a3a; color: #58a6ff; border: 1px solid #1f4a70;"
             " border-radius: 5px; padding: 6px 10px; }"
@@ -209,7 +211,8 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(btn_add)
 
         # ---- Admin lock/unlock button ----
-        self._admin_btn = QPushButton("🔒  Admin")
+        self._admin_btn = QPushButton("Admin")
+        set_icon(self._admin_btn, "lock", "#c084fc", active="#d4a0ff", size=14)
         self._admin_btn.setStyleSheet(
             "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
             " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
@@ -351,13 +354,14 @@ class MainWindow(QMainWindow):
         return ""
 
     def _filtered_hospitals(self) -> list:
+        from ui.utils import polish_key
         text = self._search_edit.text().strip().lower()
         result = [h for h in self._hospitals
                   if not text or self._search_hit(h, text)]
         if self._sort_order == "asc":
-            result.sort(key=lambda h: h.name.casefold())
+            result.sort(key=lambda h: polish_key(h.name))
         elif self._sort_order == "desc":
-            result.sort(key=lambda h: h.name.casefold(), reverse=True)
+            result.sort(key=lambda h: polish_key(h.name), reverse=True)
         return result
 
     def _refresh_hospital_list(self):
@@ -478,9 +482,10 @@ class MainWindow(QMainWindow):
             "QMenu::item:selected { background:#1f6feb; color:#fff; }"
             "QMenu::separator { height:1px; background:#30363d; margin:2px 0; }"
         )
-        act_rename = menu.addAction("✏  Zmień nazwę")
+        from ui.icons import icon
+        act_rename = menu.addAction(icon("pencil", "#c9d1d9"), "Zmień nazwę")
         menu.addSeparator()
-        act_delete = menu.addAction("🗑  Usuń szpital")
+        act_delete = menu.addAction(icon("trash", "#f85149"), "Usuń szpital")
         act_delete.setToolTip(f"Usuwa '{hospital.name}' wraz z maszynami i bazami")
 
         chosen = menu.exec(self._hospital_list.viewport().mapToGlobal(pos))
@@ -649,7 +654,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Błąd", "Nieprawidłowe hasło admina.")
             return
         self._admin_unlocked = True
-        self._admin_btn.setText("🔓  Admin")
+        from ui.icons import set_icon
+        set_icon(self._admin_btn, "lock-open", "#8ae234", active="#a0de4a", size=14)
         self._admin_btn.setStyleSheet(
             "QPushButton { background: #1a3a1a; color: #8ae234; border: 1px solid #2d5a1a;"
             " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"
@@ -660,13 +666,14 @@ class MainWindow(QMainWindow):
         self._admin_to_ssh_windows(True)
         self._refresh_hospital_list()
         # Admin stays unlocked for the whole session — no auto-lock timer.
-        # The user re-locks manually by clicking the 🔓 Admin button.
+        # The user re-locks manually by clicking the (open-lock) Admin button.
 
     def _lock_admin(self):
         self._admin_unlocked = False
         self._admin_lock_timer.stop()
         if self._admin_btn:
-            self._admin_btn.setText("🔒  Admin")
+            from ui.icons import set_icon
+            set_icon(self._admin_btn, "lock", "#c084fc", active="#d4a0ff", size=14)
             self._admin_btn.setStyleSheet(
                 "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
                 " border-radius: 5px; padding: 6px 10px; font-weight: bold; }"

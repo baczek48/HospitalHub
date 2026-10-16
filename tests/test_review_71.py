@@ -50,7 +50,7 @@ def test_r02_one_right_click_one_menu_with_duplicate(app, monkeypatch):
     monkeypatch.setattr(QMenu, "exec", lambda self, *a: shown.append(
         [x.text() for x in self.actions()]))
     p._machines_table.customContextMenuRequested.emit(QPoint(5, 5))
-    assert len(shown) == 1 and "📑  Duplikuj" in shown[0]
+    assert len(shown) == 1 and "Duplikuj" in shown[0]
 
 
 def test_r03_a_kept_transfer_window_keeps_the_vault(app, monkeypatch):

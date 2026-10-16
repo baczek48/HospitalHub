@@ -69,8 +69,8 @@ def _menu_texts(menu):
 
 def test_e08_e09_the_row_menu_offers_every_account(panel):
     texts = _menu_texts(panel._row_menu(panel.machine, 'machine'))
-    for want in ("👤  Kopiuj login: admin", "🔑  Kopiuj hasło: admin",
-                 "👤  Kopiuj login: root", "🔑  Kopiuj hasło: root",
+    for want in ("Kopiuj login: admin", "Kopiuj hasło: admin",
+                 "Kopiuj login: root", "Kopiuj hasło: root",
                  "  admin", "  root"):
         assert want in texts, texts
 
@@ -80,7 +80,7 @@ def test_e08_copy_login_puts_the_login_on_the_clipboard(panel, monkeypatch):
     copied = []
     monkeypatch.setattr(dp, "_clipboard_copy", copied.append)
     menu = panel._row_menu(panel.machine, 'machine')
-    next(a for a in menu.actions() if a.text() == "👤  Kopiuj login: root").trigger()
+    next(a for a in menu.actions() if a.text() == "Kopiuj login: root").trigger()
     assert copied == ["root"]
 
 
@@ -98,7 +98,7 @@ def test_the_key_button_still_copies_the_password(panel, monkeypatch):
     copied = []
     monkeypatch.setattr(dp, "_clipboard_copy", copied.append)
     cell = panel._machines_table.cellWidget(0, dp._MACHINES_AKCJE_COL)
-    btn = next(b for b in cell.findChildren(QPushButton) if b.text().startswith("🔑"))
+    btn = next(b for b in cell.findChildren(QPushButton) if b.text() == "admin")
     btn.click()
     assert copied == ["pw1"]
 

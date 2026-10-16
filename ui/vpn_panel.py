@@ -31,6 +31,7 @@ from ui.vpn_v2_connect import V2ConnectController
 from ui.dialogs import _clipboard_copy
 from ui.thread_retire import retire_thread
 from ui.utils import ElidedLabel, plural
+from ui.icons import icon, icon_label, set_icon
 
 # ------------------------------------------------------------------ #
 # 2FA dialog                                                           #
@@ -48,10 +49,8 @@ class TwoFactorDialog(QDialog):
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(10)
 
-        icon_lbl = QLabel("🔐")
-        icon_lbl.setStyleSheet("font-size: 28px; background: transparent;")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(icon_lbl)
+        icon_lbl = icon_label("shield", "#58a6ff", 32)
+        lay.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
 
         title = QLabel("Kod weryfikacyjny")
         title.setStyleSheet("color: #c9d1d9; font-size: 13px; font-weight: bold; background: transparent;")
@@ -559,8 +558,10 @@ _ICON_DISCONNECT = None
 def _icons():
     global _ICON_CONNECT, _ICON_DISCONNECT
     if _ICON_CONNECT is None:
-        _ICON_CONNECT = _make_connect_icon(20)
-        _ICON_DISCONNECT = _make_disconnect_icon(20)
+        # Vector, drawn for the screen's pixel ratio (the old 20 px bitmaps
+        # were scaled and soft at 100 %).
+        _ICON_CONNECT = icon("play", "#238636")
+        _ICON_DISCONNECT = icon("stop", "#da3633")
     return _ICON_CONNECT, _ICON_DISCONNECT
 
 
@@ -746,7 +747,8 @@ class VpnPanel(QWidget):
         top_bar.addWidget(lbl_title)
         top_bar.addStretch()
 
-        btn_settings = QPushButton("⚙")
+        btn_settings = QPushButton()
+        set_icon(btn_settings, "gear", "#8b949e", active="#c9d1d9", size=15)
         btn_settings.setFixedHeight(26)
         btn_settings.setFixedWidth(30)
         btn_settings.setToolTip("Ustawienia VPN — ścieżki klientów, providery")
@@ -893,7 +895,9 @@ class VpnPanel(QWidget):
         self._pass_edit.setStyleSheet(self._field_style())
         self._pass_edit.textChanged.connect(self._on_field_changed)
         pass_lay.addWidget(self._pass_edit)
-        btn_eye = QPushButton("👁")
+        btn_eye = QPushButton()
+        btn_eye.setToolTip("Pokaż / ukryj hasło")
+        set_icon(btn_eye, "eye", "#8b949e", active="#c9d1d9", size=15)
         btn_eye.setFixedSize(28, 28)
         btn_eye.setStyleSheet(
             "QPushButton { background: #21262d; border: 1px solid #30363d; border-radius: 4px; font-size: 10px; }"
@@ -904,7 +908,9 @@ class VpnPanel(QWidget):
             else QLineEdit.EchoMode.Password
         ))
         pass_lay.addWidget(btn_eye)
-        btn_copy = QPushButton("📋")
+        btn_copy = QPushButton()
+        btn_copy.setToolTip("Kopiuj hasło")
+        set_icon(btn_copy, "clipboard", "#8b949e", active="#c9d1d9", size=15)
         btn_copy.setFixedSize(28, 28)
         btn_copy.setStyleSheet(
             "QPushButton { background: #21262d; border: 1px solid #30363d; border-radius: 4px; font-size: 10px; }"
@@ -1077,18 +1083,14 @@ class VpnPanel(QWidget):
         """Sort profiles by name or provider and rebuild cards."""
         if not self._profiles or self._refuse_while_connecting():
             return
-        try:
-            locale.setlocale(locale.LC_COLLATE, "pl_PL.UTF-8")
-        except locale.Error:
-            try:
-                locale.setlocale(locale.LC_COLLATE, "Polish_Poland.1250")
-            except locale.Error:
-                pass
-        sk = locale.strxfrm
+        # Polish order without touching the process-wide locale (setlocale
+        # changed it for the whole application, and on a system without the
+        # Polish locale silently fell back to code points: "ś" after "z").
+        from ui.utils import polish_key
         if key == "name":
-            self._profiles.sort(key=lambda p: sk((p.name or "").lower()))
+            self._profiles.sort(key=lambda p: polish_key(p.name))
         elif key == "provider":
-            self._profiles.sort(key=lambda p: (sk((p.provider or "").lower()), sk((p.name or "").lower())))
+            self._profiles.sort(key=lambda p: (polish_key(p.provider), polish_key(p.name)))
         self._rebuild_cards()
         self.data_changed.emit()
 
@@ -1127,7 +1129,7 @@ class VpnPanel(QWidget):
         # (rasdial enumeration nie odzwierciedla połączeń odpalanych z flyoutu).
         is_windows_vpn = p.provider == "Windows VPN"
         if is_windows_vpn:
-            hint_lbl = QLabel("↗ Połącz ręcznie z listy VPN w Windowsie")
+            hint_lbl = QLabel("Połącz ręcznie z listy VPN w Windowsie")
             hint_lbl.setStyleSheet(
                 "color: #d29922; font-size: 10px; border: none; font-style: italic;"
             )
@@ -1162,7 +1164,8 @@ class VpnPanel(QWidget):
 
         # Copy login button
         if p.login:
-            btn_copy_login = QPushButton("👤")
+            btn_copy_login = QPushButton()
+            set_icon(btn_copy_login, "user", "#8b949e", active="#c9d1d9", size=15)
             btn_copy_login.setFixedSize(30, 30)
             btn_copy_login.setToolTip(f"Kopiuj login: {p.login}")
             btn_copy_login.setStyleSheet(
@@ -1175,7 +1178,8 @@ class VpnPanel(QWidget):
 
         # Copy password button
         if p.password:
-            btn_copy = QPushButton("🔑")
+            btn_copy = QPushButton()
+            set_icon(btn_copy, "key", "#c9a227", active="#f0d050", size=15)
             btn_copy.setFixedSize(30, 30)
             btn_copy.setToolTip("Kopiuj hasło")
             btn_copy.setStyleSheet(
@@ -1187,7 +1191,8 @@ class VpnPanel(QWidget):
             lay.addWidget(btn_copy)
 
         # Edit button
-        btn_edit = QPushButton("✎")
+        btn_edit = QPushButton()
+        set_icon(btn_edit, "pencil", "#8b949e", active="#c9d1d9", size=15)
         btn_edit.setFixedSize(30, 30)
         btn_edit.setToolTip("Edytuj")
         btn_edit.setStyleSheet(
@@ -1327,7 +1332,7 @@ class VpnPanel(QWidget):
         if not path:
             QMessageBox.information(self, "Klient VPN",
                                     "Nie ustawiono ścieżki do klienta VPN.\n"
-                                    "Ustaw globalnie w ⚙ Ustawienia VPN.")
+                                    "Ustaw ją w Ustawieniach VPN (koło zębate w nagłówku listy).")
             return
         ok, msg = vpn_connect.launch_app(path)
         _vlog("info" if ok else "error", "Otwórz klienta VPN", p,

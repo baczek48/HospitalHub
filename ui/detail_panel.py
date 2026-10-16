@@ -14,12 +14,13 @@ from PyQt6.QtGui import (QFont, QBrush, QColor, QIcon, QPixmap, QPainter,
 
 
 def _make_db_connect_icon(size: int = 24) -> QIcon:
-    """3 stacked database discs with a green play triangle — SQL launcher icon."""
-    px = QPixmap(size, size)
-    px.fill(Qt.GlobalColor.transparent)
-    p = QPainter(px)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    """3 stacked database discs with a green play triangle — SQL launcher icon.
+    Drawn for the screen's pixel ratio, not as a fixed bitmap."""
+    from ui.icons import painter_icon
+    return painter_icon(_draw_db_connect, base=size)
 
+
+def _draw_db_connect(p: QPainter, size: int) -> None:
     disc_color = QColor(58, 130, 200)      # steel blue
     rim_color  = QColor(80, 160, 230)
     play_color = QColor(50, 200, 80)       # green
@@ -71,9 +72,6 @@ def _make_db_connect_icon(size: int = 24) -> QIcon:
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(play_color)
     p.fillPath(tri, play_color)
-
-    p.end()
-    return QIcon(px)
 
 
 class _HeaderMenuFilter(QObject):
@@ -141,6 +139,7 @@ from ui.utils import ElidedLabel, EmptyHint, confirm, plural
 from ui.style import FormStyled
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
+from ui.icons import IconBadge, icon, set_icon
 from ui.db_connect import launch_sqldeveloper
 from config import (load_column_widths, save_column_widths,
                     load_personal_vpn_vault, save_personal_vpn_vault,
@@ -164,28 +163,51 @@ _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
 _DB_AKCJE_WIDTH = 166
 
 
-def _pulse_copy_button(btn: QPushButton) -> None:
-    """Soft green pulse: brief tint that quickly rises and slowly fades back
-    to zero. Uses a single QGraphicsColorizeEffect reused across clicks so
-    rapid re-clicks just restart the animation instead of stacking effects."""
-    effect = btn.graphicsEffect()
-    if not isinstance(effect, QGraphicsColorizeEffect):
-        effect = QGraphicsColorizeEffect(btn)
-        effect.setColor(QColor("#3fb950"))  # GitHub-success green
-        effect.setStrength(0.0)
-        btn.setGraphicsEffect(effect)
+#: "Copied" flash of the login button: (background, border) per theme.  A
+#: colorize effect was used before — it tints the pixels, which on the
+#: near-white light-theme button left almost nothing to see.
+_PULSE_DARK = ("#1f4d2b", "#3fb950")
+_PULSE_LIGHT = ("#c6ecd0", "#2da44e")
 
+
+def _pulse_copy_button(btn: QPushButton) -> None:
+    """Green "copied" flash: background and border jump to green and fade
+    back to the button's own colours.  Re-clicks restart it."""
+    from PyQt6.QtCore import QVariantAnimation
+    base_css = getattr(btn, "_pulse_base_css", None)
+    if base_css is None:
+        base_css = btn._pulse_base_css = btn.styleSheet()
     prev = getattr(btn, "_copy_pulse_anim", None)
     if prev is not None:
         prev.stop()
 
-    anim = QPropertyAnimation(effect, b"strength", btn)
-    anim.setDuration(380)
+    light = theme.active() == theme.LIGHT
+    flash_bg, flash_bd = _PULSE_LIGHT if light else _PULSE_DARK
+    rest_bg = QColor(theme.paint("#1e2733"))
+    rest_bd = QColor(theme.paint("#30363d"))
+
+    def mix(a: QColor, b: QColor, t: float) -> str:
+        return QColor(round(a.red() + (b.red() - a.red()) * t),
+                      round(a.green() + (b.green() - a.green()) * t),
+                      round(a.blue() + (b.blue() - a.blue()) * t)).name()
+
+    anim = QVariantAnimation(btn)
+    anim.setDuration(650)
     anim.setStartValue(0.0)
-    anim.setKeyValueAt(0.18, 0.45)   # quick rise
-    anim.setKeyValueAt(0.45, 0.25)   # held briefly
-    anim.setEndValue(0.0)            # gentle fade-out
-    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.setKeyValueAt(0.12, 1.0)    # quick rise
+    anim.setKeyValueAt(0.40, 1.0)    # held so it is seen
+    anim.setEndValue(0.0)            # fade back
+    anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+
+    def step(value):
+        t = float(value)
+        btn.setStyleSheet(
+            base_css + "QPushButton { background: "
+            f"{mix(rest_bg, QColor(flash_bg), t)}; border-color: "
+            f"{mix(rest_bd, QColor(flash_bd), t)}; }}")
+
+    anim.valueChanged.connect(step)
+    anim.finished.connect(lambda: btn.setStyleSheet(base_css))
     anim.start()
     btn._copy_pulse_anim = anim
 
@@ -511,29 +533,24 @@ class DetailPanel(QWidget):
         header.addWidget(self._name_label, 1)
 
         # Admin mode badge — visible only when unlocked
-        self._admin_badge = QLabel("🔓 TRYB ADMINA")
-        self._admin_badge.setStyleSheet(
-            "color: #8ae234; font-size: 10px; font-weight: bold;"
-            " background: #1a3a1a; border: 1px solid #2d5a1a; border-radius: 10px;"
-            " padding: 3px 12px; letter-spacing: 0.5px;"
-        )
+        self._admin_badge = IconBadge(
+            "#8ae234", "background: #1a3a1a; border: 1px solid #2d5a1a;"
+            " border-radius: 10px;")
+        self._admin_badge.set_items([("lock-open", "TRYB ADMINA")])
         self._admin_badge.setVisible(False)
         header.addWidget(self._admin_badge)
 
         # Decorative stats badge — shows machine + DB count at a glance
-        self._stats_badge = QLabel()
-        self._stats_badge.setStyleSheet(
-            "color: #58a6ff; font-size: 10px;"
-            " background: #0d1117; border: 1px solid #21262d; border-radius: 10px;"
-            " padding: 3px 12px; letter-spacing: 0.5px;"
-        )
+        self._stats_badge = IconBadge(
+            "#58a6ff", "background: #0d1117; border: 1px solid #21262d;"
+            " border-radius: 10px;")
         header.addWidget(self._stats_badge)
         # The name gives way first; the badge keeps its full text (V-03).
         self._stats_badge.setSizePolicy(QSizePolicy.Policy.Minimum,
                                         QSizePolicy.Policy.Preferred)
 
         btn_quick_ssh = QToolButton()
-        btn_quick_ssh.setText("⇆")
+        set_icon(btn_quick_ssh, "connect", "#58a6ff", active="#79c0ff")
         btn_quick_ssh.setFixedSize(26, 26)
         btn_quick_ssh.setToolTip("Szybkie połączenie SSH (dowolny host)")
         btn_quick_ssh.setStyleSheet(
@@ -639,7 +656,8 @@ class DetailPanel(QWidget):
         )
         machines_layout.addWidget(self._machines_table)
 
-        btn_add_machine = QPushButton("＋  Dodaj maszynę")
+        btn_add_machine = QPushButton("Dodaj maszynę")
+        set_icon(btn_add_machine, "plus", "#8ae234", active="#a0de4a", size=14)
         btn_add_machine.setMaximumWidth(170)
         btn_add_machine.setStyleSheet(
             "QPushButton { background: #1a2a1a; color: #8ae234; border: 1px solid #2d5a1a;"
@@ -712,7 +730,8 @@ class DetailPanel(QWidget):
         )
         db_layout.addWidget(self._db_table)
 
-        btn_add_db = QPushButton("＋  Dodaj bazę danych")
+        btn_add_db = QPushButton("Dodaj bazę danych")
+        set_icon(btn_add_db, "plus", "#8ae234", active="#a0de4a", size=14)
         btn_add_db.setMaximumWidth(190)
         btn_add_db.setStyleSheet(
             "QPushButton { background: #1a2a1a; color: #8ae234; border: 1px solid #2d5a1a;"
@@ -923,13 +942,12 @@ class DetailPanel(QWidget):
         hidden_m = sum(1 for x in self.current_hospital.machines if x.admin_only)
         hidden_d = sum(1 for x in self.current_hospital.databases if x.admin_only)
         hidden = hidden_m + hidden_d
-        suffix = ""
+        items = [("monitor", plural(m, 'maszyna', 'maszyny', 'maszyn')),
+                 ("database", plural(db, 'baza', 'bazy', 'baz'))]
         if hidden and not self._admin_unlocked:
-            suffix = "   ·   🔒 " + plural(hidden, "ukryta pozycja",
-                                            "ukryte pozycje", "ukrytych pozycji")
-        self._stats_badge.setText(
-            f"🖥  {plural(m, 'maszyna', 'maszyny', 'maszyn')}   ·   "
-            f"🗄  {plural(db, 'baza', 'bazy', 'baz')}{suffix}")
+            items.append(("lock", plural(hidden, "ukryta pozycja",
+                                         "ukryte pozycje", "ukrytych pozycji")))
+        self._stats_badge.set_items(items)
 
     def _visible_machines(self) -> list[models.Machine]:
         if not self.current_hospital:
@@ -1000,12 +1018,14 @@ class DetailPanel(QWidget):
         if kind == 'machine':
             ctype = getattr(item, 'connection_type', 'SSH')
             if ctype == 'WWW':
-                menu.addAction("🌐  Otwórz w przeglądarce", lambda m=item: self._open_www(m))
+                menu.addAction(icon("globe", "#c9d1d9"), "Otwórz w przeglądarce",
+                               lambda m=item: self._open_www(m))
             elif ctype == 'RDP':
                 menu.addAction("Połącz (RDP)",
                                lambda m=item: connect_rdp(m, self, self._admin_unlocked))
             else:
-                menu.addAction("⇆  Połącz (SSH + SFTP)", lambda m=item: self._open_ssh(m))
+                menu.addAction(icon("connect", "#c9d1d9"), "Połącz (SSH + SFTP)",
+                               lambda m=item: self._open_ssh(m))
             if len(creds) > 1 and ctype in ('SSH', 'RDP'):
                 sub = menu.addMenu("Połącz jako")
                 sub.setStyleSheet(self._MENU_QSS)
@@ -1020,17 +1040,20 @@ class DetailPanel(QWidget):
             label = c.login or "(bez loginu)"
             if c.admin_only:
                 label += "  (admin)"
-            menu.addAction(f"👤  Kopiuj login: {label}",
+            menu.addAction(icon("user", "#c9d1d9"), f"Kopiuj login: {label}",
                            lambda c=c: _clipboard_copy(c.login))
-            menu.addAction(f"🔑  Kopiuj hasło: {label}",
+            menu.addAction(icon("key", "#c9d1d9"), f"Kopiuj hasło: {label}",
                            lambda c=c: _clipboard_copy(c.password))
         menu.addSeparator()
         if kind == 'machine':
-            menu.addAction("📑  Duplikuj", lambda m=item: self._duplicate_machine(m))
-            menu.addAction("⚙  Edytuj maszynę…", lambda m=item: self._edit_machine(m))
+            menu.addAction(icon("copy", "#c9d1d9"), "Duplikuj",
+                           lambda m=item: self._duplicate_machine(m))
+            menu.addAction(icon("gear", "#c9d1d9"), "Edytuj maszynę…",
+                           lambda m=item: self._edit_machine(m))
             menu.addAction("Usuń maszynę…", lambda m=item: self._delete_machine(m))
         else:
-            menu.addAction("⚙  Edytuj bazę…", lambda d=item: self._edit_database(d))
+            menu.addAction(icon("gear", "#c9d1d9"), "Edytuj bazę…",
+                           lambda d=item: self._edit_database(d))
             menu.addAction("Usuń bazę…", lambda d=item: self._delete_database(d))
         return menu
 
@@ -1074,7 +1097,9 @@ class DetailPanel(QWidget):
             "QPushButton:disabled { color: #444; background: #161b22; border-color: #21262d; }"
         )
 
-        btn_login = QPushButton("🔑 " + login_text if first_cred else login_text)
+        btn_login = QPushButton(login_text)
+        if first_cred:
+            set_icon(btn_login, "key", "#d29922", size=12)
         btn_login.setEnabled(first_cred is not None)
         btn_login.setFixedHeight(28)
         # Fixed, not maximum: a short login (or "—") made the button narrower
@@ -1109,7 +1134,8 @@ class DetailPanel(QWidget):
             btn_connect.clicked.connect(
                 lambda _, m=machine: connect_rdp(m, self, self._admin_unlocked))
         elif machine.connection_type == "WWW":
-            btn_connect = QPushButton("🌐")
+            btn_connect = QPushButton()
+            set_icon(btn_connect, "globe", "#3fb950", active="#7ee787")
             btn_connect.setFixedSize(34, 28)
             btn_connect.setToolTip(
                 f"Otwórz w przeglądarce: {machine.www_url or machine.ip}"
@@ -1121,7 +1147,8 @@ class DetailPanel(QWidget):
             )
             btn_connect.clicked.connect(lambda _, m=machine: self._open_www(m))
         else:
-            btn_connect = QPushButton("⇆")
+            btn_connect = QPushButton()
+            set_icon(btn_connect, "connect", "#58a6ff", active="#ffffff")
             btn_connect.setFixedSize(34, 28)
             btn_connect.setToolTip("Połącz — otwórz terminal SSH i przeglądarkę SFTP")
             btn_connect.setStyleSheet(
@@ -1132,7 +1159,8 @@ class DetailPanel(QWidget):
             btn_connect.clicked.connect(lambda _, m=machine: self._open_ssh(m))
         row.addWidget(btn_connect)
 
-        btn_edit = QPushButton("⚙")
+        btn_edit = QPushButton()
+        set_icon(btn_edit, "gear", "#6e9a6e", active="#8ae234", size=15)
         btn_edit.setFixedSize(28, 28)
         btn_edit.setToolTip("Edytuj maszynę")
         btn_edit.setStyleSheet(
@@ -1143,7 +1171,8 @@ class DetailPanel(QWidget):
         btn_edit.clicked.connect(lambda _, m=machine: self._edit_machine(m))
         row.addWidget(btn_edit)
 
-        btn_del = QPushButton("−")
+        btn_del = QPushButton()
+        set_icon(btn_del, "trash", "#c0392b", active="#e74c3c", size=14)
         btn_del.setFixedSize(28, 28)
         btn_del.setToolTip("Usuń maszynę")
         btn_del.setStyleSheet(
@@ -1202,7 +1231,9 @@ class DetailPanel(QWidget):
             "QPushButton:disabled { color: #444; background: #161b22; border-color: #21262d; }"
         )
 
-        btn_login = QPushButton("🔑 " + db_login_text if first_db_cred else db_login_text)
+        btn_login = QPushButton(db_login_text)
+        if first_db_cred:
+            set_icon(btn_login, "key", "#d29922", size=12)
         btn_login.setEnabled(first_db_cred is not None)
         btn_login.setFixedHeight(28)
         # Fixed, not maximum: a short login (or "—") made the button narrower
@@ -1223,7 +1254,8 @@ class DetailPanel(QWidget):
             )
         row.addWidget(btn_login)
 
-        btn_edit = QPushButton("⚙")
+        btn_edit = QPushButton()
+        set_icon(btn_edit, "gear", "#6e9a6e", active="#8ae234", size=15)
         btn_edit.setFixedSize(28, 28)
         btn_edit.setToolTip("Edytuj bazę danych")
         btn_edit.setStyleSheet(
@@ -1234,7 +1266,8 @@ class DetailPanel(QWidget):
         btn_edit.clicked.connect(lambda _, d=db: self._edit_database(d))
         row.addWidget(btn_edit)
 
-        btn_del = QPushButton("−")
+        btn_del = QPushButton()
+        set_icon(btn_del, "trash", "#c0392b", active="#e74c3c", size=14)
         btn_del.setFixedSize(28, 28)
         btn_del.setToolTip("Usuń bazę danych")
         btn_del.setStyleSheet(
@@ -1395,7 +1428,8 @@ class DetailPanel(QWidget):
         machine = visible[row]
 
         menu = QMenu(self)
-        menu.addAction("📑  Duplikuj", lambda: self._duplicate_machine(machine))
+        menu.addAction(icon("copy", "#c9d1d9"), "Duplikuj",
+                       lambda: self._duplicate_machine(machine))
         menu.exec(self._machines_table.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------------ #

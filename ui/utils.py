@@ -1,6 +1,32 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QLabel, QMessageBox, QSizePolicy
 
+# Polish alphabetical order: each letter with a diacritic right after its base
+# letter (… s, ś, t … z, ź, ż).  Code-point order put "ś" after "z".
+_PL_ALPHABET = "aąbcćdeęfghijklłmnńoópqrsśtuvwxyzźż"
+_PL_RANK = {ch: i for i, ch in enumerate(_PL_ALPHABET)}
+# Other accented Latin letters (é, ü, …) sort next to their base letter.
+_FOLD = str.maketrans("àáâãäåçèéêëìíîïñòôõöøùúûüýÿ", "aaaaaaceeeeiiiinooooouuuuyy")
+
+
+def polish_key(text: str) -> tuple:
+    """Sort key for names in Polish alphabetical order, case-insensitive.
+
+    Digits and punctuation keep their place before letters (as in a file
+    manager); identical-looking names stay stable by their original text.
+    Independent of the Windows locale, so it sorts the same everywhere."""
+    folded = (text or "").casefold()
+    out = []
+    for ch in folded:
+        rank = _PL_RANK.get(ch)
+        if rank is None:
+            base = ch.translate(_FOLD)
+            rank = _PL_RANK.get(base)
+            out.append((1, rank, 1) if rank is not None else (0, ord(ch), 0))
+        else:
+            out.append((1, rank, 0))
+    return (tuple(out), text or "")
+
 
 def plural(n: int, one: str, few: str, many: str) -> str:
     """'{n} {noun}' with Polish declension: 1 → `one`; 2–4, 22–24, … (not

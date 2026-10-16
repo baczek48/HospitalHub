@@ -20,12 +20,18 @@ from config import (load_last_vault, save_last_vault, load_vault_list,
 
 
 def _svg_icon(svg_str: str, size: int = 24) -> QPixmap:
+    """The SVG rendered for the screen's pixel ratio (a 24-px bitmap was
+    stretched and soft at 150-200 %)."""
+    from PyQt6.QtGui import QGuiApplication
+    screen = QGuiApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen is not None else 1.0
     renderer = QSvgRenderer(svg_str.encode())
-    pm = QPixmap(size, size)
+    pm = QPixmap(round(size * ratio), round(size * ratio))
     pm.fill(QColor(0, 0, 0, 0))
     painter = QPainter(pm)
     renderer.render(painter)
     painter.end()
+    pm.setDevicePixelRatio(ratio)
     return pm
 
 _ICON_GLOBE = (

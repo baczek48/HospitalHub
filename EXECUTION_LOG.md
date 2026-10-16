@@ -573,3 +573,21 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   pierwszego nieudanego połączenia. Wiersze do podmiany szukane po treści (zmiana rozmiaru
   okna w trakcie nie psuje ekranu — test), wszystko dopasowane do szerokości terminala.
 - Mutacja (limit 1000) → 4 FAIL. **1891 PASS / 0 FAIL** (dwa przebiegi). Build 18:0x.
+
+### 2026-10-16 (wieczór, cd. 2) — sortowanie, ikony zamiast emoji, błysk w jasnym motywie
+
+- **Sortowanie** wg polskiego alfabetu (`ui.utils.polish_key`: a ą b c ć … s ś t … z ź ż,
+  bez względu na wielkość liter, niezależne od locale Windows): lista szpitali (było
+  `casefold` → „ś” za „z”), profile VPN (było `locale.setlocale` — zmieniało locale całego
+  procesu i bez polskiego locale wracało do kolejności kodów), pliki SFTP.
+- **Ikony:** ~45 emoji/symboli (🔑 📁 🌐 ⚙ ⇆ 🔒 …) zastąpione ikonami wektorowymi
+  (`ui/icons.py`: SVG 24×24 rysowane przez własny `QIconEngine` dla rzeczywistego rozmiaru i
+  współczynnika pikseli — ostre przy 100 % na 1080p i na 4K). Kolory przez `theme.paint`
+  (jasny motyw), stan najechania/zaznaczenia/wyłączenia. Ikony rysowane w kodzie (typy plików
+  SFTP, ikona SQL Developer, okno logowania, krzyżyk karty @2x) także renderowane dla DPI.
+  Silnik nie przechowuje `QSvgRenderer` (obiekt bywał usuwany po stronie C++ → wyjątek w
+  rysowaniu i zawieszony okno błędu — złapane przez pełny zestaw testów).
+- **Błysk „skopiowano”** przycisku login/hasło: `QGraphicsColorizeEffect` barwił piksele —
+  na prawie białym przycisku jasnego motywu niewidoczny. Teraz animacja tła i obramowania z
+  kolorami per motyw (zrzuty obu motywów).
+- **1905 PASS / 0 FAIL**; mutacja sortowania → FAIL. Build + instalator 20:09.

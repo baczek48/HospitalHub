@@ -224,6 +224,7 @@ from html import escape as _esc
 
 from ui.rdp import connect_rdp as _connect_rdp
 from ui import theme
+from ui.icons import icon, painter_icon, set_icon
 
 try:
     import pyte
@@ -3243,8 +3244,9 @@ class _SftpListWorker(QThread):
                     "w kodowaniu innym niż UTF-8 — pokazane z „�”; operacje "
                     "na tych plikach mogą się nie udać.")
             result  = []
+            from ui.utils import polish_key
             for e in sorted(entries, key=lambda x: (
-                not stat.S_ISDIR(x.st_mode), x.filename.lower()
+                not stat.S_ISDIR(x.st_mode), polish_key(x.filename)
             )):
                 is_dir = stat.S_ISDIR(e.st_mode)
                 mtime  = (datetime.fromtimestamp(e.st_mtime).strftime('%Y-%m-%d %H:%M')
@@ -3464,8 +3466,9 @@ class _DirFirstItem(QTableWidgetItem):
             # Dirs before files
             if my_dir != ot_dir:
                 return my_dir  # True (dir) < False (file) → dir first
-            # Same type: alphabetical (case-insensitive)
-            return my_name.lower() < ot_name.lower()
+            # Same type: Polish alphabetical order (case-insensitive)
+            from ui.utils import polish_key
+            return polish_key(my_name) < polish_key(ot_name)
         except Exception:
             return super().__lt__(other)
 
@@ -3478,16 +3481,11 @@ def _sftp_icon(key: str) -> QIcon:
     """Return a cached QPainter-drawn icon for SFTP file types."""
     if key in _SFTP_ICON_CACHE:
         return _SFTP_ICON_CACHE[key]
-    sz = 16
-    pix = QPixmap(sz, sz)
-    pix.fill(QColor(0, 0, 0, 0))
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    _SFTP_ICON_DRAW[key](p, sz)
-    p.end()
-    icon = QIcon(pix)
-    _SFTP_ICON_CACHE[key] = icon
-    return icon
+    # The 16-px drawings run scaled to the real pixel size (150 %, 200 %, a
+    # 4K TV) instead of a 16×16 bitmap being stretched.
+    ic = painter_icon(_SFTP_ICON_DRAW[key], base=16)
+    _SFTP_ICON_CACHE[key] = ic
+    return ic
 
 
 #: Dark fills of the file icons and what they become in the light theme —
@@ -4356,10 +4354,10 @@ class SftpPanel(QWidget):
 
         # Navigation bar
         nav = QHBoxLayout()
-        self._btn_up  = self._nav_btn("↑", "Katalog wyżej", self._go_up)
-        self._btn_home = self._nav_btn("⌂", "Katalog /", lambda: self._list('/'))
-        self._btn_ref  = self._nav_btn("↻", "Odśwież", lambda: self._list(self._path))
-        self._btn_mkdir = self._nav_btn("➕", "Nowy folder", self._mkdir_dialog)
+        self._btn_up  = self._nav_btn("up", "Katalog wyżej", self._go_up)
+        self._btn_home = self._nav_btn("home", "Katalog /", lambda: self._list('/'))
+        self._btn_ref  = self._nav_btn("refresh", "Odśwież", lambda: self._list(self._path))
+        self._btn_mkdir = self._nav_btn("folder-plus", "Nowy folder", self._mkdir_dialog)
         for b in (self._btn_up, self._btn_home, self._btn_ref, self._btn_mkdir):
             b.setEnabled(False)
             nav.addWidget(b)
@@ -4390,7 +4388,7 @@ class SftpPanel(QWidget):
 
         # History dropdown button
         self._btn_history = QToolButton()
-        self._btn_history.setText("▾")
+        set_icon(self._btn_history, "chevron-down", "#8b949e", active="#c9d1d9", size=12)
         self._btn_history.setFixedSize(22, 28)
         self._btn_history.setToolTip("Historia folderów")
         self._btn_history.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -4499,14 +4497,15 @@ class SftpPanel(QWidget):
         root.addWidget(self._table, 1)
 
         # Drag & drop hint
-        hint = QLabel("Upuść pliki tutaj, aby wgrać  ⬆")
+        hint = QLabel("Upuść pliki tutaj, aby wgrać")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color:#30363d; font-size:10px; padding:2px;")
         root.addWidget(hint)
 
         # Transfer buttons + progress
         xfer = QHBoxLayout()
-        self._btn_dl = QPushButton("⬇  Pobierz")
+        self._btn_dl = QPushButton("Pobierz")
+        set_icon(self._btn_dl, "download", "#3fb950", size=14)
         self._btn_dl.setEnabled(False)
         self._btn_dl.setStyleSheet(
             "QPushButton{background:#0d1f0d;color:#3fb950;"
@@ -4517,7 +4516,8 @@ class SftpPanel(QWidget):
             "border-color:#1c2128;}")
         self._btn_dl.clicked.connect(self._download)
 
-        self._btn_ul = QPushButton("⬆  Wgraj")
+        self._btn_ul = QPushButton("Wgraj")
+        set_icon(self._btn_ul, "upload", "#58a6ff", size=14)
         self._btn_ul.setEnabled(False)
         self._btn_ul.setStyleSheet(
             "QPushButton{background:#0d1525;color:#58a6ff;"
@@ -4544,7 +4544,8 @@ class SftpPanel(QWidget):
         self._progress.setSizePolicy(_sp)
         self._progress.setVisible(False)
 
-        self._btn_cancel = QPushButton("✕")
+        self._btn_cancel = QPushButton()
+        set_icon(self._btn_cancel, "close", "#f85149", size=12)
         self._btn_cancel.setFixedSize(20, 20)
         self._btn_cancel.setToolTip("Anuluj transfer")
         self._btn_cancel.setStyleSheet(
@@ -4565,8 +4566,9 @@ class SftpPanel(QWidget):
         xfer.addWidget(self._btn_cancel)
         root.addLayout(xfer)
 
-    def _nav_btn(self, text, tip, slot) -> QPushButton:
-        b = QPushButton(text)
+    def _nav_btn(self, icon_name, tip, slot) -> QPushButton:
+        b = QPushButton()
+        set_icon(b, icon_name, "#8b949e", active="#c9d1d9", size=15)
         b.setFixedSize(28, 28)
         b.setToolTip(tip)
         b.setStyleSheet(
@@ -5236,7 +5238,7 @@ class SftpPanel(QWidget):
         if not item:
             # Empty area — only the directory-wide action.
             if self._sftp:
-                menu.addAction("➕  Nowy folder", self._mkdir_dialog)
+                menu.addAction(icon("folder-plus", "#c9d1d9"), "Nowy folder", self._mkdir_dialog)
                 menu.exec(self._table.viewport().mapToGlobal(pos))
             return
         row_item = self._table.item(item.row(), 0)
@@ -5246,22 +5248,28 @@ class SftpPanel(QWidget):
         if name == '..':
             # Treat ".." like an empty area — only the directory-wide action.
             if self._sftp:
-                menu.addAction("➕  Nowy folder", self._mkdir_dialog)
+                menu.addAction(icon("folder-plus", "#c9d1d9"), "Nowy folder", self._mkdir_dialog)
                 menu.exec(self._table.viewport().mapToGlobal(pos))
             return
         remote = self._path.rstrip('/') + '/' + name
 
         if not is_dir:
-            menu.addAction("⬇  Pobierz", self._download)
-            menu.addAction("📄  Otwórz lokalnie", lambda: self._open_remote(remote, name))
-            menu.addAction("📂  Otwórz za pomocą...", lambda: self._open_with(remote, name))
+            menu.addAction(icon("download", "#c9d1d9"), "Pobierz", self._download)
+            menu.addAction(icon("file", "#c9d1d9"), "Otwórz lokalnie",
+                           lambda: self._open_remote(remote, name))
+            menu.addAction(icon("folder-open", "#c9d1d9"), "Otwórz za pomocą...",
+                           lambda: self._open_with(remote, name))
         menu.addSeparator()
-        menu.addAction("📋  Kopiuj ścieżkę", lambda r=remote: QApplication.clipboard().setText(r))
+        menu.addAction(icon("clipboard", "#c9d1d9"), "Kopiuj ścieżkę",
+                       lambda r=remote: QApplication.clipboard().setText(r))
         menu.addSeparator()
-        menu.addAction("🔒  Uprawnienia...", lambda: self._chmod_dialog(remote, name))
-        menu.addAction("✏️  Zmień nazwę", lambda ri=row_item: self._start_inline_rename(ri))
-        menu.addAction("➕  Nowy folder", self._mkdir_dialog)
-        menu.addAction(f"🗑️  Usuń „{name}”", lambda: self._delete(remote, is_dir, name))
+        menu.addAction(icon("lock", "#c9d1d9"), "Uprawnienia...",
+                       lambda: self._chmod_dialog(remote, name))
+        menu.addAction(icon("pencil", "#c9d1d9"), "Zmień nazwę",
+                       lambda ri=row_item: self._start_inline_rename(ri))
+        menu.addAction(icon("folder-plus", "#c9d1d9"), "Nowy folder", self._mkdir_dialog)
+        menu.addAction(icon("trash", "#f85149"), f"Usuń „{name}”",
+                       lambda: self._delete(remote, is_dir, name))
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     # ── Transfer ──────────────────────────────────────────────────────────
@@ -7662,15 +7670,21 @@ def _ensure_close_icons():
     os.makedirs(d, exist_ok=True)
     normal = os.path.join(d, 'tab_close.png')
     hover  = os.path.join(d, 'tab_close_h.png')
-    if not os.path.exists(normal) or not os.path.exists(hover):
-        for path, color in [(normal, '#8b949e'), (hover, '#e6edf3')]:
-            px = QPixmap(16, 16)
+    variants = [(normal, '#8b949e', 1), (hover, '#e6edf3', 1),
+                (normal[:-4] + '@2x.png', '#8b949e', 2),
+                (hover[:-4] + '@2x.png', '#e6edf3', 2)]
+    if not all(os.path.exists(v[0]) for v in variants):
+        from PyQt6.QtCore import QPointF
+        for path, color, k in variants:
+            # Qt's stylesheet url() takes the @2x file on a 2x screen.
+            px = QPixmap(16 * k, 16 * k)
             px.fill(Qt.GlobalColor.transparent)
             p = QPainter(px)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.scale(k, k)
             p.setPen(QPen(QColor(color), 1.8))
-            p.drawLine(4, 4, 12, 12)
-            p.drawLine(12, 4, 4, 12)
+            p.drawLine(QPointF(4, 4), QPointF(12, 12))
+            p.drawLine(QPointF(12, 4), QPointF(4, 12))
             p.end()
             px.save(path)
     return normal.replace('\\', '/'), hover.replace('\\', '/')
@@ -7869,7 +7883,7 @@ class SshDialog(QDialog):
 
         self._sftp_panel = SftpPanel()
         self._sftp_panel.status_msg.connect(lambda t, e: self._status(t, err=e))
-        left_tabs.addTab(self._sftp_panel, "📁  Pliki")
+        left_tabs.addTab(self._sftp_panel, icon("folder", "#e2b340"), "Pliki")
 
         self._env_panel = _EnvironmentPanel(
             self._hospital, all_hospitals=self._all_hospitals,
@@ -7877,7 +7891,7 @@ class SshDialog(QDialog):
             admin_unlocked=self._admin_unlocked)
         self._env_panel.open_machine.connect(self._open_extra_machine)
         self._env_panel.open_machine_cred.connect(self._open_machine_with_cred)
-        left_tabs.addTab(self._env_panel, "🖥  Środowisko")
+        left_tabs.addTab(self._env_panel, icon("monitor", "#58a6ff"), "Środowisko")
 
         self._left_tabs = left_tabs
         left_tabs.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
@@ -7894,7 +7908,8 @@ class SshDialog(QDialog):
         tb = QHBoxLayout()
         tb.setContentsMargins(4, 2, 4, 2)
 
-        self._btn_multiexec = QPushButton("⊞  Multi-exec")
+        self._btn_multiexec = QPushButton("Multi-exec")
+        set_icon(self._btn_multiexec, "grid", "#58a6ff", on="#ffffff", size=14)
         self._btn_multiexec.setCheckable(True)
         self._btn_multiexec.setStyleSheet(
             "QPushButton{background:#151b23;color:#58a6ff;"
@@ -7905,7 +7920,8 @@ class SshDialog(QDialog):
             "QPushButton:hover{background:#1c2433;border-color:#30363d;}")
         self._btn_multiexec.toggled.connect(self._toggle_multiexec)
 
-        btn_new = QPushButton("＋  Nowa sesja")
+        btn_new = QPushButton("Nowa sesja")
+        set_icon(btn_new, "plus", "#3fb950", size=14)
         btn_new.setStyleSheet(
             "QPushButton{background:#0d1f0d;color:#3fb950;"
             "border:1px solid #1b3d1b;border-radius:6px;padding:4px 12px;"
@@ -7959,12 +7975,13 @@ class SshDialog(QDialog):
         handle_layout = QVBoxLayout(handle)
         handle_layout.setContentsMargins(0, 0, 0, 0)
         handle_layout.addStretch()
-        dots = QLabel("⋮")
-        dots.setStyleSheet(
-            "color: #6e7681; font-size: 14px; background: transparent;"
-        )
+        from ui.icons import pixmap as _icon_pixmap
+        dots = QLabel()
+        dots.setFixedSize(6, 18)                 # the handle is 6 px wide
         dots.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        handle_layout.addWidget(dots)
+        dots.setStyleSheet("background: transparent;")
+        dots.setPixmap(_icon_pixmap("more", "#8b949e", 18, splitter))
+        handle_layout.addWidget(dots, 0, Qt.AlignmentFlag.AlignHCenter)
         handle_layout.addStretch()
 
         # Double-click handle to toggle collapse
@@ -7987,7 +8004,8 @@ class SshDialog(QDialog):
 
         # ── Terminal search: lupa + find field ──────────────────────────────
         self._search_btn = QToolButton()
-        self._search_btn.setText("🔍")
+        set_icon(self._search_btn, "search", "#6e7681", active="#c9d1d9",
+                 on="#58a6ff", size=14)
         self._search_btn.setCheckable(True)
         self._search_btn.setToolTip("Szukaj w terminalu (Ctrl+Shift+F)")
         self._search_btn.setCursor(Qt.CursorShape.PointingHandCursor)

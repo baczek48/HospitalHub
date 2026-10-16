@@ -349,8 +349,12 @@ class MachineDialog(_DiscardGuard, FormStyled, QDialog):
         self._cred_table.setRowCount(0)
         for i, cred in enumerate(self._visible_creds()):
             self._cred_table.insertRow(i)
-            prefix = "🔒 " if cred.admin_only else ""
-            self._cred_table.setItem(i, 0, QTableWidgetItem(prefix + cred.login))
+            login_item = QTableWidgetItem(cred.login)
+            if cred.admin_only:
+                from ui.icons import icon
+                login_item.setIcon(icon("lock", "#c084fc"))
+                login_item.setToolTip("Konto widoczne tylko w trybie admina")
+            self._cred_table.setItem(i, 0, login_item)
             self._cred_table.setItem(i, 1, QTableWidgetItem(cred.note))
             self._cred_table.setCellWidget(i, 2, self._make_cred_actions(cred))
             self._cred_table.setRowHeight(i, 36)
@@ -555,8 +559,12 @@ class DatabaseDialog(_DiscardGuard, FormStyled, QDialog):
         self._cred_table.setRowCount(0)
         for i, cred in enumerate(self._visible_creds()):
             self._cred_table.insertRow(i)
-            prefix = "🔒 " if cred.admin_only else ""
-            self._cred_table.setItem(i, 0, QTableWidgetItem(prefix + cred.login))
+            login_item = QTableWidgetItem(cred.login)
+            if cred.admin_only:
+                from ui.icons import icon
+                login_item.setIcon(icon("lock", "#c084fc"))
+                login_item.setToolTip("Konto widoczne tylko w trybie admina")
+            self._cred_table.setItem(i, 0, login_item)
             self._cred_table.setItem(i, 1, QTableWidgetItem(cred.note))
             self._cred_table.setCellWidget(i, 2, self._make_cred_actions(cred))
             self._cred_table.setRowHeight(i, 36)
