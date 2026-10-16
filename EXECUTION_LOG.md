@@ -533,3 +533,26 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   hak wyjątków aplikacji) — objaw „zawieszonego” zestawu; przyczyna była w łatce, nie w testach.
 - Niezmienniki: flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, `vpn_connect.py` a929035e,
   `HospitalHubV2.spec` bez zmian, V1 nietknięte.
+
+---
+
+## 2026-10-16 (wieczór) — trzy prośby właściciela po instalacji Etapu 71
+
+- **Jedno okno SSH na szpital** (decyzja 1 z `REDESIGN_V2.md` §5, teraz zlecona): ⇆ i „Połącz
+  jako” w tabeli maszyn dodają kartę do otwartego okna SSH tego samego szpitala (ostatnio
+  aktywnego; przywracane z minimalizacji). Inny szpital — osobne okno. `SshDialog.window_for`,
+  `SshDialog.open_machine`, `DetailPanel._open_ssh`.
+- **Kafelki akcji nierówne:** przycisk loginu miał `setMaximumWidth(90)`, więc „root”, „—” i
+  „administra…” dawały różne szerokości i przesuwały ⇆/⚙/− w każdym wierszu. Teraz stała
+  szerokość (`_LOGIN_BTN_W`), maszyny i bazy. Zrzut przed/po (oba motywy) potwierdza.
+- **Log VPN działań i błędów** (`diagnostics/actionlog.py`): przełącznik w ⚙ Ustawienia VPN →
+  Diagnostyka (per komputer, `config.vpn_log_enabled`, domyślnie WYŁ.), plik
+  `%APPDATA%\HospitalHubV2\diagnostics\logs\vpn.log` (rotacja 1 MB × 4). Zapisuje kliknięcia
+  Połącz/Rozłącz i ich wynik (komunikat klienta), zmiany statusu, 2FA, otwarcie klienta,
+  zakończone ślady diagnostyczne (kroki z kodami błędów) i nieobsłużone wyjątki aplikacji.
+  Bez haseł i loginów (rejestr sekretów → `***`, redaktor, końcowy skan — wpis wyglądający na
+  sekret jest pomijany); serwery maskowane, nazwa profilu i provider czytelne. Przyciski „Otwórz
+  folder logów” i „Zapisz paczkę diagnostyczną (ZIP)…” (istniejący, bramkowany eksport +
+  `vpn_log.txt`). Legacy `vpn_connect.py` nietknięty.
+- Mutacje: cofnięcie poprawek okna SSH i szerokości → 2 FAIL. **1877 PASS / 0 FAIL.** Build exe +
+  instalator 17:10. Smoke startu exe nie wykonany — działa zainstalowana kopia użytkownika.

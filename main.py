@@ -70,6 +70,11 @@ def _install_excepthook():
             log_path,
             f"\n=== {datetime.now().isoformat(timespec='seconds')}{where} ===\n{text}")
         try:
+            from diagnostics import actionlog
+            actionlog.exception_text(text, where)
+        except Exception:
+            pass
+        try:
             if sys.stderr is not None:
                 sys.stderr.write(text)
         except Exception:
@@ -635,6 +640,14 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("HospitalHub")
     install_polish_translations(app)
+    try:
+        from config import load_vpn_log_enabled
+        from diagnostics import actionlog
+        if load_vpn_log_enabled():
+            actionlog.set_enabled(True)
+            actionlog.info("app", "Start aplikacji")
+    except Exception:
+        pass
     cleanup_orphan_temp_dirs()
 
     # Single-instance: try to activate a running instance via IPC

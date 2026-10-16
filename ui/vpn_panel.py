@@ -16,7 +16,9 @@ import models
 import vpn_connect
 from config import (load_vpn_provider_paths, save_vpn_provider_paths,
                     load_custom_vpn_providers, save_custom_vpn_providers,
-                    load_vpn_autofill_enabled, save_vpn_autofill_enabled)
+                    load_vpn_autofill_enabled, save_vpn_autofill_enabled,
+                    load_vpn_log_enabled, save_vpn_log_enabled)
+from diagnostics import actionlog
 # The V2 integration point (Stage 52).  The panel does no VPN work itself: it
 # asks the bridge which route a provider takes, and — only when the bridge says
 # a provider is armed (all are OFF today, so this never fires in production) —
@@ -269,6 +271,48 @@ class VpnSettingsDialog(QDialog):
         desc_auto.setWordWrap(True)
         lay.addWidget(desc_auto)
 
+        # --- Section: Diagnostics (readable log, per computer) ---
+        sep_diag = QFrame()
+        sep_diag.setFrameShape(QFrame.Shape.HLine)
+        sep_diag.setStyleSheet("color: #30363d;")
+        lay.addWidget(sep_diag)
+
+        lbl_diag = QLabel("Diagnostyka")
+        lbl_diag.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: bold;")
+        lay.addWidget(lbl_diag)
+
+        self._log_cb = _CheckmarkCheckBox("Zapisuj log działań i błędów VPN na tym komputerze")
+        self._log_cb.setChecked(load_vpn_log_enabled())
+        self._log_cb.setStyleSheet(self._autofill_cb.styleSheet())
+        lay.addWidget(self._log_cb)
+
+        desc_log = QLabel(
+            "Połączenia, rozłączenia, zmiany statusu, odpowiedzi klienta VPN i błędy aplikacji.\n"
+            "Bez haseł i loginów; adresy serwerów są maskowane, nazwy profili zostają.\n"
+            f"Plik: {actionlog.log_path()}"
+        )
+        desc_log.setStyleSheet("color: #8b949e; font-size: 10px; padding-left: 24px;")
+        desc_log.setWordWrap(True)
+        desc_log.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(desc_log)
+
+        log_row = QHBoxLayout()
+        log_row.setContentsMargins(24, 0, 0, 0)
+        log_row.setSpacing(6)
+        btn_open_logs = QPushButton("Otwórz folder logów")
+        btn_open_logs.setStyleSheet(_SMALL_BTN)
+        btn_open_logs.clicked.connect(self._open_log_folder)
+        log_row.addWidget(btn_open_logs)
+        btn_export_logs = QPushButton("Zapisz paczkę diagnostyczną (ZIP)…")
+        btn_export_logs.setToolTip(
+            "Log VPN + ślady operacji + informacje o systemie, sprawdzone pod kątem haseł.\n"
+            "Plik ZIP można przesłać osobie, która rozwiązuje problem.")
+        btn_export_logs.setStyleSheet(_SMALL_BTN)
+        btn_export_logs.clicked.connect(self._export_diagnostics)
+        log_row.addWidget(btn_export_logs)
+        log_row.addStretch()
+        lay.addLayout(log_row)
+
         lay.addStretch()
 
         # --- Import FortiClient ---
@@ -361,6 +405,54 @@ class VpnSettingsDialog(QDialog):
 
     def get_autofill_enabled(self) -> bool:
         return self._autofill_cb.isChecked()
+
+    def get_log_enabled(self) -> bool:
+        return self._log_cb.isChecked()
+
+    def _open_log_folder(self):
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        folder = actionlog.log_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _export_diagnostics(self):
+        """The log, the traces and the system facts in one ZIP — the same
+        checked export the diagnostics package makes (nothing is written if
+        anything in it still looks like a secret)."""
+        import diagnostics
+        from diagnostics.redactor import SecretLeakError
+        default = os.path.join(os.path.expanduser("~"), "Desktop")
+        if not os.path.isdir(default):
+            default = os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Gdzie zapisać paczkę diagnostyczną", default)
+        if not folder:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = diagnostics.export(dest_dir=folder)
+        except SecretLeakError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Paczka diagnostyczna",
+                                f"Nie zapisano paczki.\n\n{exc}")
+            return
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Paczka diagnostyczna",
+                                f"Nie udało się zapisać paczki:\n{type(exc).__name__}: {exc}")
+            return
+        QApplication.restoreOverrideCursor()
+        has_log = "vpn_log.txt" in result.files
+        QMessageBox.information(
+            self, "Paczka diagnostyczna",
+            f"Zapisano:\n{result.path}\n\n"
+            + ("Zawiera log VPN." if has_log else
+               "Log VPN jest pusty — włącz „Zapisuj log działań i błędów VPN”, "
+               "odtwórz problem i zapisz paczkę ponownie."))
 
 
 # ------------------------------------------------------------------ #
@@ -511,6 +603,35 @@ def _retire_controller(controller) -> None:
         pass
 
 
+def _vlog(level: str, what: str, p=None, /, **fields) -> None:
+    """One line in the VPN log (⚙ Ustawienia VPN → Diagnostyka), when it is
+    switched on.  A module function, not a method: it must work for any
+    caller and never raise."""
+    try:
+        if not actionlog.is_enabled():
+            return
+        if p is not None:
+            actionlog.register_secrets((p.password, p.login))
+            fields = {"profile": p.name or p.profile_name or "(bez nazwy)",
+                      "provider": p.provider, "server": p.server, **fields}
+        getattr(actionlog, level)("vpn", what, **fields)
+    except Exception:
+        pass
+
+
+def _log_status_change(panel, idx: int, status: str) -> None:
+    """Only status changes reach the log, not every 5-second poll."""
+    if not actionlog.is_enabled():
+        return
+    try:
+        logged = panel.__dict__.setdefault("_logged_status", {})
+        if logged.get(idx) != status and idx < len(panel._profiles):
+            logged[idx] = status
+            _vlog("info", f"Status: {status}", panel._profiles[idx])
+    except Exception:
+        pass
+
+
 class VpnPanel(QWidget):
     data_changed = pyqtSignal()
 
@@ -532,6 +653,9 @@ class VpnPanel(QWidget):
         #: the handler would be garbage-collected the moment the handler returns,
         #: killing the QThread mid-connect.
         self._v2_controllers = {}
+        #: idx -> last status written to the VPN log (only changes are logged)
+        self._logged_status = {}
+        self._register_log_secrets()
         self._setup_ui()
         self._rebuild_cards()
 
@@ -563,6 +687,16 @@ class VpnPanel(QWidget):
 
     def get_profiles(self) -> list:
         return self._profiles
+
+    # ------------------------------------------------------------------ #
+    # VPN log (opt-in, ⚙ Ustawienia VPN → Diagnostyka)                     #
+    # ------------------------------------------------------------------ #
+
+    def _register_log_secrets(self) -> None:
+        """Passwords and logins of every profile: never written to the log."""
+        if actionlog.is_enabled():
+            actionlog.register_secrets(
+                v for p in self._profiles for v in (p.password, p.login))
 
     # ------------------------------------------------------------------ #
     # Window resize helper                                                 #
@@ -1164,6 +1298,7 @@ class VpnPanel(QWidget):
             lbl = self._status_labels.get(idx)
             if not lbl:
                 continue
+            _log_status_change(self, idx, status)
             if status == "Connected":
                 lbl.setStyleSheet("color: #3fb950; font-size: 10px; font-weight: bold; border: none;")
                 lbl.setText("● Połączono")
@@ -1195,6 +1330,8 @@ class VpnPanel(QWidget):
                                     "Ustaw globalnie w ⚙ Ustawienia VPN.")
             return
         ok, msg = vpn_connect.launch_app(path)
+        _vlog("info" if ok else "error", "Otwórz klienta VPN", p,
+                   result="ok" if ok else "błąd", message=msg, app_path=path)
         if not ok:
             QMessageBox.warning(self, "Klient VPN", msg)
 
@@ -1214,14 +1351,19 @@ class VpnPanel(QWidget):
             if lbl:
                 lbl.setStyleSheet("color: #f85149; font-size: 10px; border: none;")
                 lbl.setText("Brak konfig.")
+            _vlog("error", "Połącz: brak serwera, ścieżki klienta i nazwy profilu", p)
             return
 
         autofill_on = load_vpn_autofill_enabled()
+        route = select_connect_route(p.provider)
+        _vlog("info", "Połącz — kliknięto", p, autofill=autofill_on,
+                   method="legacy" if route == ROUTE_LEGACY else "v2",
+                   app_path=app_path or "(brak)")
 
         # Route decision (Stage 52).  With every provider's arming flag off this
         # always returns ROUTE_LEGACY, so production behaviour is unchanged; a
         # future cutover arms one provider and only then does the V2 branch run.
-        if select_connect_route(p.provider) != ROUTE_LEGACY:
+        if route != ROUTE_LEGACY:
             self._connect_card_v2(idx, p, app_path, autofill_on, lbl)
             return
 
@@ -1239,6 +1381,9 @@ class VpnPanel(QWidget):
             app_path, p.profile_name,
             autofill=autofill_on,
         )
+        _vlog("info" if ok else "error", "Połącz — wynik", p,
+                   result="ok" if ok else "błąd", message=msg,
+                   process_started=process is not None)
         if lbl:
             color = "#58a6ff" if ok else "#f85149"
             lbl.setStyleSheet(f"color: {color}; font-size: 10px; border: none;")
@@ -1299,9 +1444,11 @@ class VpnPanel(QWidget):
             if card is not None and card.layout() is not None:
                 card.layout().addWidget(controller.prompt)
             controller.start()
-        except Exception:
+        except Exception as exc:
             # An error building or starting V2 must never leave the card stuck
             # on "Łączenie…"; there is no automatic fallback to legacy.
+            _vlog("error", "Połącz (V2) — błąd uruchomienia", p,
+                       error=f"{type(exc).__name__}: {exc}")
             if lbl:
                 lbl.setStyleSheet("color: #f85149; font-size: 10px; border: none;")
                 lbl.setText("Błąd połączenia V2")
@@ -1311,6 +1458,13 @@ class VpnPanel(QWidget):
     def _on_v2_finished(self, idx: int, outcome, controller=None):
         """The V2 session reported.  The card text is already set by the
         controller; here we only mirror the legacy "ok" side effects."""
+        if idx < len(self._profiles):
+            started = bool(getattr(outcome, "started", False))
+            _vlog("info" if started else "warn", "Połącz (V2) — wynik",
+                       self._profiles[idx], started=started,
+                       state=str(getattr(outcome, "state", "") or ""),
+                       reason_code=str(getattr(outcome, "code", "") or ""),
+                       error_code=str(getattr(outcome, "error_code", "") or ""))
         if outcome is not None and getattr(outcome, "started", False):
             self._update_toggle_btn(idx, "connecting")
             vpn_connect.invalidate_adapter_cache()
@@ -1354,9 +1508,13 @@ class VpnPanel(QWidget):
         worker = self._monitor_workers.get(idx)
         if not worker:
             return
+        _vlog("info", "Klient prosi o kod 2FA", p)
         dlg = TwoFactorDialog(p.name or p.profile_name or p.server, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             worker.send_token(dlg.code())
+            _vlog("info", "Kod 2FA wysłany", p)
+        else:
+            _vlog("warn", "Kod 2FA anulowany", p)
 
     def _disconnect_card(self, idx: int):
         if idx >= len(self._profiles):
@@ -1364,7 +1522,10 @@ class VpnPanel(QWidget):
         p = self._profiles[idx]
         lbl = self._status_labels.get(idx)
         app_path = self._resolve_app_path(p)
+        _vlog("info", "Rozłącz — kliknięto", p)
         ok, msg = vpn_connect.disconnect(p.provider, p.server, app_path, p.profile_name)
+        _vlog("info" if ok else "error", "Rozłącz — wynik", p,
+                   result="ok" if ok else "błąd", message=msg)
         if lbl:
             color = "#58a6ff" if ok else "#f85149"
             lbl.setStyleSheet(f"color: {color}; font-size: 10px; border: none;")
@@ -1392,6 +1553,12 @@ class VpnPanel(QWidget):
             custom = dlg.get_custom_providers()
             save_custom_vpn_providers(custom)
             save_vpn_autofill_enabled(dlg.get_autofill_enabled())
+            log_on = dlg.get_log_enabled()
+            save_vpn_log_enabled(log_on)
+            actionlog.set_enabled(log_on)
+            self._register_log_secrets()
+            _vlog("info", "Zapisano ustawienia VPN",
+                       autofill=dlg.get_autofill_enabled())
             models.refresh_vpn_providers(custom)
             # Apply global paths to profiles that have no custom path
             global_paths = dlg.get_paths()

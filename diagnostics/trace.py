@@ -200,6 +200,11 @@ class TraceStore:
             tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
             os.replace(tmp, target)
             self.prune()
+        try:
+            from . import actionlog
+            actionlog.trace_written(trace)
+        except Exception:
+            pass
         return target
 
     def list_traces(self) -> list[Path]:

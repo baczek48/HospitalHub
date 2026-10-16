@@ -44,6 +44,8 @@ REPORT_TXT = "report.txt"
 TRACE_JSONL = "trace.jsonl"
 MANIFEST_JSON = "manifest.json"
 REDACTION_TXT = "REDACTION.txt"
+#: The readable VPN log (diagnostics/actionlog.py), when it was switched on.
+ACTION_LOG_TXT = "vpn_log.txt"
 
 
 @dataclass
@@ -195,6 +197,11 @@ def build(sections: list[str] | None = None, extra: dict | None = None,
         TRACE_JSONL: trace_text,
         REDACTION_TXT: _render_redaction(report_obj),
     }
+    if include_traces:
+        from . import actionlog
+        log_text = actionlog.read_text()
+        if log_text:
+            files[ACTION_LOG_TXT] = log_text
     return ExportBundle(report_id=report_id, files=files, report=report,
                         redaction=report_obj)
 

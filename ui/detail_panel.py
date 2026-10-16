@@ -473,6 +473,9 @@ class _VpnUnlockDialog(FormStyled, QDialog):
         return self._pass_edit.text()
 
 
+_LOGIN_BTN_W = 90   # width of the login button in the Akcje column
+
+
 class DetailPanel(QWidget):
     data_changed = pyqtSignal()
 
@@ -1074,7 +1077,9 @@ class DetailPanel(QWidget):
         btn_login = QPushButton("🔑 " + login_text if first_cred else login_text)
         btn_login.setEnabled(first_cred is not None)
         btn_login.setFixedHeight(28)
-        btn_login.setMaximumWidth(90)
+        # Fixed, not maximum: a short login (or "—") made the button narrower
+        # and pushed the action buttons out of line row by row.
+        btn_login.setFixedWidth(_LOGIN_BTN_W)
         btn_login.setToolTip(
             f"Kliknij: kopiuj hasło ({first_cred.login})\n"
             "Prawy klik: login, inne konta, połącz jako…" if first_cred
@@ -1200,7 +1205,9 @@ class DetailPanel(QWidget):
         btn_login = QPushButton("🔑 " + db_login_text if first_db_cred else db_login_text)
         btn_login.setEnabled(first_db_cred is not None)
         btn_login.setFixedHeight(28)
-        btn_login.setMaximumWidth(90)
+        # Fixed, not maximum: a short login (or "—") made the button narrower
+        # and pushed the action buttons out of line row by row.
+        btn_login.setFixedWidth(_LOGIN_BTN_W)
         btn_login.setToolTip(
             f"Kliknij: kopiuj hasło ({first_db_cred.login})\n"
             "Prawy klik: login i inne konta" if first_db_cred
@@ -1304,6 +1311,12 @@ class DetailPanel(QWidget):
             ssh_dlg.show()
 
     def _open_ssh(self, machine: models.Machine):
+        # Another machine of the same hospital joins the SSH window already
+        # open for it as a new tab, not a window of its own.
+        open_dlg = SshDialog.window_for(self.window(), self.current_hospital)
+        if open_dlg is not None:
+            open_dlg.open_machine(machine)
+            return
         dlg = SshDialog(machine, hospital=self.current_hospital,
                         all_hospitals=self._all_hospitals,
                         admin_unlocked=self._admin_unlocked, parent=self)

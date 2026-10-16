@@ -3,6 +3,7 @@
 import base64
 import codecs
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -7684,6 +7685,8 @@ def _make_ssh_window_icon() -> QIcon:
 class SshDialog(QDialog):
     # Class-level list to prevent garbage collection of detached windows
     _alive: list['SshDialog'] = []
+    # Activation order: the window last used gets the next machine.
+    _activations = itertools.count(1)
 
     def __init__(self, machine, hospital=None, all_hospitals=None,
                  admin_unlocked=False, parent=None):
@@ -7702,6 +7705,7 @@ class SshDialog(QDialog):
             | Qt.WindowType.WindowCloseButtonHint
         )
         SshDialog._alive.append(self)
+        self._activated_seq = next(SshDialog._activations)
         # The vault window it was opened from (UX audit S-03): its admin lock
         # and its closing reach this window too.
         try:
@@ -8075,6 +8079,8 @@ class SshDialog(QDialog):
             self._saved_geometry = self.saveGeometry()
 
     def changeEvent(self, event):
+        if event.type() == event.Type.ActivationChange and self.isActiveWindow():
+            self._activated_seq = next(SshDialog._activations)
         if event.type() == event.Type.WindowStateChange:
             old_state = event.oldState()
             new_state = self.windowState()
@@ -9042,6 +9048,28 @@ class SshDialog(QDialog):
     @classmethod
     def windows_of(cls, owner) -> list:
         return [d for d in list(cls._alive) if d.owner_window() is owner]
+
+    @classmethod
+    def window_for(cls, owner, hospital) -> 'SshDialog | None':
+        """The open SSH window of this vault window and hospital — the one
+        used last when there are several.  Connecting another machine of
+        the same hospital adds a tab there instead of a new window."""
+        wins = [d for d in cls.windows_of(owner)
+                if d._hospital is hospital and d.isVisible()]
+        return max(wins, key=lambda d: d._activated_seq, default=None)
+
+    def open_machine(self, machine) -> None:
+        """Connect `machine` in a new tab of this window and bring it up
+        (restored if minimized).  The first visible account is used, as for
+        a new window."""
+        self._open_extra_machine(machine)
+        if self.isMinimized():
+            if self._was_maximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def set_admin_mode(self, unlocked: bool) -> None:
         """Follow the vault's admin lock (UX audit S-03): admin-only machines

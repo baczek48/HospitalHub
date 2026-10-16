@@ -150,6 +150,18 @@ def save_vpn_autofill_enabled(enabled: bool) -> None:
     _save_all(data)
 
 
+def load_vpn_log_enabled() -> bool:
+    """Whether VPN actions and errors are written to a readable log on this
+    computer (diagnostics/actionlog.py).  Off unless switched on."""
+    return bool(_load_all().get("vpn_log_enabled", False))
+
+
+def save_vpn_log_enabled(enabled: bool) -> None:
+    data = _load_all()
+    data["vpn_log_enabled"] = bool(enabled)
+    _save_all(data)
+
+
 def load_ssh_start_maximized() -> bool:
     """Returns whether the SSH terminal window should open maximized."""
     data = _load_all()

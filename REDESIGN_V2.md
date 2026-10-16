@@ -62,7 +62,10 @@ kliknięcie” (A3 redesign #1), jawne powiązanie szpital ↔ profil VPN (#6), 
 
 ## 5. Decyzje dla właściciela (nie wdrażane bez zgody)
 
-1. **Jedno okno SSH na szpital** zamiast nowego okna na każde kliknięcie ⇆ (karty już są).
+1. ~~**Jedno okno SSH na szpital**~~ — **WDROŻONE 2026-10-16 na prośbę właściciela:** ⇆ / „Połącz
+   jako” przy maszynie szpitala, dla którego okno SSH jest już otwarte, dodaje kartę w tym oknie
+   (ostatnio używanym, przywraca je z minimalizacji); inny szpital = osobne okno; „Szybkie SSH”
+   bez zmian (`SshDialog.window_for`, `open_machine`; `tests/test_ssh_one_window.py`).
 2. **Pole „profil VPN” w szpitalu** zamiast dopasowania po nazwie (zmiana modelu danych vaulta).
 3. **Jeden model edycji** — VPN z Zapisz/Anuluj jak reszta, albo reszta „na żywo”.
 4. **Multi-exec: aktywna sesja = ta z fokusem** (SFTP i Środowisko śledzą fokus).
