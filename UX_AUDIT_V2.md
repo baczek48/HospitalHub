@@ -34,43 +34,43 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 
 | ID | P | Znalezisko | Status | Commit / uwagi |
 |---|---|---|---|---|
-| T-01 | P1 | CSI S/T (SU/SD) ignorowane — tmux nakłada linie | POTWIERDZONE | |
-| T-02 | P1 | Ctrl+C wyrzuca odebrane dane — tmux/vim z nieodświeżonym ekranem | POTWIERDZONE | |
-| T-03 | P1 | kolorowanie logów wstrzykuje SGR w tmux/vim/less | POTWIERDZONE | |
-| T-04 | P1 | brak alt-screen: po less/vim/htop zostaje ich klatka, śmieci w scrollbacku | POTWIERDZONE | |
-| T-05 | P2 | alt-screen przecieka do scrollbacka | POTWIERDZONE | |
-| T-06 | P1 | UTF-8 rozcięte na granicy pakietu → `�` | POTWIERDZONE | |
-| T-07 | P2 | brak BCE przy ED — dziurawe tła mc/vim/htop | POTWIERDZONE | |
-| T-08 | P2 | ramki ACS jako `lqqk` | POTWIERDZONE | |
-| T-09 | P2 | brak odpowiedzi DA/DSR/CPR | POTWIERDZONE | |
-| T-10 | P3 | REP nieobsługiwane | POTWIERDZONE | |
-| T-11 | P3 | `CSI s/u` ignorowane | POTWIERDZONE | |
-| T-12 | P2 | kursor rysowany mimo `?25l` | POTWIERDZONE | |
-| T-13 | P3 | podkreślenie/kursywa/przekreślenie/ukrycie nierysowane | POTWIERDZONE | |
-| T-14 | P3 | znaki szerokie przesuwają tekst, kopiowanie ze spacjami | POTWIERDZONE | |
-| T-15 | P2 | U+FE0F / ZWJ ucina resztę linii (docker compose `✔️`) | POTWIERDZONE | |
-| T-16 | P1 | klawisze z modyfikatorami (Ctrl/Alt/Shift+strzałki, Shift+Tab, Alt+litera, Insert…) | POTWIERDZONE | Alt/Shift+Tab — RĘCZNY TEST na Windows |
-| T-17 | P3 | Home/End w trybie aplikacyjnym | POTWIERDZONE | |
-| T-18 | P0 | wklejanie: brak bracketed paste, prawy klik wkleja wiele linii bez potwierdzenia | POTWIERDZONE | = E-05 |
-| T-19 | P2 | debounce resize A→B→A zostawia rozmiar B | POTWIERDZONE | |
-| T-20 | P2 | auto-reconnect nie resetuje trybów terminala | POTWIERDZONE | istotne od S-01 (reconnect działa) |
-| T-21 | P3 | kopiowanie zawiniętej linii wstawia `\n` | POTWIERDZONE | |
-| T-22 | P3 | SGR z dwukropkami wypisuje śmieci | POTWIERDZONE | |
-| T-23 | P3 | kursor w „pending wrap” poza ekranem; bez fokusu niewidoczny | POTWIERDZONE | |
-| T-24 | P2 | brak raportowania myszy (tmux `mouse on`) | POTWIERDZONE (z kodu) | |
-| T-25 | P3 | znak szeroki w ostatniej kolumnie | POTWIERDZONE | |
+| T-01 | P1 | CSI S/T (SU/SD) ignorowane — tmux nakłada linie | NAPRAWIONE | `64a327a` — SU/SD w regionie |
+| T-02 | P1 | Ctrl+C wyrzuca odebrane dane — tmux/vim z nieodświeżonym ekranem | NAPRAWIONE | `64a327a` — odrzucanie po Ctrl+C tylko na ekranie powłoki + reset parsera |
+| T-03 | P1 | kolorowanie logów wstrzykuje SGR w tmux/vim/less | NAPRAWIONE | `64a327a` — bez podświetlania w alt-screen i w liniach z adresowaniem kursora |
+| T-04 | P1 | brak alt-screen: po less/vim/htop zostaje ich klatka, śmieci w scrollbacku | NAPRAWIONE | `64a327a` — osobny bufor, powrót ekranu i kursora |
+| T-05 | P2 | alt-screen przecieka do scrollbacka | NAPRAWIONE | `64a327a` — historia tylko z góry ekranu głównego |
+| T-06 | P1 | UTF-8 rozcięte na granicy pakietu → `�` | NAPRAWIONE | `64a327a` — dekoder przyrostowy |
+| T-07 | P2 | brak BCE przy ED — dziurawe tła mc/vim/htop | NAPRAWIONE | `64a327a` |
+| T-08 | P2 | ramki ACS jako `lqqk` | NAPRAWIONE | `64a327a` |
+| T-09 | P2 | brak odpowiedzi DA/DSR/CPR | NAPRAWIONE | `64a327a` — osobny sygnał term_reply (nie przez multi-exec) |
+| T-10 | P3 | REP nieobsługiwane | NAPRAWIONE | `64a327a` |
+| T-11 | P3 | `CSI s/u` ignorowane | NAPRAWIONE | `64a327a` |
+| T-12 | P2 | kursor rysowany mimo `?25l` | NAPRAWIONE | `64a327a` |
+| T-13 | P3 | podkreślenie/kursywa/przekreślenie/ukrycie nierysowane | NAPRAWIONE | `64a327a` — SGR 8 (ukrycie): pyte go nie przechowuje, NIEROZWIĄZANE |
+| T-14 | P3 | znaki szerokie przesuwają tekst, kopiowanie ze spacjami | NAPRAWIONE | `64a327a` — rysowanie i kopiowanie |
+| T-15 | P2 | U+FE0F / ZWJ ucina resztę linii (docker compose `✔️`) | NAPRAWIONE | `64a327a` |
+| T-16 | P1 | klawisze z modyfikatorami (Ctrl/Alt/Shift+strzałki, Shift+Tab, Alt+litera, Insert…) | NAPRAWIONE | `64a327a` — AltGr = tekst; Alt i Shift+Tab na prawdziwym Windows: RĘCZNY TEST |
+| T-17 | P3 | Home/End w trybie aplikacyjnym | NAPRAWIONE | `64a327a` |
+| T-18 | P0 | wklejanie: brak bracketed paste, prawy klik wkleja wiele linii bez potwierdzenia | NAPRAWIONE | `64a327a` — CR, bracketed paste, pytanie przy wielu liniach / multi-exec (domyślnie Anuluj) |
+| T-19 | P2 | debounce resize A→B→A zostawia rozmiar B | NAPRAWIONE | `64a327a` |
+| T-20 | P2 | auto-reconnect nie resetuje trybów terminala | NAPRAWIONE | `64a327a` — miękki reset przy zerwaniu |
+| T-21 | P3 | kopiowanie zawiniętej linii wstawia `\n` | NIEROZWIĄZANE | historia nie przechowuje znaczników zawinięcia; niski wpływ |
+| T-22 | P3 | SGR z dwukropkami wypisuje śmieci | NAPRAWIONE | `64a327a` (+ vim CSI >4;2m nie jest już podkreśleniem) |
+| T-23 | P3 | kursor w „pending wrap” poza ekranem; bez fokusu niewidoczny | NAPRAWIONE | `64a327a` |
+| T-24 | P2 | brak raportowania myszy (tmux `mouse on`) | NAPRAWIONE | `64a327a` — ?1000/1002/1003 + SGR 1006, Shift = lokalnie |
+| T-25 | P3 | znak szeroki w ostatniej kolumnie | NIEROZWIĄZANE | zachowanie pyte; niski wpływ |
 | T-26 | — | zbiorczo: `xterm-256color` obiecuje więcej niż emulator | — | domykane przez T-01…T-24 |
 
 ## Wizualne (A2)
 
 | ID | P | Znalezisko | Status | Commit / uwagi |
 |---|---|---|---|---|
-| V-01 | P1 | terminal gubi ~6 prawych kolumn przy domyślnym oknie (cols ≥ 80 wymuszone) | POTWIERDZONE | |
+| V-01 | P1 | terminal gubi ~6 prawych kolumn przy domyślnym oknie (cols ≥ 80 wymuszone) | NAPRAWIONE | `64a327a` — rozmiar PTY = widoczny, min. widgetu 40×10 |
 | V-02 | P1 | okno VPN: długie nazwy wypychają Połącz/Login/Hasło poza okno | POTWIERDZONE | |
 | V-03 | P2 | nagłówek szpitala ucięty w pół litery; licznik „ukrytych” znika | POTWIERDZONE | |
 | V-04 | P2 | lista szpitali: brak elipsy, poziomy pasek, brak tooltipa | POTWIERDZONE | |
 | V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | POTWIERDZONE | |
-| V-07 | P2 | odmiana liczebników („1 ukrytych”, „22 maszyn”, „Pobrano 2 plików”, „tunel(i)”) | POTWIERDZONE | |
+| V-07 | P2 | odmiana liczebników („1 ukrytych”, „22 maszyn”, „Pobrano 2 plików”, „tunel(i)”) | NAPRAWIONE | `44814c5` — wspólne plural() |
 | V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | POTWIERDZONE | |
 | V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | POTWIERDZONE | = E-16 |
 | V-10 | P2 | jasny motyw: wyłączony „Wgraj” = czarny prostokąt | POTWIERDZONE | |
@@ -96,11 +96,11 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 |---|---|---|---|---|
 | E-01 | P1 | Esc poza terminalem zamyka okno SSH ze wszystkimi sesjami | NAPRAWIONE | `a62d6da` |
 | E-02 | P1 | zamknięcie okna z wieloma sesjami bez pytania | NAPRAWIONE | `a62d6da` — pytanie przy ≥ 2 żywych sesjach lub transferze |
-| E-03 | P2 | „Ctrl+F” z podpowiedzi wysyła `^F` na serwer | POTWIERDZONE | |
+| E-03 | P2 | „Ctrl+F” z podpowiedzi wysyła `^F` na serwer | NAPRAWIONE | `64a327a` — Ctrl+Shift+F |
 | E-04 | P1 | panel Środowisko: pojedynczy klik łączy, każdy kolejny = nowa sesja/RDP | POTWIERDZONE | |
-| E-05 | P0 | prawy klik wkleja wieloliniowy schowek (także do wszystkich sesji multi-exec) | POTWIERDZONE | = T-18 |
+| E-05 | P0 | prawy klik wkleja wieloliniowy schowek (także do wszystkich sesji multi-exec) | NAPRAWIONE | = T-18 |
 | E-06 | P1 | duplikat nazwy szpitala; po dodaniu zaznaczony STARY | POTWIERDZONE | = S-10 |
-| E-07 | P0 | potwierdzenia usunięcia z domyślnym „Tak/Yes” — Enter kasuje szpital | POTWIERDZONE | |
+| E-07 | P0 | potwierdzenia usunięcia z domyślnym „Tak/Yes” — Enter kasuje szpital | NAPRAWIONE | `44814c5` — domyślnie Nie/Anuluj (Enter i Esc), liczby w pytaniu o szpital |
 | E-08 | P1 | przycisk z loginem kopiuje hasło; loginu nie da się skopiować | POTWIERDZONE | |
 | E-09 | P2 | tylko pierwsze poświadczenie dostępne z widoku | REDESIGN | |
 | E-10 | P2 | wyszukiwarka tylko po nazwie szpitala; Enter/↓ nic; filtr gubi zaznaczenie | POTWIERDZONE | |
