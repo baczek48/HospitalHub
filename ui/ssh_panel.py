@@ -3498,7 +3498,7 @@ _LIGHT_ICON_FILLS = {
 
 def _ic(hex_color: str) -> QColor:
     """An icon colour for the active theme."""
-    if theme.active() == theme.LIGHT:
+    if theme.is_light():
         return QColor(_LIGHT_ICON_FILLS.get(hex_color.lower(), hex_color))
     return QColor(hex_color)
 
@@ -4709,7 +4709,7 @@ class SftpPanel(QWidget):
                 if is_dir:
                     # Folders blue for clear distinction; strong blue on the
                     # light theme's white list, original bright on dark.
-                    dir_c = "#0a52c0" if theme.active() == theme.LIGHT else "#e6edf3"
+                    dir_c = "#0a52c0" if theme.is_light() else "#e6edf3"
                     ni.setForeground(QColor(dir_c))
                 table.setItem(i, 0, ni)
 
@@ -7154,7 +7154,7 @@ class _EnvironmentPanel(QWidget):
         # remap (that only touches setStyleSheet), so pick them per-theme: a
         # strong dark blue on the light card (the periwinkle was too pale),
         # the original light periwinkle on dark.
-        if theme.active() == theme.LIGHT:
+        if theme.is_light():
             ip_c, name_c = "#0a4db0", "#525861"
         else:
             ip_c, name_c = "#b0c0ff", "#8a90a4"

@@ -24,6 +24,7 @@ from ui.dialogs import (
     AdminSetupDialog, AdminUnlockDialog,
 )
 from ui.utils import EmptyHint, confirm
+from ui import theme
 
 class _HospitalList(EmptyHint, QListWidget):
     """The hospital list, with a line for "nothing here" (V-15)."""
@@ -276,10 +277,17 @@ class MainWindow(QMainWindow):
         act_exit.triggered.connect(self._force_close)
 
         view_menu = menu.addMenu("Widok")
-        act_light = view_menu.addAction("Jasny motyw")
-        act_light.setCheckable(True)
-        act_light.setChecked(load_theme() == "light")
-        act_light.toggled.connect(self._toggle_theme)
+        theme_menu = view_menu.addMenu("Motyw")
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        chosen = load_theme()
+        for tid, (label, _pal, _light) in theme.THEMES.items():
+            act = theme_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(tid == chosen)
+            act.setData(tid)
+            theme_group.addAction(act)
+        theme_group.triggered.connect(lambda a: self._choose_theme(a.data()))
 
         if self._vault_type == "vpn" and self._vpn_panel:
             sort_menu = menu.addMenu("Sortuj")
@@ -630,8 +638,10 @@ class MainWindow(QMainWindow):
         else:
             self._unlock_admin()
 
-    def _toggle_theme(self, light: bool):
-        save_theme("light" if light else "dark")
+    def _choose_theme(self, tid: str):
+        if tid == load_theme():
+            return
+        save_theme(tid)
         QMessageBox.information(
             self, "Motyw",
             "Motyw zostanie zastosowany po ponownym uruchomieniu aplikacji.\n"

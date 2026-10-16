@@ -655,7 +655,7 @@ def main():
         sys.exit(0)
 
     app.setApplicationDisplayName("")
-    # Theme: dark (default) keeps apply_dark_theme; light installs the warm-ivory
+    # Theme: dark (default) keeps apply_dark_theme; the others install their
     # palette + the stylesheet remap (must run before any window is built).
     try:
         from config import load_theme
@@ -663,8 +663,8 @@ def main():
         _chosen = load_theme()
     except Exception:
         _chosen = "dark"
-    if _chosen == "light":
-        _theme.install(app, "light")
+    if _chosen != "dark":
+        _theme.install(app, _chosen)
     else:
         apply_dark_theme(app)
     app.setWindowIcon(make_icon())

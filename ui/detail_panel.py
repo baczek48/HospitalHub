@@ -181,7 +181,7 @@ def _pulse_copy_button(btn: QPushButton) -> None:
     if prev is not None:
         prev.stop()
 
-    light = theme.active() == theme.LIGHT
+    light = theme.is_light()
     flash_bg, flash_bd = _PULSE_LIGHT if light else _PULSE_DARK
     rest_bg = QColor(theme.paint("#1e2733"))
     rest_bd = QColor(theme.paint("#30363d"))
@@ -841,7 +841,7 @@ class DetailPanel(QWidget):
         if not item:
             return
 
-        if theme.active() == theme.LIGHT:
+        if theme.is_light():
             # Warm-ivory press feedback: a gentle DARKER tint on press that
             # settles back to the row's real background (remap turns the dark
             # source hexes lighter, so we can't reuse them for a press recess).
@@ -978,7 +978,7 @@ class DetailPanel(QWidget):
             ip_item = QTableWidgetItem(machine.ip)
             # Darker, stronger blue on the white light-theme card (the steel blue
             # was too faint); keep the brighter blue on the dark theme.
-            ip_color = QColor("#0a4db0") if theme.active() == theme.LIGHT else QColor(0, 120, 215)
+            ip_color = QColor("#0a4db0") if theme.is_light() else QColor(0, 120, 215)
             ip_item.setForeground(QBrush(ip_color))
             self._machines_table.setItem(i, 0, ip_item)
 

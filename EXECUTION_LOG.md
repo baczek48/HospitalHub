@@ -591,3 +591,19 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   na prawie białym przycisku jasnego motywu niewidoczny. Teraz animacja tła i obramowania z
   kolorami per motyw (zrzuty obu motywów).
 - **1905 PASS / 0 FAIL**; mutacja sortowania → FAIL. Build + instalator 20:09.
+
+### 2026-10-16 (późny wieczór) — dodatkowe motywy do wyboru
+
+- Prośba właściciela: „jakąś łatkę graficzną przyjemną dodatkową do całego hospital w ramach
+  wyboru”. Menu **Widok → Motyw**: Ciemny (domyślny), **Nocny granat** (granatowe tła,
+  błękitny akcent), Jasny, **Miętowy** (jasny, morska zieleń, akcent teal). Zmiana po restarcie.
+- `ui/theme.py`: mapa kolorów zamieniona na tabelę ról (`_ROLES`: ciemny hex → rola) + palety
+  per motyw; mapa jasnego motywu sprawdzona jako identyczna jak przed zmianą (124 wpisy).
+  `theme.is_light()` zamiast `== LIGHT` w miejscach dobierających kolor tekstu/ikon
+  (Miętowy też jest jasny). Terminal SSH bez zmian (ciemny w każdym motywie).
+- `config.load/save_theme` przyjmują dark/light/navy/mint (nieznane → dark).
+- Zrzuty: okno główne, VPN, SSH/SFTP w obu nowych motywach.
+- Pytanie właściciela o dwa pliki SFTP o tej samej nazwie: osobna kopia lokalna per okno, per
+  połączenie i per ścieżka zdalna — potwierdzone testami `test_sftp_edit_collisions.py`
+  (133 PASS z `test_ssh_sftp_safety.py`).
+- **1916 PASS / 0 FAIL**. Build + instalator 22:26.

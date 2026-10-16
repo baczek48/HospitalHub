@@ -190,15 +190,18 @@ def save_hospital_sort_order(order: str) -> None:
     _save_all(data)
 
 
+_THEMES = ("dark", "light", "navy", "mint")
+
+
 def load_theme() -> str:
-    """Returns the UI theme: 'dark' (default) or 'light'."""
+    """Returns the UI theme: 'dark' (default), 'light', 'navy' or 'mint'."""
     theme = _load_all().get("theme", "dark")
-    return "light" if theme == "light" else "dark"
+    return theme if theme in _THEMES else "dark"
 
 
 def save_theme(theme: str) -> None:
     data = _load_all()
-    data["theme"] = "light" if theme == "light" else "dark"
+    data["theme"] = theme if theme in _THEMES else "dark"
     _save_all(data)
 
 
