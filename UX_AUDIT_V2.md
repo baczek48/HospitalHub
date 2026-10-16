@@ -69,7 +69,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-02 | P1 | okno VPN: długie nazwy wypychają Połącz/Login/Hasło poza okno | NAPRAWIONE | pakiet okna głównego — ElidedLabel, bez poziomego paska |
 | V-03 | P2 | nagłówek szpitala ucięty w pół litery; licznik „ukrytych” znika | NAPRAWIONE | pakiet okna głównego — elipsa + tooltip; plakietka chowa się na wąskim panelu |
 | V-04 | P2 | lista szpitali: brak elipsy, poziomy pasek, brak tooltipa | NAPRAWIONE | pakiet okna głównego |
-| V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | REDESIGN | 71C — tabela maszyn |
+| V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | NAPRAWIONE | R2 — zwarte akcje (322→204 px), dopasowanie kolumn, chowanie mniej ważnych kolumn; zrzuty 1.0/1.5/2.0 |
 | V-07 | P2 | odmiana liczebników („1 ukrytych”, „22 maszyn”, „Pobrano 2 plików”, „tunel(i)”) | NAPRAWIONE | `44814c5` — wspólne plural() |
 | V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | NAPRAWIONE | pakiet dialogów — test pilnuje braku ASCII-polszczyzny w ui/ |
 | V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | NAPRAWIONE | = E-16 |
@@ -88,7 +88,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-22 | P3 | Ustawienia VPN: lista ścieżek zapada się | RĘCZNY TEST | |
 | V-23 | P2 | domyślne rozmiary okien nie mieszczą się na 1366×768 @150% | RĘCZNY TEST | |
 | V-24 | P3 | drobne teksty („tutaj aby”, „<-  Wróć”) | NAPRAWIONE | pakiet okna SSH |
-| V-25 | P3 | nagłówki tabeli maszyn | REDESIGN | 71C — tabela maszyn |
+| V-25 | P3 | nagłówki tabeli maszyn | NAPRAWIONE | R2 — 🔑 mówi, co kopiuje przycisk |
 
 ## Ergonomia (A3)
 
@@ -101,8 +101,8 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-05 | P0 | prawy klik wkleja wieloliniowy schowek (także do wszystkich sesji multi-exec) | NAPRAWIONE | = T-18 |
 | E-06 | P1 | duplikat nazwy szpitala; po dodaniu zaznaczony STARY | NAPRAWIONE | pakiet okna głównego — ostrzeżenie (domyślnie Anuluj), zaznaczenie po obiekcie |
 | E-07 | P0 | potwierdzenia usunięcia z domyślnym „Tak/Yes” — Enter kasuje szpital | NAPRAWIONE | `44814c5` — domyślnie Nie/Anuluj (Enter i Esc), liczby w pytaniu o szpital |
-| E-08 | P1 | przycisk z loginem kopiuje hasło; loginu nie da się skopiować | REDESIGN | 71C — tabela maszyn (kopiuj login/hasło) |
-| E-09 | P2 | tylko pierwsze poświadczenie dostępne z widoku | REDESIGN | |
+| E-08 | P1 | przycisk z loginem kopiuje hasło; loginu nie da się skopiować | NAPRAWIONE | R2 — 🔑 na przycisku (klik = hasło jak dotąd), prawy klik/menu wiersza: login i hasło każdego konta |
+| E-09 | P2 | tylko pierwsze poświadczenie dostępne z widoku | NAPRAWIONE | R2 — „Połącz jako” w menu wiersza (SSH i RDP) |
 | E-10 | P2 | wyszukiwarka tylko po nazwie szpitala; Enter/↓ nic; filtr gubi zaznaczenie | NAPRAWIONE | pakiet okna głównego — po IP/nazwie/opisie maszyny i bazie, Enter/↓, powrót zaznaczenia |
 | E-11 | P2 | brak Delete/F2/Enter/F5 na listach i w SFTP | NAPRAWIONE | pakiet okna SSH — SFTP: Enter, Backspace, F2, Delete, F5 (lista szpitali: bez zmian, zob. redesign) |
 | E-12 | P2 | Tab utyka w tabelach | NAPRAWIONE | pakiet okna głównego |

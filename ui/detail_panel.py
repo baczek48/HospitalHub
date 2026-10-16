@@ -113,6 +113,10 @@ class _DraggableTable(QTableWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        _fit_table_columns(self)
+
     def dropEvent(self, event):
         from_row = self.currentRow()
         idx = self.indexAt(event.position().toPoint())
@@ -149,12 +153,12 @@ _vpn_session_loaded: bool = False
 _MACHINES_STRETCH_COL = 2   # Opis
 _MACHINES_AKCJE_COL = 3
 _MACHINES_DEFAULTS = [120, 140, 180]   # widths for cols 0,1 (col 2 stretches)
-_MACHINES_AKCJE_WIDTH = 322
+_MACHINES_AKCJE_WIDTH = 204    # the buttons, packed (R2: was 322, spread)
 
 _DB_STRETCH_COL = 4         # Notatka (ostatnia kolumna danych, jak Opis w maszynach)
 _DB_AKCJE_COL = 5
 _DB_DEFAULTS = [180, 60, 130, 80]      # widths for cols 0,1,2,3
-_DB_AKCJE_WIDTH = 252
+_DB_AKCJE_WIDTH = 166
 
 
 def _pulse_copy_button(btn: QPushButton) -> None:
@@ -238,6 +242,45 @@ class _TruncationTooltipFilter(QObject):
         return False
 
 
+def _fit_table_columns(table) -> None:
+    """Keep the actions column on screen (UX audit V-05).
+
+    The data columns keep their own (or the user's) widths while they fit;
+    when the table is narrower — a 1366×768 laptop at 125–150 % — they give
+    way proportionally, down to 60 px each, instead of pushing Connect past
+    the right edge behind a horizontal scroll bar."""
+    spec = getattr(table, '_fit_spec', None)
+    if not spec:
+        return
+    cols, base, akcje_col, stretch_col, hide_order = spec
+    avail = table.viewport().width() - table.columnWidth(akcje_col)
+    # Least important columns go first when even 60 px each will not fit
+    # (their full text stays in the edit dialog and the row's tooltip).
+    def plan(hidden):
+        shown = [c for c in cols if c not in hidden]
+        want = [base[cols.index(c)] for c in shown]
+        room = avail - (0 if stretch_col in hidden else 90)
+        if sum(want) > room:
+            factor = max(room, 0) / max(1, sum(want))
+            want = [max(60, int(w * factor)) for w in want]
+        return shown, want, sum(want) <= room
+
+    for k in range(len(hide_order) + 1):
+        hidden = set(hide_order[:k])
+        shown, want, fits = plan(hidden)
+        if fits:
+            break
+    table._fitting = True
+    try:
+        for col in hide_order:
+            table.setColumnHidden(col, col in hidden)
+        for col, w in zip(shown, want):
+            if table.columnWidth(col) != w:
+                table.setColumnWidth(col, w)
+    finally:
+        table._fitting = False
+
+
 def _setup_table_columns(
     table: QTableWidget,
     key: str,
@@ -245,6 +288,7 @@ def _setup_table_columns(
     stretch_col: int,
     akcje_col: int,
     akcje_width: int = 220,
+    hide_order: tuple = (),
 ):
     """Configure column resize modes and restore saved widths."""
     hh = table.horizontalHeader()
@@ -258,10 +302,21 @@ def _setup_table_columns(
     ]
     widths = saved if (saved and len(saved) == len(interactive_cols)) else defaults
 
-    hh.setMinimumSectionSize(80)
+    hh.setMinimumSectionSize(60)
     for idx, col in enumerate(interactive_cols):
         hh.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         table.setColumnWidth(col, widths[idx])
+
+    # What the columns should be when there is room; a drag by the user
+    # becomes the new wish, a fit-to-width squeeze does not (V-05).
+    base = list(widths)
+    table._fit_spec = (interactive_cols, base, akcje_col, stretch_col, tuple(hide_order))
+    table._fitting = False
+
+    def _remember(col, _old, new):
+        if not table._fitting and col in interactive_cols:
+            base[interactive_cols.index(col)] = new
+    hh.sectionResized.connect(_remember)
 
     hh.setSectionResizeMode(stretch_col, QHeaderView.ResizeMode.Stretch)
     hh.setSectionResizeMode(akcje_col, QHeaderView.ResizeMode.Fixed)
@@ -567,10 +622,14 @@ class DetailPanel(QWidget):
         self._machines_table.customContextMenuRequested.connect(self._on_machine_context_menu)
         self._machines_table.cellClicked.connect(self._on_machine_cell_clicked)
         self._machines_table.rows_reordered.connect(self._on_machines_reordered)
+        self._machines_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._machines_table.customContextMenuRequested.connect(
+            lambda pos: self._on_table_menu(self._machines_table, 'machine', pos))
         _setup_table_columns(
             self._machines_table, "machines", _MACHINES_DEFAULTS,
             stretch_col=_MACHINES_STRETCH_COL, akcje_col=_MACHINES_AKCJE_COL,
             akcje_width=_MACHINES_AKCJE_WIDTH,
+            hide_order=(2,),               # Opis
         )
         machines_layout.addWidget(self._machines_table)
 
@@ -636,10 +695,14 @@ class DetailPanel(QWidget):
         self._db_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._db_table.cellClicked.connect(self._on_db_cell_clicked)
         self._db_table.rows_reordered.connect(self._on_db_reordered)
+        self._db_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._db_table.customContextMenuRequested.connect(
+            lambda pos: self._on_table_menu(self._db_table, 'database', pos))
         _setup_table_columns(
             self._db_table, "databases", _DB_DEFAULTS,
             stretch_col=_DB_STRETCH_COL, akcje_col=_DB_AKCJE_COL,
             akcje_width=_DB_AKCJE_WIDTH,
+            hide_order=(4, 3, 1),          # Notatka, Typ, Port
         )
         db_layout.addWidget(self._db_table)
 
@@ -900,6 +963,81 @@ class DetailPanel(QWidget):
             self._machines_table.setRowHeight(i, 36)
         self._update_badge()
 
+    # ── row menu: every account, login and password (UX audit E-08/E-09) ──
+
+    _MENU_QSS = (
+        "QMenu { background:#161b22; border:1px solid #30363d; color:#c9d1d9; }"
+        "QMenu::item { padding:5px 20px 5px 12px; }"
+        "QMenu::item:selected { background:#1f6feb; color:#fff; }"
+        "QMenu::item:disabled { color:#6e7681; }"
+        "QMenu::separator { height:1px; background:#30363d; margin:3px 0; }"
+    )
+
+    def _attach_row_menu(self, widget, item, kind: str) -> None:
+        widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda pos, w=widget, it=item, k=kind:
+                self._row_menu(it, k).exec(w.mapToGlobal(pos)))
+
+    def _row_menu(self, item, kind: str) -> QMenu:
+        """The same actions as the row's buttons, plus what had no button:
+        the login, the other accounts, connecting as one of them."""
+        menu = QMenu(self)
+        menu.setStyleSheet(self._MENU_QSS)
+        creds = self._visible_credentials(item.credentials)
+        if kind == 'machine':
+            ctype = getattr(item, 'connection_type', 'SSH')
+            if ctype == 'WWW':
+                menu.addAction("🌐  Otwórz w przeglądarce", lambda m=item: self._open_www(m))
+            elif ctype == 'RDP':
+                menu.addAction("Połącz (RDP)",
+                               lambda m=item: connect_rdp(m, self, self._admin_unlocked))
+            else:
+                menu.addAction("⇆  Połącz (SSH + SFTP)", lambda m=item: self._open_ssh(m))
+            if len(creds) > 1 and ctype in ('SSH', 'RDP'):
+                sub = menu.addMenu("Połącz jako")
+                sub.setStyleSheet(self._MENU_QSS)
+                for c in creds:
+                    sub.addAction(c.login or "(bez loginu)",
+                                  lambda m=item, c=c: self._connect_as(m, c))
+            menu.addSeparator()
+        if not creds:
+            act = menu.addAction("Brak poświadczeń")
+            act.setEnabled(False)
+        for c in creds:
+            label = c.login or "(bez loginu)"
+            if c.admin_only:
+                label += "  (admin)"
+            menu.addAction(f"👤  Kopiuj login: {label}",
+                           lambda c=c: _clipboard_copy(c.login))
+            menu.addAction(f"🔑  Kopiuj hasło: {label}",
+                           lambda c=c: _clipboard_copy(c.password))
+        menu.addSeparator()
+        if kind == 'machine':
+            menu.addAction("⚙  Edytuj maszynę…", lambda m=item: self._edit_machine(m))
+            menu.addAction("Usuń maszynę…", lambda m=item: self._delete_machine(m))
+        else:
+            menu.addAction("⚙  Edytuj bazę…", lambda d=item: self._edit_database(d))
+            menu.addAction("Usuń bazę…", lambda d=item: self._delete_database(d))
+        return menu
+
+    def _connect_as(self, machine, cred) -> None:
+        """Connect with `cred` instead of the first account (E-09)."""
+        import copy
+        m = copy.copy(machine)
+        m.credentials = [cred] + [c for c in machine.credentials if c is not cred]
+        if getattr(machine, 'connection_type', 'SSH') == 'RDP':
+            connect_rdp(m, self, self._admin_unlocked)
+        else:
+            self._open_ssh(m)
+
+    def _on_table_menu(self, table, kind: str, pos) -> None:
+        row = table.indexAt(pos).row()
+        items = (self._visible_machines() if kind == 'machine'
+                 else self._visible_databases())
+        if 0 <= row < len(items):
+            self._row_menu(items[row], kind).exec(table.viewport().mapToGlobal(pos))
+
     def _visible_credentials(self, creds: list) -> list:
         if self._admin_unlocked:
             return creds
@@ -923,14 +1061,16 @@ class DetailPanel(QWidget):
             "QPushButton:disabled { color: #444; background: #161b22; border-color: #21262d; }"
         )
 
-        btn_login = QPushButton(login_text)
+        btn_login = QPushButton("🔑 " + login_text if first_cred else login_text)
         btn_login.setEnabled(first_cred is not None)
         btn_login.setFixedHeight(28)
         btn_login.setMaximumWidth(90)
         btn_login.setToolTip(
-            f"Kopiuj hasło: {first_cred.login}" if first_cred
+            f"Kliknij: kopiuj hasło ({first_cred.login})\n"
+            "Prawy klik: login, inne konta, połącz jako…" if first_cred
             else "Brak poświadczeń"
         )
+        self._attach_row_menu(btn_login, machine, 'machine')
         btn_login.setStyleSheet(_cred_btn_style)
         if first_cred:
             btn_login.clicked.connect(
@@ -998,6 +1138,7 @@ class DetailPanel(QWidget):
         )
         btn_del.clicked.connect(lambda _, m=machine: self._delete_machine(m))
         row.addWidget(btn_del)
+        row.addStretch()
 
         return w
 
@@ -1040,14 +1181,16 @@ class DetailPanel(QWidget):
             "QPushButton:disabled { color: #444; background: #161b22; border-color: #21262d; }"
         )
 
-        btn_login = QPushButton(db_login_text)
+        btn_login = QPushButton("🔑 " + db_login_text if first_db_cred else db_login_text)
         btn_login.setEnabled(first_db_cred is not None)
         btn_login.setFixedHeight(28)
         btn_login.setMaximumWidth(90)
         btn_login.setToolTip(
-            f"Kopiuj hasło: {first_db_cred.login}" if first_db_cred
+            f"Kliknij: kopiuj hasło ({first_db_cred.login})\n"
+            "Prawy klik: login i inne konta" if first_db_cred
             else "Brak poświadczeń"
         )
+        self._attach_row_menu(btn_login, db, 'database')
         btn_login.setStyleSheet(_cred_btn_style)
         if first_db_cred:
             btn_login.clicked.connect(
@@ -1078,6 +1221,7 @@ class DetailPanel(QWidget):
         )
         btn_del.clicked.connect(lambda _, d=db: self._delete_database(d))
         row.addWidget(btn_del)
+        row.addStretch()
 
         return w
 
