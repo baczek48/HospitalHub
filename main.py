@@ -29,6 +29,17 @@ _CRASH_LOG_MAX = 512 * 1024
 _ERROR_DIALOG_INTERVAL_S = 10.0
 
 
+def _log_exception(where: str) -> None:
+    """Write the exception being handled to crash.log; never raises."""
+    try:
+        _append_crash_log(
+            _crash_log_path(),
+            f"\n=== {datetime.now().isoformat(timespec='seconds')} ({where}) ===\n"
+            f"{traceback.format_exc()}")
+    except Exception:
+        pass
+
+
 def _append_crash_log(log_path: Path, text: str) -> None:
     """Append to crash.log, trimming it first when it has grown too big."""
     try:
@@ -494,7 +505,10 @@ class AppManager:
         except Exception:
             pass
         self.remove_window(window)
-        window.destroy_cleanup()
+        try:
+            window.destroy_cleanup()
+        except Exception:
+            _log_exception("destroy_cleanup przy zamykaniu okna")
         window.deleteLater()
 
     def _quit_all(self):
@@ -520,7 +534,12 @@ class AppManager:
                     return  # Cancel — abort quit
         self._close_all_ssh_dialogs()
         for w in self._windows:
-            w.destroy_cleanup()
+            # One window's failing cleanup must never keep the application
+            # from quitting (2026-10-17: it did, on every attempt).
+            try:
+                w.destroy_cleanup()
+            except Exception:
+                _log_exception("destroy_cleanup przy zamykaniu")
         for tray in self._trays.values():
             tray.hide()
         self._trays.clear()

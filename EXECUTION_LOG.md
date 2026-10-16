@@ -683,3 +683,15 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
 - **1944 PASS / 0 FAIL** ×3. Jednorazowo w 1. przebiegu: `test_vpn_forticlient_launch`
   (tripwire `time.sleep`) + ERROR w `test_vpn_forticlient_connect_plan` — nie powtórzyło się
   w 3 kolejnych przebiegach; do obserwacji. Build + instalator 23:57.
+
+### 2026-10-17 — aplikacja nie zamykała się (crash.log z innego komputera)
+
+- `RuntimeError: wrapped C/C++ object of type _VpnStatusProbe has been deleted` w
+  `DetailPanel.cleanup` przy „Zamknij całkowicie” — 4 próby, żadna nie zamknęła aplikacji
+  (wyjątek przerywał `_quit_all` przed `app.quit()`). Przyczyna: sonda statusu VPN po
+  zakończeniu robi `deleteLater`, panel trzymał referencję, cleanup czytał jej sygnał.
+  Ujawnione przez 241d706 (okno VPN zasila przycisk → sonda działa co 2 s).
+- Poprawki: cleanup pomija obiekty już usunięte; `_quit_all` i zamykanie pojedynczego okna
+  łapią wyjątek z `destroy_cleanup` (zapis do crash.log) i i tak zamykają.
+  `test_quit_with_deleted_probe.py` (2; na starym kodzie 2 FAIL).
+- **1946 PASS / 0 FAIL**. Build + instalator 00:12.

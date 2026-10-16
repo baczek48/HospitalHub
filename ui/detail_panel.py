@@ -840,15 +840,21 @@ class DetailPanel(QWidget):
         # Both block without an event loop (a 20 s window search, a client's
         # stdout): quit() cannot stop them, and deleting this panel with them
         # still running aborted the process (D-01).  Hand them over instead.
-        probe = getattr(self, '_vpn_status_probe', None)
-        retire_thread(probe, disconnect=(getattr(probe, 'result', None),)
-                      if probe is not None else ())
-        waiter = getattr(self, '_vpn_token_waiter', None)
-        retire_thread(waiter, disconnect=(getattr(waiter, 'found', None),)
-                      if waiter is not None else ())
-        monitor = getattr(self, '_vpn_monitor_worker', None)
-        retire_thread(monitor, disconnect=(getattr(monitor, 'twofa_detected', None),)
-                      if monitor is not None else ())
+        # A finished status probe deletes itself (deleteLater) while this
+        # panel still holds it: reading its signal raised "wrapped C/C++
+        # object … has been deleted" and stopped the application from
+        # closing (2026-10-17).  Each is looked at only if still there.
+        for attr, sig in (('_vpn_status_probe', 'result'),
+                          ('_vpn_token_waiter', 'found'),
+                          ('_vpn_monitor_worker', 'twofa_detected')):
+            thread = getattr(self, attr, None)
+            if thread is None:
+                continue
+            try:
+                signal = getattr(thread, sig, None)
+            except RuntimeError:          # the C++ object is already gone
+                continue
+            retire_thread(thread, disconnect=(signal,) if signal is not None else ())
 
     # ------------------------------------------------------------------ #
 
