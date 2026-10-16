@@ -4367,7 +4367,7 @@ class SftpPanel(QWidget):
         # File table
         self._table = _SftpFileTable(0, 4)
         self._table.sftp_move.connect(self._handle_drag_move)
-        self._table.setHorizontalHeaderLabels(["Nazwa", "Rozmiar", "Zmodyfikowano", "Uprawnienia"])
+        self._table.setHorizontalHeaderLabels(["Nazwa", "Rozmiar", "Zmodyfikowano", "Prawa"])
         hh = self._table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
@@ -4399,6 +4399,7 @@ class SftpPanel(QWidget):
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._context_menu)
         self._table.doubleClicked.connect(self._on_dbl_click)
+        self._table.installEventFilter(self)
         self._table.itemSelectionChanged.connect(self._on_sel_change)
         self._table.setStyleSheet("""
             QTableWidget {
@@ -4450,7 +4451,7 @@ class SftpPanel(QWidget):
         root.addWidget(self._table, 1)
 
         # Drag & drop hint
-        hint = QLabel("Upuść pliki tutaj aby wgrać  ⬆")
+        hint = QLabel("Upuść pliki tutaj, aby wgrać  ⬆")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color:#30363d; font-size:10px; padding:2px;")
         root.addWidget(hint)
@@ -4475,7 +4476,7 @@ class SftpPanel(QWidget):
             "border:1px solid #1a3050;border-radius:6px;padding:4px 10px;"
             "font-size:11px;}"
             "QPushButton:hover{background:#152540;border-color:#2a4a6a;}"
-            "QPushButton:disabled{color:#333;background:#111;}")
+            "QPushButton:disabled{color:#484f58;background:#1c2128;}")
         self._btn_ul.clicked.connect(self._upload_browse)
 
         self._progress = QProgressBar()
@@ -4700,6 +4701,8 @@ class SftpPanel(QWidget):
 
     def eventFilter(self, obj, event):
         # Path edit: Escape cancels, FocusOut returns to label
+        if self._table_keys(obj, event):
+            return True
         if obj is self._path_edit:
             if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
                 self._end_path_edit()
@@ -5117,6 +5120,32 @@ class SftpPanel(QWidget):
         else:
             self._open_remote(self._path.rstrip('/') + '/' + name, name)
 
+    def _table_keys(self, obj, event) -> bool:
+        """Keys in the file table (UX audit E-11): Enter opens, Backspace goes
+        up, F2 renames, Delete deletes, F5 refreshes."""
+        if obj is self._table and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            row = self._table.currentRow()
+            item = self._table.item(row, 0) if row >= 0 else None
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and item is not None:
+                self._on_dbl_click(self._table.model().index(row, 0))
+                return True
+            if key == Qt.Key.Key_Backspace:
+                self._go_up()
+                return True
+            if key == Qt.Key.Key_F5 and self._sftp is not None:
+                self._list(self._path)
+                return True
+            if item is not None and key in (Qt.Key.Key_F2, Qt.Key.Key_Delete):
+                name, is_dir, _ = item.data(Qt.ItemDataRole.UserRole)
+                if name != '..':
+                    if key == Qt.Key.Key_F2:
+                        self._start_inline_rename(item)
+                    else:
+                        self._delete(self._path.rstrip('/') + '/' + name, is_dir, name)
+                    return True
+        return False
+
     def _go_up(self):
         if self._listing_active:
             return
@@ -5184,7 +5213,7 @@ class SftpPanel(QWidget):
         menu.addAction("🔒  Uprawnienia...", lambda: self._chmod_dialog(remote, name))
         menu.addAction("✏️  Zmień nazwę", lambda ri=row_item: self._start_inline_rename(ri))
         menu.addAction("➕  Nowy folder", self._mkdir_dialog)
-        menu.addAction("🗑️  Usuń", lambda: self._delete(remote, is_dir, name))
+        menu.addAction(f"🗑️  Usuń „{name}”", lambda: self._delete(remote, is_dir, name))
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     # ── Transfer ──────────────────────────────────────────────────────────
@@ -7098,6 +7127,8 @@ class _EnvironmentPanel(QWidget):
 
         # Click: normal = connect, Ctrl = toggle selection
         card.mousePressEvent = lambda e, _m=m: self._card_clicked(_m, e)
+        card.mouseDoubleClickEvent = lambda e, _m=m: self._card_double_clicked(_m, e)
+        card.setToolTip("Dwuklik lub Enter — połącz;  Ctrl+klik — zaznacz kilka")
 
         # Right-click context menu with credentials
         card.customContextMenuRequested.connect(
@@ -7110,10 +7141,19 @@ class _EnvironmentPanel(QWidget):
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self._toggle_select(machine.ip)
-            self.setFocus()
         else:
+            # Selects only.  A single click used to log in at once — and
+            # every further click opened another session or mstsc window on
+            # a hospital server (UX audit E-04).
             self._clear_selection()
-            self._dblclick_connect(machine)
+            self._toggle_select(machine.ip)
+        self.setFocus()
+
+    def _card_double_clicked(self, machine, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self._clear_selection()
+        self._dblclick_connect(machine)
 
     def _toggle_select(self, ip: str):
         if ip in self._selected_ips:
@@ -7917,7 +7957,10 @@ class SshDialog(QDialog):
     _SFTP_PANEL_WIDTH = 250
 
     def _on_splitter_moved(self, pos, index):
-        self._left_collapsed = (self._main_splitter.sizes()[0] == 0)
+        width = self._main_splitter.sizes()[0]
+        self._left_collapsed = (width == 0)
+        if width > 0:
+            self._sftp_width = width     # kept across resizes (S-12)
 
     def _toggle_left_panel(self):
         sizes = self._main_splitter.sizes()
@@ -7927,16 +7970,17 @@ class SshDialog(QDialog):
             self._main_splitter.setSizes([0, total])
         else:
             self._left_collapsed = False
-            self._main_splitter.setSizes(
-                [self._SFTP_PANEL_WIDTH, total - self._SFTP_PANEL_WIDTH])
+            w = getattr(self, '_sftp_width', self._SFTP_PANEL_WIDTH)
+            self._main_splitter.setSizes([w, total - w])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if not self._left_collapsed:
             total = sum(self._main_splitter.sizes())
             if total > 0:
-                self._main_splitter.setSizes(
-                    [self._SFTP_PANEL_WIDTH, total - self._SFTP_PANEL_WIDTH])
+                w = min(getattr(self, '_sftp_width', self._SFTP_PANEL_WIDTH),
+                        max(0, total - 300))
+                self._main_splitter.setSizes([w, total - w])
         state = self.windowState()
         # Save normal geometry only when not minimized/maximized
         if not (state & (Qt.WindowState.WindowMinimized
@@ -8186,8 +8230,25 @@ class SshDialog(QDialog):
         session.has_unread = True
         self._tab_widget.setTabIcon(idx, self._unread_icon())
 
+    def _update_window_title(self) -> None:
+        """"SSH · user@host · hospital" — windows told apart on the taskbar
+        and in Alt+Tab (UX audit E-18)."""
+        parts = ["SSH"]
+        s = self._active_session()
+        if s is not None:
+            w = s.worker
+            parts.append(f"{w._user}@{w._host}" if w._user else w._host)
+        hospital = getattr(self._hospital, 'name', '') if self._hospital else ''
+        if hospital:
+            parts.append(hospital)
+        self.setWindowTitle("  ·  ".join(parts) + "  —  HospitalHub")
+
     def _on_tab_changed(self, idx: int):
         """Update environment panel + SFTP panel when active terminal tab changes."""
+        try:
+            self._update_window_title()
+        except (AttributeError, RuntimeError):
+            pass
         # Clear unread highlight on the tab we're entering (regardless of mode).
         if 0 <= idx < len(self._sessions):
             s_new = self._sessions[idx]

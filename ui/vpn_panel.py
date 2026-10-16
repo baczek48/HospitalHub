@@ -673,7 +673,7 @@ class VpnPanel(QWidget):
         edit_top = QHBoxLayout()
         edit_top.setContentsMargins(12, 8, 12, 6)
 
-        btn_back = QPushButton("<-  Wróć")
+        btn_back = QPushButton("←  Wróć")
         btn_back.setStyleSheet(
             "QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;"
             " border-radius: 4px; padding: 4px 10px; font-size: 11px; }"
