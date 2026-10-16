@@ -6154,7 +6154,7 @@ class SftpPanel(QWidget):
             st = self._sftp.stat(remote)
             current_mode = st.st_mode & 0o7777
         except Exception as e:
-            self.status_msg.emit(f"Nie mozna odczytac uprawnien: {e}", True)
+            self.status_msg.emit(f"Nie można odczytać uprawnień: {e}", True)
             return
 
         dlg = QDialog(self)
@@ -7070,7 +7070,7 @@ class _EnvironmentPanel(QWidget):
             btn = QPushButton("RDP")
             btn.setFixedSize(36, 18)
             btn.setToolTip(
-                f"Polacz przez Remote Desktop ({m.ip}:"
+                f"Połącz przez Remote Desktop ({m.ip}:"
                 f"{getattr(m, 'rdp_port', '3389') or '3389'})"
             )
             btn.setStyleSheet(
@@ -7085,7 +7085,7 @@ class _EnvironmentPanel(QWidget):
         else:
             btn = QPushButton("SSH")
             btn.setFixedSize(36, 18)
-            btn.setToolTip(f"Polacz z {m.ip}")
+            btn.setToolTip(f"Połącz z {m.ip}")
             btn.setStyleSheet(
                 "QPushButton { background:#1a2040; color:#6382ff;"
                 " border:1px solid #3a4070; border-radius:6px;"
@@ -7370,7 +7370,8 @@ class _AddSessionDialog(QDialog):
         form.addRow("Host / IP:", self._ip_edit)
 
         self._port_edit = QLineEdit()
-        self._port_edit.setPlaceholderText("22 (domyślnie)")
+        self._port_edit.setPlaceholderText("22")
+        self._port_edit.setToolTip("Puste = 22")
         self._port_edit.setMaximumWidth(80)
         form.addRow("Port:", self._port_edit)
 
@@ -7403,8 +7404,18 @@ class _AddSessionDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _accept(self):
+        from ui.utils import parse_port, split_host_port
+        host, port_in_host = split_host_port(self._ip_edit.text())
+        if port_in_host and not self._port_edit.text().strip():
+            # "10.0.0.1:2222" pasted into the host field (S-11).
+            self._ip_edit.setText(host)
+            self._port_edit.setText(port_in_host)
         if not self._ip_edit.text().strip():
             QMessageBox.warning(self, "Błąd", "Podaj adres IP lub hostname.")
+            return
+        if parse_port(self._port_edit.text(), 22) is None:
+            QMessageBox.warning(self, "Błąd", "Port musi być liczbą od 1 do 65535.")
+            self._port_edit.setFocus()
             return
         if not self._user_edit.text().strip():
             QMessageBox.warning(self, "Błąd", "Podaj login.")
@@ -7412,8 +7423,8 @@ class _AddSessionDialog(QDialog):
         self.accept()
 
     def get_values(self) -> tuple:
-        port_text = self._port_edit.text().strip()
-        port = int(port_text) if port_text.isdigit() else 22
+        from ui.utils import parse_port
+        port = parse_port(self._port_edit.text(), 22) or 22
         return (
             self._ip_edit.text().strip(),
             self._user_edit.text().strip(),

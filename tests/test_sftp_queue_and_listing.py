@@ -52,8 +52,10 @@ def test_s04_a_non_utf8_name_does_not_block_the_listing(sp, world, dlg):
     (root / "zażółć.txt").write_bytes(b"x")
     srv.extra_names = [b"ksi\xea\xbfka_cp1250.txt"]
     p = dlg._sftp_panel
-    p._list("/")
     end = time.monotonic() + 5
+    while time.monotonic() < end and p._listing_active:
+        pump(50)                       # the listing at connect, if still on
+    p._list("/")
     while time.monotonic() < end and p._listing_active:
         pump(50)
     names = [p._table.item(r, 0).data(0x0100)[0] for r in range(p._table.rowCount())

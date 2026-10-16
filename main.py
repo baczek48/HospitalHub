@@ -600,6 +600,25 @@ def _try_activate_existing() -> bool:
     return False
 
 
+def install_polish_translations(app) -> bool:
+    """Qt's standard buttons and context menus in Polish ("Anuluj", "Tak",
+    "Kopiuj"…) — they showed "Cancel" and "&Yes/&No" next to our own Polish
+    buttons (UX audit V-09/E-16).  The .qm files ship with PyQt6 and are in
+    the build.  Missing files leave English; never raises."""
+    try:
+        from PyQt6.QtCore import QLibraryInfo, QTranslator
+        path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        loaded = False
+        for name in ("qtbase_pl", "qt_pl"):
+            tr = QTranslator(app)
+            if tr.load(name, path):
+                app.installTranslator(tr)
+                loaded = True
+        return loaded
+    except Exception:
+        return False
+
+
 def main():
     # Must be set BEFORE QApplication() to take effect. PassThrough lets Qt
     # use the system's fractional DPI scaling (125% / 150% / 175%) verbatim
@@ -613,6 +632,7 @@ def main():
     )
     app = QApplication(sys.argv)
     app.setApplicationName("HospitalHub")
+    install_polish_translations(app)
     cleanup_orphan_temp_dirs()
 
     # Single-instance: try to activate a running instance via IPC

@@ -284,7 +284,7 @@ class LoginDialog(QDialog):
             if kind_error:
                 self._opening = False
                 self._pass_edit.setEnabled(True)
-                self._pass_edit.setPlaceholderText("Podaj haslo...")
+                self._pass_edit.setPlaceholderText("Podaj hasło…")
                 QMessageBox.critical(self, "Niewłaściwy typ vaulta", kind_error)
                 return
             save_last_vault(vault_path)
@@ -295,19 +295,19 @@ class LoginDialog(QDialog):
         except FileNotFoundError:
             self._opening = False
             self._pass_edit.setEnabled(True)
-            self._pass_edit.setPlaceholderText("Podaj haslo...")
+            self._pass_edit.setPlaceholderText("Podaj hasło…")
             QMessageBox.critical(self, "Błąd", "Plik vault nie istnieje.\nWybierz inny vault.")
         except ValueError as e:
             self._opening = False
             self._pass_edit.setEnabled(True)
-            self._pass_edit.setPlaceholderText("Podaj haslo...")
+            self._pass_edit.setPlaceholderText("Podaj hasło…")
             QMessageBox.critical(self, "Błąd uwierzytelniania", str(e))
             self._pass_edit.clear()
             self._pass_edit.setFocus()
         except Exception as e:
             self._opening = False
             self._pass_edit.setEnabled(True)
-            self._pass_edit.setPlaceholderText("Podaj haslo...")
+            self._pass_edit.setPlaceholderText("Podaj hasło…")
             QMessageBox.critical(self, "Błąd", f"Nieoczekiwany błąd: {e}")
 
     def _switch_to_choose(self):

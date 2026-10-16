@@ -26,7 +26,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | S-08 | P2 | zamknięcie okna z łączącymi się sesjami zamraża GUI ~1 s/sesję | NAPRAWIONE | `a62d6da` — jeden budżet 1 s |
 | S-09 | P2 | VPN `get_status`/`disconnect` w wątku GUI przy kliknięciu; hasło w argumentach `FortiVPN.exe` | POTWIERDZONE | legacy `vpn_connect.py` jest zamrożony (niezmiennik) — poza zakresem 71; hasło w argumentach → do oceny bezpieczeństwa |
 | S-10 | P1 | dodanie szpitala o istniejącej nazwie zaznacza stary szpital | NAPRAWIONE | = E-06 |
-| S-11 | P3 | „Nowa sesja”: port „abc” → cicho 22; „host:port” → niezrozumiały błąd | POTWIERDZONE | = E-14 |
+| S-11 | P3 | „Nowa sesja”: port „abc” → cicho 22; „host:port” → niezrozumiały błąd | NAPRAWIONE | pakiet dialogów — host:port rozdzielany, zły port odrzucany |
 | S-12 | P3 | szerokość panelu Pliki resetowana przy każdym resize | POTWIERDZONE | |
 | S-13 | P2 | wylogowanie Windows z niezapisanymi zmianami | RĘCZNY TEST | |
 
@@ -71,8 +71,8 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-04 | P2 | lista szpitali: brak elipsy, poziomy pasek, brak tooltipa | NAPRAWIONE | pakiet okna głównego |
 | V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | POTWIERDZONE | |
 | V-07 | P2 | odmiana liczebników („1 ukrytych”, „22 maszyn”, „Pobrano 2 plików”, „tunel(i)”) | NAPRAWIONE | `44814c5` — wspólne plural() |
-| V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | POTWIERDZONE | |
-| V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | POTWIERDZONE | = E-16 |
+| V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | NAPRAWIONE | pakiet dialogów — test pilnuje braku ASCII-polszczyzny w ui/ |
+| V-09 | P2 | „Cancel”, „&Yes/&No” — brak tłumaczeń Qt | NAPRAWIONE | = E-16 |
 | V-10 | P2 | jasny motyw: wyłączony „Wgraj” = czarny prostokąt | POTWIERDZONE | |
 | V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | POTWIERDZONE | |
 | V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
@@ -80,7 +80,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
 | V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | POTWIERDZONE | |
 | V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | POTWIERDZONE | |
-| V-17 | P3 | placeholder portu „22 (dom…” | POTWIERDZONE | |
+| V-17 | P3 | placeholder portu „22 (dom…” | NAPRAWIONE | pakiet dialogów |
 | V-18 | P3 | nagłówek SFTP „UPRAWNIENI” | POTWIERDZONE | |
 | V-19 | P2 | okno VPN: rozmiar dryfuje po edycji, min. 640 zostaje | NAPRAWIONE | pakiet okna głównego |
 | V-20 | — | niespójne dialogi (paleta, kolejność przycisków, etykiety) | REDESIGN | |
@@ -106,13 +106,13 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-10 | P2 | wyszukiwarka tylko po nazwie szpitala; Enter/↓ nic; filtr gubi zaznaczenie | NAPRAWIONE | pakiet okna głównego — po IP/nazwie/opisie maszyny i bazie, Enter/↓, powrót zaznaczenia |
 | E-11 | P2 | brak Delete/F2/Enter/F5 na listach i w SFTP | POTWIERDZONE | |
 | E-12 | P2 | Tab utyka w tabelach | NAPRAWIONE | pakiet okna głównego |
-| E-13 | P2 | Esc w dialogach porzuca zmiany bez pytania | POTWIERDZONE | |
-| E-14 | P2 | porty bez walidacji (cicho 22, „abc” zapisane) | POTWIERDZONE | |
+| E-13 | P2 | Esc w dialogach porzuca zmiany bez pytania | NAPRAWIONE | pakiet dialogów — pytanie przy Esc/Anuluj/X tylko gdy są zmiany |
+| E-14 | P2 | porty bez walidacji (cicho 22, „abc” zapisane) | NAPRAWIONE | pakiet dialogów — RDP, baza, Nowa sesja: 1–65535 z komunikatem |
 | E-15 | P2 | komunikaty SSH jako modal „SFTP”, sukcesy giną, surowe wyjątki | NAPRAWIONE | pakiet SFTP — sukcesy w pasku statusu, błąd SSH bez modala, polskie teksty błędów |
-| E-16 | P2 | Yes/No obok Tak/Nie; brak polskich znaków w dialogach admina | POTWIERDZONE | |
+| E-16 | P2 | Yes/No obok Tak/Nie; brak polskich znaków w dialogach admina | NAPRAWIONE | pakiet dialogów — qtbase_pl/qt_pl (już w buildzie), polskie znaki |
 | E-17 | — | niespójne kontrolki dla tych samych akcji | REDESIGN | |
 | E-18 | P2 | okna SSH o identycznym tytule; nieaktualne dane po zmianach w vaulcie | POTWIERDZONE | część (blokada admina) w S-03 |
-| E-19 | P3 | złe hasło admina zamyka dialog | POTWIERDZONE | |
+| E-19 | P3 | złe hasło admina zamyka dialog | NAPRAWIONE | pakiet dialogów — weryfikacja w dialogu, komunikat pod polem |
 | E-20 | P2 | VPN w nagłówku: pierwszy klik tylko wczytuje vault; status synchronicznie | NIEROZWIĄZANE | dotyka legacy VPN (niezmiennik) |
 | E-21 | P2 | pierwsze RDP: synchroniczne PowerShell bez informacji zwrotnej | RĘCZNY TEST | |
 | E-22 | P2 | SFTP: „Usuń” na jednym, „Pobierz” na zaznaczeniu | POTWIERDZONE | |

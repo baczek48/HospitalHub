@@ -625,7 +625,8 @@ class MainWindow(QMainWindow):
                 "Ustaw je w menu: Plik → Ustaw / zmień hasło admina."
             )
             return
-        dlg = AdminUnlockDialog(self)
+        dlg = AdminUnlockDialog(self, verify=lambda pw: verify_admin_password(
+            pw, self._admin_hash, self._admin_salt))
         if not dlg.exec():
             return
         if not verify_admin_password(dlg.get_password(), self._admin_hash, self._admin_salt):

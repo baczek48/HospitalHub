@@ -61,3 +61,27 @@ class ElidedLabel(QLabel):
             self._full, Qt.TextElideMode.ElideRight, max(0, self.width()))
         QLabel.setText(self, shown)
         self.setToolTip(self._full if shown != self._full else "")
+
+
+def parse_port(text: str, default: int | None = None) -> int | None:
+    """A TCP port typed by the user: 1–65535, `default` when empty, None
+    when it is not a port (UX audit E-14/S-11 — "abc" and "22a" became 22
+    without a word, 99999 failed only when connecting)."""
+    text = (text or "").strip()
+    if not text:
+        return default
+    if not text.isdigit():
+        return None
+    port = int(text)
+    return port if 1 <= port <= 65535 else None
+
+
+def split_host_port(text: str) -> tuple[str, str]:
+    """"10.0.0.1:2222" → ("10.0.0.1", "2222"); an IPv6 address or a plain
+    host stays as it is with ""."""
+    text = (text or "").strip()
+    if text.count(":") == 1:
+        host, port = text.split(":")
+        if host and port.isdigit():
+            return host, port
+    return text, ""
