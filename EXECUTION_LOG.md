@@ -472,3 +472,26 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
 - Bez zmian: tryb bezpośredni nadal ucina oryginał przy zerwaniu (ochrona = flaga G10, `False`).
   Niezmienniki: flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, `vpn_connect.py` a929035e.
   **1730 PASS / 0 FAIL.**
+
+---
+
+## 2026-10-16 — G1: odpowiedzi użytkownika (pkt 5–6)
+
+- Przebieg pomiaru: lista otwarta, podświetlenie przesuwane strzałkami w dół i w górę, **lista
+  zamknięta Escape**, potem okno FortiClienta zamknięte ręcznie myszą.
+- **Pkt 5 → potwierdzone: Escape w tej kontrolce ZATWIERDZA podświetloną pozycję** (nie anuluje).
+  Skutek dla V2: brak zmian w kodzie — `_select_profile` nigdy nie wysyła Escape; nazwa i Enter
+  idą tylko przy `EXPANDED`, a wynik potwierdzają dwa odczyty po zamknięciu listy. Jeżeli V2
+  odmówi z listą otwartą (np. po Spacji), Escape użytkownika zmieni widoczny profil na
+  podświetlony — nic nie zostanie wpisane ani połączone; kolejny start sprawdza profil od nowa.
+  `initial()` odmawia, gdy lista jest otwarta (Shift+Tab też mógłby zatwierdzić).
+- **Pkt 6 → wyjaśnione:** drugi przebieg na nowym hwnd = ręczne zamknięcie i ponowne otwarcie
+  okna przez użytkownika, nie reakcja FortiClienta na zmianę profilu.
+- **Pozostaje G1b** (bez zmian w ocenie G2: jeszcze nie). Instrukcja dla użytkownika:
+  1. Otwórz FortiClient na formularzu VPN, ustaw profil inny niż docelowy, lista zamknięta.
+  2. Uruchom sondę w katalogu V2: `py -3.13 -m smoke.forticlient_msaa_live watch --seconds 90`.
+  3. Kliknij w pole Username, potem **Shift+Tab, Shift+Tab** (pauza ~1 s po każdym).
+  4. **Spacja** (lista ma się otworzyć), wpisz nazwę profilu docelowego, **Enter**.
+  5. Odczekaj 5 s, zatrzymaj sondę (Ctrl+C), nie zamykaj okna przed końcem zapisu.
+  Do zmierzenia: FOCUSED po drugim Shift+Tab, EXPANDED po Spacji, wartość po Enterze = profil
+  docelowy, stan końcowy COLLAPSED.

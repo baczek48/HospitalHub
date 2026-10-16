@@ -50,7 +50,7 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 
 | Bramka | Co | Wymagane działanie |
 |---|---|---|
-| **G1** | stany MSAA — **pomiar wykonany 2026-10-15** (wyniki: `EXECUTION_LOG.md`) | odpowiedzieć: czym zamknięto listę (Escape/Enter/klik) i czy okno FortiClienta zamknięto ręcznie; potem G1b — sonda + sekwencja klawiszy V2 wykonana ręcznie |
+| **G1** | stany MSAA — **pomiar wykonany 2026-10-15**, pytania 5–6 rozstrzygnięte 2026-10-16 (Escape zatwierdza podświetlenie; okno zamknięte ręcznie) | **G1b** — sonda + sekwencja klawiszy V2 wykonana ręcznie (instrukcja: `EXECUTION_LOG.md`, wpis 2026-10-16 G1) |
 | **G2** | live connect FortiClient V2 | po G1 — osobna, wyraźna zgoda |
 | **G3/G4** | live connect Stormshield / Barracuda V2 | po akceptacji G2 |
 | **G6** | instalacja **admin** do Program Files | wymaga kliknięcia UAC — uruchomić `dist_installer\HospitalHubV2-Setup-2.0.0.exe`, potem odinstalować; per-user zrobione automatycznie |
@@ -61,7 +61,7 @@ Brak — kolejne kroki wymagają użytkownika (niżej).
 1. Przeczytaj ten plik, potem `RELEASE_READINESS_V2.md`.
 2. Sprawdź niezmienniki (flagi ×3 + `SFTP_SAFE_REPLACE_ENABLED` = False, sha `vpn_connect.py`,
    V1 nietknięte), `git -C C:/claude/hospital_hub_v2 status`, uruchom testy — oczekiwane 1730 PASS.
-3. Zapytaj o odpowiedzi do G1 (pkt 5–6 w dzienniku), G1b i o G10.
+3. Zapytaj o G1b i o G10.
 4. Przed szerokimi zmianami: commit w repo V2 (a dodatkowo migawka `.tgz` + dopisanie do `SHA256SUMS`).
 5. Po zmianach: testy, build (`build_v2.bat` — buduje też instalator), smoke startu exe offscreen,
    wpis w `EXECUTION_LOG.md`.
