@@ -6199,6 +6199,20 @@ class _EnvironmentPanel(QWidget):
             self._hospital_btn.rect().bottomLeft())
         menu.exec(pos)
 
+    def set_admin_mode(self, unlocked: bool) -> None:
+        """Admin locked or unlocked in the vault this window came from: show
+        or hide the admin-only machines (UX audit S-03)."""
+        if unlocked == self._admin_unlocked:
+            return
+        self._admin_unlocked = unlocked
+        old_active = self._active_ip
+        self._cards.clear()
+        self._machines.clear()
+        self._selected_ips.clear()
+        self._build_machine_list(self._current_hospital)
+        if old_active and old_active in self._cards:
+            self.set_active(old_active)
+
     def _select_hospital(self, h):
         if h is self._current_hospital:
             return
@@ -6824,6 +6838,13 @@ class SshDialog(QDialog):
             | Qt.WindowType.WindowCloseButtonHint
         )
         SshDialog._alive.append(self)
+        # The vault window it was opened from (UX audit S-03): its admin lock
+        # and its closing reach this window too.
+        try:
+            owner = parent.window() if parent is not None else None
+            self._owner_ref = weakref.ref(owner) if owner is not None else None
+        except (TypeError, RuntimeError):
+            self._owner_ref = None
         # Eagerly bind the host-key prompt bridge to the GUI thread. The
         # worker threads call into this from missing_host_key() during
         # connect — if the singleton were created from a worker, its
@@ -8054,6 +8075,33 @@ class SshDialog(QDialog):
             return              # a late report into a closed window (S-02)
         if err and text:
             QMessageBox.warning(self, "SFTP", text)
+
+    def owner_window(self):
+        ref = getattr(self, '_owner_ref', None)
+        return ref() if ref is not None else None
+
+    @classmethod
+    def windows_of(cls, owner) -> list:
+        return [d for d in list(cls._alive) if d.owner_window() is owner]
+
+    def set_admin_mode(self, unlocked: bool) -> None:
+        """Follow the vault's admin lock (UX audit S-03): admin-only machines
+        and credentials leave the Environment panel and new connections.
+        Sessions already open stay — closing a working shell is the user's
+        call, not a side effect of the lock."""
+        self._admin_unlocked = unlocked
+        if not unlocked and self._cred is not None and self._cred.admin_only:
+            vis = [c for c in self._machine.credentials if not c.admin_only]
+            self._cred = vis[0] if vis else None
+        self._env_panel.set_admin_mode(unlocked)
+
+    def close_for_vault(self) -> None:
+        """The vault this window came from is closing.  A running transfer
+        still gets its question; otherwise the window simply goes."""
+        if self._sftp_panel.transfer_running():
+            self.close()
+        else:
+            self.close_without_asking()
 
     def close_without_asking(self) -> None:
         """Close for the application (quit, vault closed): no questions."""

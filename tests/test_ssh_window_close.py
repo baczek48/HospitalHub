@@ -161,3 +161,74 @@ def test_a_signal_of_a_retired_worker_reaches_nobody(sp):
     sp._unplug_and_retire([w])
     w.error.emit("late")
     assert got == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# S-03: the SSH windows of a vault follow its admin lock and its closing
+# ══════════════════════════════════════════════════════════════════════════
+
+def _vault_with_admin_machine():
+    import models
+    plain = models.Machine(ip="10.0.0.7", name="app",
+                           credentials=[models.Credential(login="u", password="pw"),
+                                        models.Credential(login="root", password="pw",
+                                                          admin_only=True)])
+    secret = models.Machine(ip="10.0.0.8", name="adm", admin_only=True,
+                            credentials=[models.Credential(login="u", password="pw")])
+    return models.Hospital(name="H", machines=[plain, secret]), plain
+
+
+def _owner():
+    from PyQt6.QtWidgets import QMainWindow, QWidget
+    win = QMainWindow()
+    inner = QWidget()
+    win.setCentralWidget(inner)
+    win._unsaved = False
+    win.destroy_cleanup = lambda: None
+    return win, inner
+
+
+def test_s03_locking_admin_hides_admin_entries_in_open_ssh_windows(sp, world):
+    from ui.main_window import MainWindow
+    hospital, plain = _vault_with_admin_machine()
+    win, inner = _owner()
+    dlg = sp.SshDialog(plain, hospital=hospital, all_hospitals=[hospital],
+                       admin_unlocked=True, parent=inner)
+    pump(200)
+    assert dlg.owner_window() is win
+    assert "10.0.0.8" in dlg._env_panel._machines
+    MainWindow._admin_to_ssh_windows(win, False)
+    assert "10.0.0.8" not in dlg._env_panel._machines
+    assert dlg._admin_unlocked is False
+    MainWindow._admin_to_ssh_windows(win, True)
+    assert "10.0.0.8" in dlg._env_panel._machines
+    dlg.close_without_asking()
+    pump(300)
+
+
+def test_s03_another_vaults_lock_does_not_touch_this_window(sp, world):
+    from ui.main_window import MainWindow
+    hospital, plain = _vault_with_admin_machine()
+    win, inner = _owner()
+    other, _ = _owner()
+    dlg = sp.SshDialog(plain, hospital=hospital, admin_unlocked=True, parent=inner)
+    pump(200)
+    MainWindow._admin_to_ssh_windows(other, False)
+    assert dlg._admin_unlocked is True
+    dlg.close_without_asking()
+    pump(300)
+
+
+def test_s03_closing_the_vault_closes_its_ssh_windows(sp, world):
+    import main
+    from types import SimpleNamespace
+    hospital, plain = _vault_with_admin_machine()
+    win, inner = _owner()
+    dlg = sp.SshDialog(plain, hospital=hospital, parent=inner)
+    pump(200)
+    removed = []
+    mgr = SimpleNamespace(remove_window=removed.append)
+    main.AppManager._force_close_window(mgr, win)
+    pump(300)
+    assert removed == [win]
+    assert dlg not in sp.SshDialog._alive

@@ -559,6 +559,7 @@ class MainWindow(QMainWindow):
         )
         if self._detail_panel:
             self._detail_panel.set_admin_mode(True)
+        self._admin_to_ssh_windows(True)
         # Admin stays unlocked for the whole session — no auto-lock timer.
         # The user re-locks manually by clicking the 🔓 Admin button.
 
@@ -574,6 +575,19 @@ class MainWindow(QMainWindow):
             )
         if self._detail_panel:
             self._detail_panel.set_admin_mode(False)
+        self._admin_to_ssh_windows(False)
+
+    def _admin_to_ssh_windows(self, unlocked: bool) -> None:
+        """This vault's SSH windows follow its admin lock (UX audit S-03)."""
+        try:
+            from ui.ssh_panel import SshDialog
+        except Exception:
+            return
+        for dlg in SshDialog.windows_of(self):
+            try:
+                dlg.set_admin_mode(unlocked)
+            except RuntimeError:
+                pass
 
     def _setup_admin_password(self):
         has_existing = bool(self._admin_hash)

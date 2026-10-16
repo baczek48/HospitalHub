@@ -478,6 +478,14 @@ class AppManager:
                 pass
             else:
                 return  # Cancel
+        # Its SSH windows go with it: they hold the vault's hospitals and
+        # passwords (UX audit S-03).
+        try:
+            from ui.ssh_panel import SshDialog
+            for dlg in SshDialog.windows_of(window):
+                dlg.close_for_vault()
+        except Exception:
+            pass
         self.remove_window(window)
         window.destroy_cleanup()
         window.deleteLater()
