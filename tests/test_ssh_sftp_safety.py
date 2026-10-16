@@ -186,7 +186,7 @@ def fake_panel(sp, client):
         _table=SimpleNamespace(setRowCount=lambda n: None),
         _update_history_menu=lambda: None)
     for name in ("_remember_watches", "_recall_watches", "bound_to",
-                 "forget_connection"):
+                 "forget_connection", "rebind_connection"):
         method = getattr(sp.SftpPanel, name)
         setattr(panel, name, lambda *a, _m=method: _m(panel, *a))
     return panel, events
@@ -256,18 +256,22 @@ def test_s1_an_entry_for_a_different_live_object_is_not_restored(sp):
     assert panel._watched_files == {}
 
 
-def test_s1_a_reconnect_forgets_the_old_client(sp):
+def test_s1_a_reconnect_moves_the_watches_off_the_old_client(sp):
+    """2026-10-16 (UX audit S-01): the reconnect of one session rebinds its
+    watches to the new client instead of dropping them; nothing stays keyed
+    by the old client's id (review 66/S1)."""
     old, new = Client(), Client()
-    forgotten = []
+    rebound = []
     session = SimpleNamespace(sftp=object(), sftp_client=old, sftp_path="/",
                               sftp_history=[])
     dialog = SimpleNamespace(
         _sessions=[session],
-        _sftp_panel=SimpleNamespace(forget_connection=forgotten.append,
-                                    switch_sftp=lambda *a, **k: None),
+        _sftp_panel=SimpleNamespace(
+            rebind_connection=lambda o, n: rebound.append((o, n)),
+            switch_sftp=lambda *a, **k: None),
         _active_session=lambda: None)
     sp.SshDialog._on_sftp_ready(dialog, session, Client(), new)
-    assert forgotten == [old] and session.sftp_client is new
+    assert rebound == [(old, new)] and session.sftp_client is new
     assert old.closed, "stare polaczenie zamkniete (C1-08)"
     assert not new.closed
 
@@ -747,3 +751,13 @@ def test_c114_the_host_key_name_matches_paramikos(sp, kbd):
                                  ".settingcontent-ms", ".appref-ms"])
 def test_c115_more_executable_extensions_are_flagged(sp, ext):
     assert ext in sp.SftpPanel._DANGEROUS_EXT
+
+
+def test_s1_a_rebind_leaves_nothing_under_the_old_id(sp):
+    old, new = Client(), Client()
+    panel, _ = fake_panel(sp, old)
+    panel._remember_watches(old, {"x": {"owner": None}})
+    panel.rebind_connection(old, new)
+    assert id(old) not in panel._watch_store
+    ref, files = panel._watch_store[id(new)]
+    assert ref() is new and files["x"]["owner"]() is new

@@ -40,6 +40,7 @@ class Channel:
     def __init__(self, log, n, refuse_x11=False):
         self.log, self.n, self.refuse_x11 = log, n, refuse_x11
         self.closed = False
+        self.exit_status = 0        # the shell ends at once: run() returns
 
     def request_x11(self, screen_number=None, single_connection=None,
                     handler=None, **kw):
@@ -55,9 +56,6 @@ class Channel:
 
     def recv_ready(self):
         return False
-
-    def exit_status_ready(self):
-        return True                 # the shell ends at once: run() returns
 
     def close(self):
         self.closed = True
