@@ -1,4 +1,5 @@
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QLabel, QMessageBox, QSizePolicy
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
@@ -29,3 +30,34 @@ def confirm(parent, title: str, text: str, yes: str = "Tak",
     box.setEscapeButton(btn_no)
     box.exec()
     return box.clickedButton() is btn_yes
+
+
+class ElidedLabel(QLabel):
+    """One-line label that ends in "…" when it does not fit and shows the
+    whole text as a tooltip (UX audit V-02/V-03: hospital and VPN profile
+    names were cut mid-letter or pushed the buttons out of the window)."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,
+                           QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(40)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full = text or ""
+        self._apply()
+
+    def text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, max(0, self.width()))
+        QLabel.setText(self, shown)
+        self.setToolTip(self._full if shown != self._full else "")

@@ -3,10 +3,10 @@ import sys
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QListWidget, QLineEdit, QPushButton, QLabel,
+    QListWidget, QListWidgetItem, QLineEdit, QPushButton, QLabel,
     QSplitter, QMessageBox, QFileDialog, QMenu,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QActionGroup
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +23,7 @@ from ui.dialogs import (
     HospitalDialog, ChangePasswordDialog,
     AdminSetupDialog, AdminUnlockDialog,
 )
+from ui.utils import confirm
 
 _ADMIN_LOCK_TIMEOUT_MS = 5 * 60 * 1000  # auto-lock after 5 minutes
 
@@ -143,9 +144,11 @@ class MainWindow(QMainWindow):
 
         # ---- Left panel ----
         left = QWidget()
+        left.setObjectName("leftPanel")
         left.setMinimumWidth(190)
         left.setMaximumWidth(300)
-        left.setStyleSheet("background: #161b22; border-right: 1px solid #21262d;")
+        left.setStyleSheet(
+            "#leftPanel { background: #161b22; border-right: 1px solid #21262d; }")
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(10, 12, 10, 10)
         left_layout.setSpacing(8)
@@ -167,6 +170,9 @@ class MainWindow(QMainWindow):
             "QLineEdit:focus { border-color: #1f6feb; }"
         )
         self._search_edit.textChanged.connect(self._on_search_changed)
+        self._search_edit.setPlaceholderText("Szukaj: szpital, IP, maszyna, baza…")
+        self._search_edit.returnPressed.connect(self._search_go_to_list)
+        self._search_edit.installEventFilter(self)
         left_layout.addWidget(self._search_edit)
 
         self._hospital_list = QListWidget()
@@ -179,6 +185,10 @@ class MainWindow(QMainWindow):
             QListWidget::item:selected { background: #1f6feb; color: #fff; }
             QListWidget::item:hover:!selected { background: #21262d; }
         """)
+        # Long names end in "…" with a tooltip, no sideways scrolling (V-04).
+        self._hospital_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._hospital_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._hospital_list.currentRowChanged.connect(self._on_hospital_selected)
         self._hospital_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._hospital_list.customContextMenuRequested.connect(self._on_hospital_context_menu)
@@ -313,9 +323,26 @@ class MainWindow(QMainWindow):
     # Hospital list                                                        #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _search_hit(h, text: str) -> str:
+        """Why `h` matches `text` ("" = it does not).  Hospital name, and —
+        tickets name a server, not a hospital — machine IP / name /
+        description and database host / name (UX audit E-10)."""
+        if text in h.name.lower():
+            return "name"
+        for m in h.machines:
+            if (text in (m.ip or "").lower() or text in (m.name or "").lower()
+                    or text in (m.description or "").lower()):
+                return f"maszyna: {m.name or m.ip} ({m.ip})"
+        for d in h.databases:
+            if text in (d.host or "").lower() or text in (d.name or "").lower():
+                return f"baza: {d.name} ({d.host})"
+        return ""
+
     def _filtered_hospitals(self) -> list:
-        text = self._search_edit.text().lower()
-        result = [h for h in self._hospitals if text in h.name.lower()]
+        text = self._search_edit.text().strip().lower()
+        result = [h for h in self._hospitals
+                  if not text or self._search_hit(h, text)]
         if self._sort_order == "asc":
             result.sort(key=lambda h: h.name.casefold())
         elif self._sort_order == "desc":
@@ -330,12 +357,32 @@ class MainWindow(QMainWindow):
         )
 
         filtered = self._filtered_hospitals()
+        # A hospital hidden by the filter comes back selected when the
+        # filter is cleared (E-10).
+        if current_id:
+            self._remembered_id = current_id
+        elif getattr(self, '_remembered_id', None):
+            current_id = self._remembered_id
 
-        self._hospital_list.blockSignals(True)
-        self._hospital_list.clear()
-        for h in filtered:
-            self._hospital_list.addItem(h.name)
-        self._hospital_list.blockSignals(False)
+        text = self._search_edit.text().strip().lower()
+        wanted = [(h.name, self._search_hit(h, text) if text else "")
+                  for h in filtered]
+        same = (self._hospital_list.count() == len(wanted) and all(
+            self._hospital_list.item(i).text() == name
+            and self._hospital_list.item(i).data(Qt.ItemDataRole.UserRole) == hit
+            for i, (name, hit) in enumerate(wanted)))
+        if not same:
+            # Rebuilt only when names, order or matches changed — not on
+            # every character typed in the notes (E-26).
+            self._hospital_list.blockSignals(True)
+            self._hospital_list.clear()
+            for name, hit in wanted:
+                item = QListWidgetItem(name)
+                item.setData(Qt.ItemDataRole.UserRole, hit)
+                tip = name if hit in ("", "name") else f"{name}\n{hit}"
+                item.setToolTip(tip)
+                self._hospital_list.addItem(item)
+            self._hospital_list.blockSignals(False)
 
         # Restore selection — block signals so show_hospital isn't called again
         # (prevents notes cursor from resetting while the user is typing)
@@ -349,11 +396,31 @@ class MainWindow(QMainWindow):
                     found = True
                     break
 
-        if not found and current_id:
+        if not found and self._detail_panel.current_hospital is not None:
             self._detail_panel.show_hospital(None, None)
+        if found:
+            self._remembered_id = None
+            if self._detail_panel.current_hospital is not h:
+                # Brought back from before the filter: show it too.
+                self._detail_panel.show_hospital(h, self._hospitals)
 
     def _on_search_changed(self, _text: str):
         self._refresh_hospital_list()
+
+    def _search_go_to_list(self):
+        """Enter / ↓ in the search box: first result selected, focus on the
+        list (E-10)."""
+        if self._hospital_list.count():
+            if self._hospital_list.currentRow() < 0:
+                self._hospital_list.setCurrentRow(0)
+            self._hospital_list.setFocus()
+
+    def eventFilter(self, obj, event):
+        if (obj is self._search_edit and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Down):
+            self._search_go_to_list()
+            return True
+        return super().eventFilter(obj, event)
 
     def _set_sort_order(self, order: str):
         if order == self._sort_order:
@@ -413,14 +480,28 @@ class MainWindow(QMainWindow):
     def _add_hospital(self):
         dlg = HospitalDialog(self)
         if dlg.exec():
-            hospital = models.Hospital(name=dlg.get_name())
+            name = dlg.get_name()
+            key = name.strip().casefold()
+            if any(h.name.strip().casefold() == key for h in self._hospitals):
+                # Two hospitals with one name are easy to mix up — machines
+                # and passwords end up in the wrong one, and the VPN button
+                # matches profiles by name (UX audit E-06).
+                if not confirm(self, "Szpital już istnieje",
+                               f"Szpital o nazwie '{name}' już jest w vaulcie.\n"
+                               "Dodać drugi o tej samej nazwie?",
+                               yes="Dodaj mimo to", no="Anuluj"):
+                    return
+            hospital = models.Hospital(name=name)
             self._hospitals.append(hospital)
             self._unsaved = True
             self._update_title()
+            if self._search_edit.text():
+                self._search_edit.clear()      # the new one must be visible
             self._refresh_hospital_list()
-            # Select the new hospital
-            for i in range(self._hospital_list.count()):
-                if self._hospital_list.item(i).text() == hospital.name:
+            # Select the new hospital — by object, not by name (E-06).
+            filtered = self._filtered_hospitals()
+            for i, h in enumerate(filtered):
+                if h is hospital:
                     self._hospital_list.setCurrentRow(i)
                     break
 

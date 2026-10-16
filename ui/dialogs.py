@@ -273,6 +273,7 @@ class MachineDialog(QDialog):
             2, QHeaderView.ResizeMode.ResizeToContents
         )
         self._cred_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._cred_table.setTabKeyNavigation(False)    # Tab reaches Save (E-12)
         self._cred_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._cred_table.verticalHeader().setVisible(False)
         self._cred_table.setAlternatingRowColors(True)
@@ -472,6 +473,7 @@ class DatabaseDialog(QDialog):
             2, QHeaderView.ResizeMode.ResizeToContents
         )
         self._cred_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._cred_table.setTabKeyNavigation(False)    # Tab reaches Save (E-12)
         self._cred_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._cred_table.verticalHeader().setVisible(False)
         self._cred_table.setAlternatingRowColors(True)

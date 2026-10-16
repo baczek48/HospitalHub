@@ -25,7 +25,7 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | S-07 | P1 | zmiana nazwy SFTP przyjmuje „/” — plik przenoszony gdzie indziej | NAPRAWIONE | pakiet SFTP |
 | S-08 | P2 | zamknięcie okna z łączącymi się sesjami zamraża GUI ~1 s/sesję | NAPRAWIONE | `a62d6da` — jeden budżet 1 s |
 | S-09 | P2 | VPN `get_status`/`disconnect` w wątku GUI przy kliknięciu; hasło w argumentach `FortiVPN.exe` | POTWIERDZONE | legacy `vpn_connect.py` jest zamrożony (niezmiennik) — poza zakresem 71; hasło w argumentach → do oceny bezpieczeństwa |
-| S-10 | P1 | dodanie szpitala o istniejącej nazwie zaznacza stary szpital | POTWIERDZONE | = E-06 |
+| S-10 | P1 | dodanie szpitala o istniejącej nazwie zaznacza stary szpital | NAPRAWIONE | = E-06 |
 | S-11 | P3 | „Nowa sesja”: port „abc” → cicho 22; „host:port” → niezrozumiały błąd | POTWIERDZONE | = E-14 |
 | S-12 | P3 | szerokość panelu Pliki resetowana przy każdym resize | POTWIERDZONE | |
 | S-13 | P2 | wylogowanie Windows z niezapisanymi zmianami | RĘCZNY TEST | |
@@ -66,9 +66,9 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | ID | P | Znalezisko | Status | Commit / uwagi |
 |---|---|---|---|---|
 | V-01 | P1 | terminal gubi ~6 prawych kolumn przy domyślnym oknie (cols ≥ 80 wymuszone) | NAPRAWIONE | `64a327a` — rozmiar PTY = widoczny, min. widgetu 40×10 |
-| V-02 | P1 | okno VPN: długie nazwy wypychają Połącz/Login/Hasło poza okno | POTWIERDZONE | |
-| V-03 | P2 | nagłówek szpitala ucięty w pół litery; licznik „ukrytych” znika | POTWIERDZONE | |
-| V-04 | P2 | lista szpitali: brak elipsy, poziomy pasek, brak tooltipa | POTWIERDZONE | |
+| V-02 | P1 | okno VPN: długie nazwy wypychają Połącz/Login/Hasło poza okno | NAPRAWIONE | pakiet okna głównego — ElidedLabel, bez poziomego paska |
+| V-03 | P2 | nagłówek szpitala ucięty w pół litery; licznik „ukrytych” znika | NAPRAWIONE | pakiet okna głównego — elipsa + tooltip; plakietka chowa się na wąskim panelu |
+| V-04 | P2 | lista szpitali: brak elipsy, poziomy pasek, brak tooltipa | NAPRAWIONE | pakiet okna głównego |
 | V-05 | P1 | kolumna „Akcje” poza ekranem przy małym oknie / DPI 150–200% | POTWIERDZONE | |
 | V-07 | P2 | odmiana liczebników („1 ukrytych”, „22 maszyn”, „Pobrano 2 plików”, „tunel(i)”) | NAPRAWIONE | `44814c5` — wspólne plural() |
 | V-08 | P2 | brak polskich znaków („haslo”, „Blad”, „Polacz”) | POTWIERDZONE | |
@@ -77,12 +77,12 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | V-11 | P3 | jasny motyw: ciemne ikony plików SFTP | POTWIERDZONE | |
 | V-12 | P2 | błąd SSH jako modal „SFTP” (dubel komunikatu w terminalu) | NAPRAWIONE | = E-15 |
 | V-13 | P3 | „⚠” w terminalu jako tofu | RĘCZNY TEST | |
-| V-14 | P3 | pionowa kreska przy „Szpitale” | POTWIERDZONE | |
+| V-14 | P3 | pionowa kreska przy „Szpitale” | NAPRAWIONE | pakiet okna głównego |
 | V-15 | P3 | brak stanów pustych; „Brak profili VPN” kontrast ~2:1 | POTWIERDZONE | |
 | V-16 | P3 | „Usuń” w ciemnym motywie słabo czytelne | POTWIERDZONE | |
 | V-17 | P3 | placeholder portu „22 (dom…” | POTWIERDZONE | |
 | V-18 | P3 | nagłówek SFTP „UPRAWNIENI” | POTWIERDZONE | |
-| V-19 | P2 | okno VPN: rozmiar dryfuje po edycji, min. 640 zostaje | POTWIERDZONE | |
+| V-19 | P2 | okno VPN: rozmiar dryfuje po edycji, min. 640 zostaje | NAPRAWIONE | pakiet okna głównego |
 | V-20 | — | niespójne dialogi (paleta, kolejność przycisków, etykiety) | REDESIGN | |
 | V-21 | — | ikony-glify i emoji | REDESIGN | |
 | V-22 | P3 | Ustawienia VPN: lista ścieżek zapada się | RĘCZNY TEST | |
@@ -99,13 +99,13 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-03 | P2 | „Ctrl+F” z podpowiedzi wysyła `^F` na serwer | NAPRAWIONE | `64a327a` — Ctrl+Shift+F |
 | E-04 | P1 | panel Środowisko: pojedynczy klik łączy, każdy kolejny = nowa sesja/RDP | POTWIERDZONE | |
 | E-05 | P0 | prawy klik wkleja wieloliniowy schowek (także do wszystkich sesji multi-exec) | NAPRAWIONE | = T-18 |
-| E-06 | P1 | duplikat nazwy szpitala; po dodaniu zaznaczony STARY | POTWIERDZONE | = S-10 |
+| E-06 | P1 | duplikat nazwy szpitala; po dodaniu zaznaczony STARY | NAPRAWIONE | pakiet okna głównego — ostrzeżenie (domyślnie Anuluj), zaznaczenie po obiekcie |
 | E-07 | P0 | potwierdzenia usunięcia z domyślnym „Tak/Yes” — Enter kasuje szpital | NAPRAWIONE | `44814c5` — domyślnie Nie/Anuluj (Enter i Esc), liczby w pytaniu o szpital |
 | E-08 | P1 | przycisk z loginem kopiuje hasło; loginu nie da się skopiować | POTWIERDZONE | |
 | E-09 | P2 | tylko pierwsze poświadczenie dostępne z widoku | REDESIGN | |
-| E-10 | P2 | wyszukiwarka tylko po nazwie szpitala; Enter/↓ nic; filtr gubi zaznaczenie | POTWIERDZONE | |
+| E-10 | P2 | wyszukiwarka tylko po nazwie szpitala; Enter/↓ nic; filtr gubi zaznaczenie | NAPRAWIONE | pakiet okna głównego — po IP/nazwie/opisie maszyny i bazie, Enter/↓, powrót zaznaczenia |
 | E-11 | P2 | brak Delete/F2/Enter/F5 na listach i w SFTP | POTWIERDZONE | |
-| E-12 | P2 | Tab utyka w tabelach | POTWIERDZONE | |
+| E-12 | P2 | Tab utyka w tabelach | NAPRAWIONE | pakiet okna głównego |
 | E-13 | P2 | Esc w dialogach porzuca zmiany bez pytania | POTWIERDZONE | |
 | E-14 | P2 | porty bez walidacji (cicho 22, „abc” zapisane) | POTWIERDZONE | |
 | E-15 | P2 | komunikaty SSH jako modal „SFTP”, sukcesy giną, surowe wyjątki | NAPRAWIONE | pakiet SFTP — sukcesy w pasku statusu, błąd SSH bez modala, polskie teksty błędów |
@@ -117,9 +117,9 @@ na produkcji · P2 uciążliwość wizualna/ergonomiczna · P3 kosmetyka.
 | E-21 | P2 | pierwsze RDP: synchroniczne PowerShell bez informacji zwrotnej | RĘCZNY TEST | |
 | E-22 | P2 | SFTP: „Usuń” na jednym, „Pobierz” na zaznaczeniu | POTWIERDZONE | |
 | E-23 | P2 | VPN: „+ Dodaj” tworzy profil od razu; „Wróć” zostawia śmieć; Esc nie wraca | POTWIERDZONE | |
-| E-24 | P3 | klik w komórkę kopiuje jak sekret (czyszczony po 15 s); wyjątek w animacji | POTWIERDZONE | |
+| E-24 | P3 | klik w komórkę kopiuje jak sekret (czyszczony po 15 s); wyjątek w animacji | NAPRAWIONE | pakiet okna głównego — animacja odporna na odświeżenie tabeli (kopiowanie IP jako sekret: bez zmian, decyzja w redesignie) |
 | E-25 | P2 | multi-exec: „Duplikuj” ignorowane, aktywna = zawsze pierwsza sesja | POTWIERDZONE | |
-| E-26 | P3 | każdy znak w notatkach przebudowuje listę szpitali | POTWIERDZONE | |
+| E-26 | P3 | każdy znak w notatkach przebudowuje listę szpitali | NAPRAWIONE | pakiet okna głównego |
 
 ## Znalezione podczas napraw (spoza raportów audytorów)
 

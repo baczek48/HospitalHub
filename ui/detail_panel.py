@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QTextEdit, QGroupBox, QFrame, QScrollArea, QMessageBox, QApplication,
     QSplitter, QMenu, QDialog, QDialogButtonBox, QFileDialog, QLineEdit,
-    QStyledItemDelegate, QStyle, QGraphicsColorizeEffect,
+    QStyledItemDelegate, QStyle, QGraphicsColorizeEffect, QSizePolicy,
 )
 from PyQt6.QtCore import (Qt, pyqtSignal, QPoint, QTimer, QObject, QEvent,
                            QSize, QPropertyAnimation, QEasingCurve, QThread)
@@ -130,7 +130,7 @@ from crypto import decrypt
 from ui import theme
 from ui.dialogs import HospitalDialog, MachineDialog, DatabaseDialog, _clipboard_copy
 from ui.thread_retire import retire_thread
-from ui.utils import confirm, plural
+from ui.utils import ElidedLabel, confirm, plural
 from ui.ssh_panel import SshDialog
 from ui.rdp import connect_rdp
 from ui.db_connect import launch_sqldeveloper
@@ -439,13 +439,12 @@ class DetailPanel(QWidget):
 
         # Header
         header = QHBoxLayout()
-        self._name_label = QLabel()
+        self._name_label = ElidedLabel()
         font = QFont()
         font.setPointSize(15)
         font.setBold(True)
         self._name_label.setFont(font)
-        header.addWidget(self._name_label)
-        header.addStretch()
+        header.addWidget(self._name_label, 1)
 
         # Admin mode badge — visible only when unlocked
         self._admin_badge = QLabel("🔓 TRYB ADMINA")
@@ -465,6 +464,9 @@ class DetailPanel(QWidget):
             " padding: 3px 12px; letter-spacing: 0.5px;"
         )
         header.addWidget(self._stats_badge)
+        # The name gives way first; the badge keeps its full text (V-03).
+        self._stats_badge.setSizePolicy(QSizePolicy.Policy.Minimum,
+                                        QSizePolicy.Policy.Preferred)
 
         btn_quick_ssh = QToolButton()
         btn_quick_ssh.setText("⇆")
@@ -538,6 +540,7 @@ class DetailPanel(QWidget):
         machines_layout.setSpacing(6)
 
         self._machines_table = _DraggableTable(0, 4)
+        self._machines_table.setTabKeyNavigation(False)   # E-12
         self._machines_table.setHorizontalHeaderLabels(["Adres IP", "Nazwa", "Opis", "Akcje"])
         self._machines_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._machines_table.verticalHeader().setVisible(False)
@@ -605,6 +608,7 @@ class DetailPanel(QWidget):
         db_layout.setSpacing(6)
 
         self._db_table = _DraggableTable(0, 6)
+        self._db_table.setTabKeyNavigation(False)         # E-12
         self._db_table.setHorizontalHeaderLabels(
             ["Host", "Port", "Nazwa bazy", "Typ", "Notatka", "Akcje"]
         )
@@ -682,6 +686,10 @@ class DetailPanel(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # The hospital's name matters more than the counts: on a narrow
+        # panel the badge goes and the name keeps its room (V-03).
+        if hasattr(self, '_stats_badge'):
+            self._stats_badge.setVisible(self.width() >= 760)
 
     def cleanup(self):
         """Stop timers and workers — call before discarding this panel."""
@@ -768,11 +776,20 @@ class DetailPanel(QWidget):
         item.setBackground(QBrush(pressed_bg))
         item.setFont(pressed_font)
 
-        QTimer.singleShot(70, lambda: item.setBackground(QBrush(half_bg)))
+        def _half():
+            try:
+                item.setBackground(QBrush(half_bg))
+            except RuntimeError:
+                pass        # the table was refreshed meanwhile (E-24)
+
+        QTimer.singleShot(70, _half)
 
         def _restore():
-            item.setBackground(QBrush(orig_bg))
-            item.setFont(base_font)
+            try:
+                item.setBackground(QBrush(orig_bg))
+                item.setFont(base_font)
+            except RuntimeError:
+                pass
 
         QTimer.singleShot(140, _restore)
 

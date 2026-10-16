@@ -28,7 +28,7 @@ from vpn.panel_bridge import (
 from ui.vpn_v2_connect import V2ConnectController
 from ui.dialogs import _clipboard_copy
 from ui.thread_retire import retire_thread
-from ui.utils import plural
+from ui.utils import ElidedLabel, plural
 
 # ------------------------------------------------------------------ #
 # 2FA dialog                                                           #
@@ -570,8 +570,10 @@ class VpnPanel(QWidget):
     def _resize_window(self, w: int, h: int):
         win = self.window()
         if win and win is not self:
-            win.resize(w, h)
+            # Minimum first: set after resize(), the previous page's minimum
+            # clipped the new size and its height stuck (UX audit V-19).
             win.setMinimumSize(w - 60, h - 60)
+            win.resize(w, h)
 
     # ------------------------------------------------------------------ #
     # UI setup                                                             #
@@ -643,6 +645,8 @@ class VpnPanel(QWidget):
         # Scrollable card area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        # Cards fit the width; names end in "…" (V-02).
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(
             "QScrollArea { border: none; background: #0d1117; }"
             "QScrollBar:vertical { background: #0d1117; width: 6px; }"
@@ -962,17 +966,19 @@ class VpnPanel(QWidget):
         info = QVBoxLayout()
         info.setSpacing(1)
 
-        name_lbl = QLabel(p.name or "(bez nazwy)")
+        # Elided, so a long name never pushes Connect/Login/Password out of
+        # the 420 px window (UX audit V-02).
+        name_lbl = ElidedLabel(p.name or "(bez nazwy)")
         name_lbl.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: bold; border: none;")
         info.addWidget(name_lbl)
 
         if p.profile_name:
             det_text = f"{p.provider}  ·  {p.profile_name}"
-            det_lbl = QLabel(det_text)
+            det_lbl = ElidedLabel(det_text)
             det_lbl.setStyleSheet("color: #58a6ff; font-size: 10px; border: none;")
         else:
             details = f"{p.provider}  ·  {p.server}" + (f":{p.port}" if p.port else "")
-            det_lbl = QLabel(details)
+            det_lbl = ElidedLabel(details)
             det_lbl.setStyleSheet("color: #8b949e; font-size: 10px; border: none;")
         info.addWidget(det_lbl)
 
