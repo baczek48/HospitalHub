@@ -24,7 +24,7 @@
 | Log VPN (`vpn_debug.log`) | katalog projektu/exe V1 | katalog projektu/exe V2 | `vpn_connect.py` (bez zmian — ścieżka wynika z lokalizacji) |
 | Plik `.exe` | `HospitalHub.exe` | `HospitalHubV2.exe` | `HospitalHubV2.spec` |
 | Katalog build/dist | `dist\HospitalHub\` | `dist\HospitalHubV2\` | `HospitalHubV2.spec` |
-| Instalator | `HospitalHub-Setup-1.5.3.exe`, AppId `A7F3C4D2-…` | `HospitalHubV2-Setup-2.0.0.exe`, AppId `9C95F6FD-…` | `HospitalHubV2.iss` |
+| Instalator | `HospitalHub-Setup-1.5.3.exe`, AppId `A7F3C4D2-…` | `HospitalHub-Setup-2.0.0.exe`, AppId jak V1 (`A7F3C4D2-…`) — od 2026-10-16 zastępuje 1.x i dawną „HospitalHub V2” (`9C95F6FD-…`, odinstalowywana) | `HospitalHubV2.iss` |
 | Katalog instalacji | `C:\Program Files\HospitalHub` | `C:\Program Files\HospitalHubV2` | `HospitalHubV2.iss` |
 | Grupa w menu Start | „HospitalHub” | „HospitalHub V2” | `HospitalHubV2.iss` |
 
@@ -79,7 +79,7 @@ Skrypt:
 1. uruchamia `py -3.13 -m PyInstaller --noconfirm HospitalHubV2.spec`
    → `dist\HospitalHubV2\HospitalHubV2.exe` (tryb onedir, ikona `icon.ico`),
 2. jeśli znajdzie Inno Setup 6, kompiluje `HospitalHubV2.iss`
-   → `dist_installer\HospitalHubV2-Setup-2.0.0.exe`.
+   → `dist_installer\HospitalHub-Setup-2.0.0.exe`.
 
 Ręcznie, gdyby trzeba było po kroku:
 ```bat

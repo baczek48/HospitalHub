@@ -618,3 +618,21 @@ i pomiaru G1b (ta sama sonda, użytkownik wykonuje dokładnie sekwencję klawisz
   do „wskaż vault”. Ścieżka vaulta VPN zapamiętywana jako osobisty VPN vault.
 - Logika połączenia (connect/disconnect/2FA) bez zmian.
 - **1921 PASS / 0 FAIL**; mutacja (bez `share_vpn_window`) → 4 FAIL. Build + instalator.
+
+### 2026-10-16 (noc) — instalator zastępuje poprzednie wersje, w Windows jako „HospitalHub”
+
+- Prośba właściciela: „instalacja niech nadpisuje poprzednie wersje hospital hub, nie ma to być
+  jako hospital hub v2 na windowsie”. `HospitalHubV2.iss`: AppId = AppId 1.x (aktualizacja
+  1.5.3 → 2.0.0 w miejscu, `Program Files\HospitalHub`, skróty „HospitalHub”), nazwa
+  „HospitalHub”, program instalowany jako `HospitalHub.exe` (DestName; spec bez zmian),
+  `[InstallDelete]` czyści `_internal` 1.x. `PrepareToInstall`: dawna osobna instalacja
+  „HospitalHub V2” (AppId 9C95F6FD) odinstalowywana po cichu (czekanie aż zniknie wpis);
+  instalator odmawia, gdy HospitalHub.exe / HospitalHubV2.exe działa (nie zabija — vaulty).
+  Plik: `dist_installer\HospitalHub-Setup-2.0.0.exe`.
+- Wewnętrzne identyfikatory bez zmian: `%APPDATA%\HospitalHubV2` (ustawienia zostają), kanał
+  IPC, katalogi tymczasowe, certyfikat RDP.
+- Test per-user na podmienionych AppId (fałszywa „V2” + fałszywa „1.x” + nowa na wierzch):
+  stara V2 odinstalowana (wpis i katalog), wpis „HospitalHub” 2.0.0, `HospitalHub.exe`,
+  `HospitalHubV2.exe` i znacznik w starym `_internal` usunięte; przemianowany exe startuje
+  (proces/okno „HospitalHub”); deinstalacja testowej czysta. Instalacja admin na prawdziwych
+  wpisach — u użytkownika (UAC).

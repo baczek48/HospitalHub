@@ -37,7 +37,7 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | EMS / CLI 2FA (FortiClient płatny) | contract-only | nie (brak maszyny) | `cli-monitor-not-owned-by-panel` — blokada dla szpitali z EMS |
 | UI/UX redesign (PHASE F) | **nie rozpoczęty** | — | wymaga decyzji produktowych (patrz niżej) |
 | Build PyInstaller | gotowy (exe 2026-10-15 20:05, po wszystkich zmianach) | smoke startu z instalacji (offscreen, 12 s, izolowane katalogi) | MSAA/UIA w zamrożonym procesie niezweryfikowane |
-| Instalator Inno Setup | gotowy (`dist_installer\HospitalHubV2-Setup-2.0.0.exe`, ISCC 6.7.1) | per-user: instalacja, start, aktualizacja 2.0.0→2.0.1, deinstalacja PASS 2026-10-15 | instalacja admin (UAC) — G6 u użytkownika |
+| Instalator Inno Setup | gotowy (`dist_installer\HospitalHub-Setup-2.0.0.exe`, ISCC 6.7.1) | per-user: instalacja, start, aktualizacja 2.0.0→2.0.1, deinstalacja PASS 2026-10-15 | instalacja admin (UAC) — G6 u użytkownika |
 
 ## Bramki wymagające użytkownika
 

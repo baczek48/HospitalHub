@@ -56,7 +56,7 @@ instalator 2026-10-16 (po przeglądzie). Czeka na użytkownika: ręczna weryfika
 | **G1** | stany MSAA — **pomiar wykonany 2026-10-15**, pytania 5–6 rozstrzygnięte 2026-10-16 (Escape zatwierdza podświetlenie; okno zamknięte ręcznie) | **G1b** — sonda + sekwencja klawiszy V2 wykonana ręcznie (instrukcja: `EXECUTION_LOG.md`, wpis 2026-10-16 G1) |
 | **G2** | live connect FortiClient V2 | po G1 — osobna, wyraźna zgoda |
 | **G3/G4** | live connect Stormshield / Barracuda V2 | po akceptacji G2 |
-| **G6** | instalacja **admin** do Program Files | wymaga kliknięcia UAC — uruchomić `dist_installer\HospitalHubV2-Setup-2.0.0.exe`, potem odinstalować; per-user zrobione automatycznie |
+| **G6** | instalacja **admin** do Program Files | wymaga kliknięcia UAC — uruchomić `dist_installer\HospitalHub-Setup-2.0.0.exe`, potem odinstalować; per-user zrobione automatycznie |
 | **G10** (nowa) | włączenie bezpiecznej podmiany SFTP (`SFTP_SAFE_REPLACE_ENABLED`) | test bezpieczeństwa i zgodności zapisu SFTP — **wykonany 2026-10-15 na plikach XML (fake + prawdziwy protokół SFTP w procesie)**; flaga nadal `False`, decyzja o włączeniu u użytkownika — `RELEASE_READINESS_V2.md` §G10 |
 
 ## Jak wznowić (dla następnej sesji)

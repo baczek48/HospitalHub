@@ -5,7 +5,7 @@ REM
 REM  Buduje WYLACZNIE projekt z tego katalogu. Nie dotyka C:\claude\hospital_hub.
 REM  Wynik:
 REM     dist\HospitalHubV2\HospitalHubV2.exe
-REM     dist_installer\HospitalHubV2-Setup-2.0.0.exe   (jesli jest Inno Setup)
+REM     dist_installer\HospitalHub-Setup-2.0.0.exe   (jesli jest Inno Setup)
 REM ---------------------------------------------------------------------------
 setlocal
 cd /d "%~dp0"
@@ -45,7 +45,7 @@ if exist "%ISCC%" (
         echo BLAD: ISCC zwrocil blad.
         exit /b 1
     )
-    echo OK: dist_installer\HospitalHubV2-Setup-2.0.0.exe
+    echo OK: dist_installer\HospitalHub-Setup-2.0.0.exe
 ) else (
     echo.
     echo Inno Setup nie znaleziony - pominieto budowanie instalatora.
