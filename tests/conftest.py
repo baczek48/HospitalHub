@@ -111,6 +111,8 @@ MODULE_PRIMITIVES = {
                        "SetClipboardData", "GetClipboardData"),
     "win32process": ("CreateProcess",),
     "comtypes.client": ("CreateObject", "GetModule"),
+    # Shell.Application: the desktop shell starts the VPN client (2026-10-19).
+    "win32com.client": ("Dispatch", "DispatchEx"),
 }
 
 # -- ctypes: functions resolved from these DLLs ----------------------------- #

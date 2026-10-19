@@ -93,6 +93,13 @@ SOURCE_KNOWN_PATHS = "known_paths"
 STRATEGY_POPEN_CLEAN_ENV = "popen_clean_env"
 POPEN_WAIT_S = 3.0
 
+#: 2026-10-19, measured on the real client: a first start goes to the tray
+#: with no window; starting the executable again while it runs makes the
+#: running instance show its window, in front.  How long to wait for a window
+#: after a start, and how many extra starts to try.
+WINDOW_WAIT_S = 4.0
+RESHOW_ATTEMPTS = 2
+
 
 @dataclass(frozen=True)
 class _Findings:
@@ -236,17 +243,16 @@ class StormshieldProvider(VpnProvider):
     # -- autofill ---------------------------------------------------------- #
 
     def autofill_login_password(self, request, *, target=None,
-                                input_system=None, trace=None):
-        """Fill the client's form (Stage 41).  Prepared, not wired to production.
-
-        Every keystroke goes through the Stage-13 guard, and the sequence stops
-        before the submit: Stormshield's own client does not press Enter here
-        and neither does this.  The result says so via requires_user_action
-        rather than pretending something failed.
+                                input_system=None, trace=None, uia=None,
+                                cancellation=None):
+        """Fill the client's form (Stage 41; fields by AutomationId since
+        2026-10-19).  Every step goes through the guard, and the sequence stops
+        before the submit, as the legacy does.
         """
         from .stormshield_autofill import autofill_login_password
         return autofill_login_password(self, request, target=target,
-                                       input_system=input_system, trace=trace)
+                                       input_system=input_system, trace=trace,
+                                       uia=uia, cancellation=cancellation)
 
     # -- launch ------------------------------------------------------------ #
 
@@ -295,7 +301,34 @@ class StormshieldProvider(VpnProvider):
             STRATEGY_POPEN_CLEAN_ENV, started=started, process_started=True,
             pid=pid, observation_failed=observation_failed,
             error_code=None if started else ErrorCode.LAUNCH_NO_PROCESS.value))
+        if started:
+            self._show_from_tray(gui, cwd)
         return self._result(True, attempts)
+
+    def _show_from_tray(self, gui: str, cwd: str) -> None:
+        """Start the client again while no window of it is on screen.
+
+        The running instance answers a second start by showing its window
+        (measured 2026-10-19); that replaces the tray click the legacy posts.
+        Only with a launch system that can wait for a window — the fakes in
+        the test suite cannot, and then nothing extra happens.
+        """
+        wait_until = getattr(self._system, "wait_until", None)
+        if wait_until is None:
+            return
+
+        def shown() -> bool:
+            return self.secure_window_target().first_verified_candidate() is not None
+
+        if wait_until(shown, WINDOW_WAIT_S):
+            return
+        for _ in range(RESHOW_ATTEMPTS):
+            try:
+                self._system.spawn_detached(gui, cwd)
+            except Exception:
+                return
+            if wait_until(shown, WINDOW_WAIT_S):
+                return
 
     def _result(self, success: bool, attempts: list[LaunchAttempt],
                 error_code: ErrorCode | None = None,

@@ -222,7 +222,9 @@ def test_b1_the_measured_format_matches_its_ssl_tunnel():
 
 
 def test_b2_only_measured_labels_are_known():
-    assert fp.GROUP_LABELS == {"Personal VPNs": fp.TUNNEL_KIND_SSL}
+    # 2026-10-19: the same label heads IPsec tunnels too (measured live).
+    assert fp.GROUP_LABELS == {"Personal VPNs": (fp.TUNNEL_KIND_SSL,
+                                                 fp.TUNNEL_KIND_IPSEC)}
 
 
 @pytest.mark.parametrize("shown", [
@@ -240,8 +242,8 @@ def test_b3_an_unknown_label_or_format_is_refused(shown):
 
 
 def test_b4_two_labels_that_both_parse_are_ambiguous(monkeypatch):
-    monkeypatch.setattr(fp, "GROUP_LABELS", {"Personal VPNs": fp.TUNNEL_KIND_SSL,
-                                             "Personal": fp.TUNNEL_KIND_IPSEC})
+    monkeypatch.setattr(fp, "GROUP_LABELS", {"Personal VPNs": (fp.TUNNEL_KIND_SSL,),
+                                             "Personal": (fp.TUNNEL_KIND_IPSEC,)})
     m = fp.match_profile(SHOWN, PROFILE, catalog())
     assert not m.matched and m.reason == fp.REASON_AMBIGUOUS_GROUP
 
@@ -291,9 +293,16 @@ def test_b10_a_name_that_is_not_a_configured_tunnel_is_refused(shown):
     assert not m.matched and m.reason == fp.REASON_TUNNEL_NOT_CONFIGURED
 
 
-def test_b11_an_ipsec_tunnel_under_the_ssl_label_is_refused():
-    """The label was measured over SSL tunnels only."""
+def test_b11_an_ipsec_tunnel_under_the_label_matches():
+    """Measured 2026-10-19: "Personal VPNs ALFA IPsec", ALFA IPsec under
+    IPSec\Tunnels — the owner's IPsec profile was refused before."""
     m = fp.match_profile("Personal VPNs ALFA IPsec", "ALFA IPsec", catalog())
+    assert m.matched and m.tunnel_kind == fp.TUNNEL_KIND_IPSEC
+    assert fp.requested_profile_selectable("ALFA IPsec", catalog()).matched
+
+
+def test_b11b_an_ipsec_name_not_in_the_registry_is_refused():
+    m = fp.match_profile("Personal VPNs ALFA IPsec", "ALFA IPsec", catalog(ipsec=()))
     assert not m.matched and m.reason == fp.REASON_TUNNEL_NOT_CONFIGURED
 
 
@@ -384,17 +393,37 @@ _ACTING = {"press_key", "press_combo", "type_text", "copy_to_clipboard",
 
 @pytest.mark.parametrize("module", [fp, ms])
 def test_d3_neither_module_can_act_on_a_window(module):
-    tree = ast.parse(open(module.__file__, encoding="utf-8").read())
+    """2026-10-19: the MSAA seam may move the keyboard focus to a named
+    element (``accSelect`` with TAKEFOCUS, in ``focus_element`` only) — the
+    fill reaches FortiClient's fields by name instead of counting Tabs.
+    Nothing else that acts."""
+    with open(module.__file__, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
     names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    assert not (names & _ACTING), names & _ACTING
+    allowed = {"accSelect"} if module is ms else set()
+    assert not (names & _ACTING) - allowed, names & _ACTING
+    if module is ms:
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "focus_element")
+        inside = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+        everywhere = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                      and n.attr == "accSelect"}
+        assert "accSelect" in inside and everywhere == {"accSelect"}
 
 
-def test_d4_the_real_seam_asks_acc_value_only_of_a_combo_box():
-    src = open(ms.__file__, encoding="utf-8").read()
+def test_d4_the_real_seam_asks_acc_value_only_where_it_must():
+    """Of a combo box in the scan, and in ``field_value`` (2026-10-19: the
+    fill confirms a paste by it — FortiClient shows the password as a mask)."""
+    with open(ms.__file__, encoding="utf-8") as f:
+        src = f.read()
     body = src[src.index("class Win32MsaaSystem"):]
-    assert body.count("accValue(") == 1
-    assert body.index("if role == ROLE_SYSTEM_COMBOBOX:") < body.index("accValue(")
+    assert body.count("accValue(") == 2
+    scan = body[:body.index("    def _named(")]
+    assert scan.count("accValue(") == 1
+    assert scan.index("if role == ROLE_SYSTEM_COMBOBOX:") < scan.index("accValue(")
+    field = body[body.index("    def field_value("):]
+    assert field.count("accValue(") == 1
 
 
 @pytest.mark.real_system_guard

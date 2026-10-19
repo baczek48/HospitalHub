@@ -25,12 +25,12 @@ Two halves, both fail-closed:
 ``accValue`` is not the profile name: on 7.4.3 it reads ``"Personal VPNs
 <name>"`` — the list's group label, a space, the tunnel name.  The label is
 recognised only from :data:`GROUP_LABELS`, which lists what has been
-*measured*, and each label says which kind of tunnel it heads.  The rest of
+*measured*, and each label says which kinds of tunnel it heads.  The rest of
 the value must then equal, character for character, the name of a tunnel of
-that kind configured in the registry, and the requested profile.  No prefix,
-no substring, no case folding, no trimming: anything else is a refusal.
-IPsec and EMS-managed profiles are not assumed to look the same — their
-labels have not been measured, so a value under them is an unknown format.
+one of those kinds configured in the registry, and the requested profile.  No
+prefix, no substring, no case folding, no trimming: anything else is a
+refusal.  EMS-managed profiles are not assumed to look the same — their label
+has not been measured, so a value under it is an unknown format.
 """
 
 from __future__ import annotations
@@ -59,15 +59,20 @@ TUNNEL_KIND_IPSEC = "ipsec"
 SSL_TUNNELS_KEY = r"SOFTWARE\Fortinet\FortiClient\Sslvpn\Tunnels"
 IPSEC_TUNNELS_KEY = r"SOFTWARE\Fortinet\FortiClient\IPSec\Tunnels"
 
-#: Group labels that have been seen in ``accValue``, and the kind of tunnel
+#: Group labels that have been seen in ``accValue``, and the kinds of tunnel
 #: each one heads.  Only measured entries belong here — adding one is a
 #: decision with a live reading behind it, not a convenience.
 #:
 #: * ``Personal VPNs`` → SSL-VPN: FortiClient VPN 7.4.3.4726 (Free), Stage 61,
 #:   ``accValue == "Personal VPNs <name>"`` with ``<name>`` a key under
 #:   ``Sslvpn\Tunnels``.
-GROUP_LABELS: dict[str, str] = {
-    "Personal VPNs": TUNNEL_KIND_SSL,
+#: * ``Personal VPNs`` → IPsec too: the same client, 2026-10-19 — the opened
+#:   list read ``"Personal VPNs ALFA IPsec"``, ``"Personal VPNs 1SZP"``,
+#:   ``"Personal VPNs Betanin"`` with ``ALFA IPsec`` a key under
+#:   ``IPSec\Tunnels`` (the owner's IPsec profile had been refused as an
+#:   unknown format).
+GROUP_LABELS: dict[str, tuple[str, ...]] = {
+    "Personal VPNs": (TUNNEL_KIND_SSL, TUNNEL_KIND_IPSEC),
 }
 
 # Reason codes.  Codes only — never the value, never the profile name.
@@ -235,17 +240,18 @@ def match_profile(displayed: str | None, requested: str | None,
     if len(parsed) > 1:
         return ProfileMatch(False, REASON_AMBIGUOUS_GROUP)
     label, name = parsed[0]
-    kind = GROUP_LABELS[label]
+    kinds = GROUP_LABELS[label]
     if not name.strip():
-        return ProfileMatch(False, REASON_EMPTY_NAME, group_label=label, tunnel_kind=kind)
+        return ProfileMatch(False, REASON_EMPTY_NAME, group_label=label)
 
-    if name not in catalog.of_kind(kind):
-        return ProfileMatch(False, REASON_TUNNEL_NOT_CONFIGURED,
-                            group_label=label, tunnel_kind=kind)
-    # The label was measured over one kind only.  A name configured under
-    # another kind as well could be either; refusing costs nothing.
+    hits = [k for k in kinds if name in catalog.of_kind(k)]
+    if not hits:
+        return ProfileMatch(False, REASON_TUNNEL_NOT_CONFIGURED, group_label=label)
+    # A name configured as two kinds (or as a kind this label does not head)
+    # could be either tunnel; refusing costs nothing.
     others = [k for k in (TUNNEL_KIND_SSL, TUNNEL_KIND_IPSEC)
-              if k != kind and name in catalog.of_kind(k)]
+              if k != hits[0] and name in catalog.of_kind(k)]
+    kind = hits[0]
     if others:
         return ProfileMatch(False, REASON_AMBIGUOUS_TUNNEL,
                             group_label=label, tunnel_kind=kind)
@@ -284,7 +290,7 @@ def requested_profile_selectable(requested: str | None,
         return ProfileMatch(False, REASON_REQUEST_NOT_CONFIGURED)
     if len(kinds) > 1:
         return ProfileMatch(False, REASON_AMBIGUOUS_TUNNEL)
-    labels = [label for label, kind in GROUP_LABELS.items() if kind == kinds[0]]
+    labels = [label for label, heads in GROUP_LABELS.items() if kinds[0] in heads]
     if len(labels) != 1:
         # A kind whose label has not been measured can never be confirmed.
         return ProfileMatch(False, REASON_UNKNOWN_GROUP, tunnel_kind=kinds[0])
@@ -302,7 +308,7 @@ def sole_tunnel(catalog: TunnelCatalog) -> str | None:
     every = catalog.ssl + catalog.ipsec
     if len(every) != 1:
         return None
-    measured = set(GROUP_LABELS.values())
+    measured = {kind for heads in GROUP_LABELS.values() for kind in heads}
     for kind in (TUNNEL_KIND_SSL, TUNNEL_KIND_IPSEC):
         if every[0] in catalog.of_kind(kind):
             return every[0] if kind in measured else None

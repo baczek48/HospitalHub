@@ -53,8 +53,8 @@ from tests.test_vpn_secure_target import (  # noqa: E402
     HWND, OTHER, TRUSTED, ListFinder,
 )
 
-AWAIT_MESSAGE = ("FortiClient został uruchomiony. Przełącz się do okna "
-                 "FortiClient, aby kontynuować.")
+AWAIT_MESSAGE = ("Okno FortiClient jest otwarte, ale nieaktywne — kliknij je, "
+                 "aby wpisać dane.")
 
 
 @pytest.fixture(scope="module")

@@ -102,6 +102,16 @@ class Recording:
         self.calls.append("activation_still_holds")
         return self._still
 
+    def autofill(self, request):
+        """2026-10-19: the flows fill the verified window after activation."""
+        from vpn.types import AutofillResult, AutofillStatus
+        self.calls.append("autofill")
+        return AutofillResult(
+            provider_id=request.provider_id, success=True,
+            status=AutofillStatus.DONE, login_entered=bool(request.login),
+            password_entered=bool(request.password),
+            metadata={"submitted": False, "filled_only": True})
+
 
 def request(provider_id):
     return VpnRequest(provider_id=provider_id, profile_name="SZP",
@@ -158,9 +168,10 @@ def test_b_connect_runs_the_providers_own_flow(pid, cls, flow_cls, runtime_cls,
     result = cls().connect(request(pid), system=system)
 
     assert system.calls == ["detect", "launch", "find_main_window",
-                            "await_activation", "activation_still_holds"]
+                            "await_activation", "activation_still_holds",
+                            "autofill"]
     assert result.provider_id == pid
-    assert result.requires_user_action is True
+    assert result.requires_user_action is True      # filled, not submitted
 
 
 @pytest.mark.parametrize("pid,cls,flow_cls,runtime_cls,system_cls", NEW)
@@ -225,17 +236,19 @@ def test_c3_runtime_signature_matches_barracudas(pid, cls, flow_cls, runtime_cls
 
 
 @pytest.mark.parametrize("pid,cls,flow_cls,runtime_cls,system_cls", NEW)
-def test_c4_runtime_cannot_type(pid, cls, flow_cls, runtime_cls, system_cls):
-    """No autofill, no keystroke, no clipboard — the flows stop before typing.
-
-    A method that could type would be reachable from an armed connect, so its
-    absence is the guarantee, not a convention.
-    """
+def test_c4_runtime_types_only_through_the_guarded_autofill(
+        pid, cls, flow_cls, runtime_cls, system_cls):
+    """2026-10-19: the flows fill the client.  The runtime's one way to do it is
+    ``autofill``, which hands the request to the provider's guarded
+    ``autofill_login_password`` — no keystroke, click or clipboard of its own."""
     forbidden = ("autofill", "type", "send", "press", "click", "clipboard",
                  "paste", "key")
     names = [n for n in dir(runtime_cls) if not n.startswith("__")]
-    assert not [n for n in names
-                if any(word in n.lower() for word in forbidden)], names
+    assert [n for n in names
+            if any(word in n.lower() for word in forbidden)] == ["autofill"], names
+    import inspect
+    source = inspect.getsource(runtime_cls.autofill)
+    assert "autofill_login_password" in source
 
 
 @pytest.mark.parametrize("pid,cls,flow_cls,runtime_cls,system_cls", NEW)
@@ -292,8 +305,9 @@ def test_d2_a_session_runs_the_flow_of_the_provider_it_names(monkeypatch):
                                       runtime_factory=lambda **kw: system)
         outcome = session.run()
         assert system.calls[0] == "detect", pid
-        assert len(system.calls) == 5, pid
-        assert outcome.code in (PanelOutcome.MANUAL, PanelOutcome.STARTED), pid
+        assert system.calls[-1] == "autofill", pid
+        assert outcome.code is PanelOutcome.FILLED, pid
+        assert outcome.started is True, pid
 
 
 # ══════════════════════════════════════════════════════════════════════════

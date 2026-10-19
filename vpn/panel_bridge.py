@@ -236,6 +236,9 @@ class PanelOutcome(StrEnum):
 
     #: Login and password entered and the form submitted.
     SUBMITTED = "submitted"
+    #: Fields filled; the person clicks the client's own Log in / Connect
+    #: (Stormshield, or a profile with a second factor).  2026-10-19.
+    FILLED = "filled"
     #: Credentials entered; the second factor is still the user's move.
     TWO_FACTOR_REQUIRED = "two-factor-required"
     #: FortiVPN CLI / the legacy SSL-VPN client was started.
@@ -263,7 +266,8 @@ class PanelOutcome(StrEnum):
 
 #: Outcomes after which the client really is on its way to a tunnel — the
 #: card flips to "connecting", exactly as it does after a legacy ``ok``.
-STARTED_OUTCOMES = frozenset({PanelOutcome.SUBMITTED, PanelOutcome.CLI_STARTED,
+STARTED_OUTCOMES = frozenset({PanelOutcome.SUBMITTED, PanelOutcome.FILLED,
+                              PanelOutcome.CLI_STARTED,
                               PanelOutcome.MANUAL, PanelOutcome.STARTED,
                               PanelOutcome.TWO_FACTOR_REQUIRED})
 
@@ -397,6 +401,8 @@ def _classify(result, activation) -> PanelOutcome:
     if (two_factor is not None and two_factor.status in _TWO_FACTOR_USER_MOVE
             and not _left_to_the_stdout_monitor(result, two_factor)):
         return PanelOutcome.TWO_FACTOR_REQUIRED
+    if autofill is not None and (autofill.metadata or {}).get("filled_only"):
+        return PanelOutcome.FILLED
     if autofill is not None:
         return PanelOutcome.SUBMITTED
     if result.route in _CLI_ROUTES:

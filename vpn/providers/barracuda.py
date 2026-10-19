@@ -254,18 +254,16 @@ class BarracudaProvider(VpnProvider):
     # -- autofill ---------------------------------------------------------- #
 
     def autofill_login_password(self, request, *, target=None, uia=None,
-                                cancellation=None, trace=None):
-        """Fill User Name + User Password by AutomationId (Stage 50C).
-
-        Prepared, not wired to production — the running application still fills
-        Barracuda through the legacy module, and ``CONNECT_ENABLED`` stays
-        ``False``.  Every value goes through the secure-window guard *and* the
-        UI Automation seam's owner check; the sequence stops before Connect and
-        never presses Enter.  The OTP/certificate fields are not touched.
+                                cancellation=None, trace=None, input_system=None):
+        """Fill User Name + User Password, each focused by AutomationId, then
+        Enter in the password (as the legacy) unless the profile has a second
+        factor.  Every step goes through the secure-window guard *and* the UI
+        Automation seam's owner check.  OTP/certificate fields are not touched.
         """
         from .barracuda_autofill import autofill_login_password
         return autofill_login_password(self, request, target=target, uia=uia,
-                                       cancellation=cancellation, trace=trace)
+                                       cancellation=cancellation, trace=trace,
+                                       input_system=input_system)
 
     # -- launch ------------------------------------------------------------ #
 

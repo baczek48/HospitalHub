@@ -32,12 +32,12 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QLabel, QWidget
 
 from .activation_prompt import (
-    STATE_COLOURS, STATE_MESSAGES, ActivationPrompt, ActivationWorker,
-    label_style_sheet,
+    DEFAULT_CLIENT, STATE_COLOURS, STATE_TEMPLATES, ActivationPrompt,
+    ActivationWorker, label_style_sheet,
 )
 
 __all__ = ["CardUpdate", "OUTCOME_PRESENTATION", "V2ConnectController",
-           "present_outcome", "POLL_AFTER_START_MS"]
+           "OUTCOME_TEMPLATES", "present_outcome", "POLL_AFTER_START_MS"]
 
 #: The panel's own palette, with the panel's own meanings (see
 #: ``VpnPanel._connect_card`` and ``_apply_status_results``).
@@ -55,33 +55,42 @@ CARD_CONNECTING = "connecting"
 
 #: Outcome code → (sentence, colour, card state or None to leave the card).
 #: Sentences reuse the legacy module's wording where the situation is the same.
-OUTCOME_PRESENTATION: dict[str, tuple[str, str, str | None]] = {
-    "submitted": ("Łączenie przez FortiClient...", COLOUR_OK, CARD_CONNECTING),
+#: Sentences name the client through ``{client}`` (2026-10-19: they all said
+#: "FortiClient", whichever provider was connecting).
+OUTCOME_TEMPLATES: dict[str, tuple[str, str, str | None]] = {
+    "submitted": ("Łączenie przez {client}...", COLOUR_OK, CARD_CONNECTING),
+    "filled": ("Dane wpisane — kliknij „Log in” / „Connect” w {client}.",
+               COLOUR_OK, CARD_CONNECTING),
     "two-factor-required": (
-        "Dane wpisane — dokończ weryfikację dwuetapową w FortiClient.",
+        "Dane wpisane — dokończ weryfikację dwuetapową w {client}.",
         COLOUR_PROGRESS, CARD_CONNECTING),
-    "cli-started": ("Łączenie przez FortiClient...", COLOUR_OK, CARD_CONNECTING),
-    "manual": ("FortiClient — hasło w schowku.", COLOUR_OK, CARD_CONNECTING),
-    "started": ("Łączenie przez FortiClient...", COLOUR_OK, CARD_CONNECTING),
-    "activation-timeout": (STATE_MESSAGES["activation-timeout"],
+    "cli-started": ("Łączenie przez {client}...", COLOUR_OK, CARD_CONNECTING),
+    "manual": ("{client} — hasło w schowku.", COLOUR_OK, CARD_CONNECTING),
+    "started": ("Łączenie przez {client}...", COLOUR_OK, CARD_CONNECTING),
+    "activation-timeout": (STATE_TEMPLATES["activation-timeout"],
                            STATE_COLOURS["activation-timeout"], None),
-    "no-target": (STATE_MESSAGES["no-target"], STATE_COLOURS["no-target"], None),
-    "target-changed": (STATE_MESSAGES["target-changed"],
+    "no-target": (STATE_TEMPLATES["no-target"], STATE_COLOURS["no-target"], None),
+    "target-changed": (STATE_TEMPLATES["target-changed"],
                        STATE_COLOURS["target-changed"], None),
-    "cancelled": (STATE_MESSAGES["cancelled"], STATE_COLOURS["cancelled"], None),
+    "cancelled": (STATE_TEMPLATES["cancelled"], STATE_COLOURS["cancelled"], None),
     "focus-lost": (
-        "Okno FortiClienta przestało być aktywne — nic nie zostało wpisane. "
+        "Okno {client} przestało być aktywne — nic nie zostało wpisane. "
         "Wpisz dane ręcznie albo spróbuj ponownie.", COLOUR_ERROR, None),
     "autofill-blocked": (
         "Wypełnianie przerwane dla bezpieczeństwa. Dokończ logowanie ręcznie "
-        "w FortiClient.", COLOUR_ERROR, None),
-    "client-not-found": ("Nie znaleziono FortiClient.\nUruchom klienta VPN ręcznie.",
+        "w {client}.", COLOUR_ERROR, None),
+    "client-not-found": ("Nie znaleziono {client}.\nUruchom klienta VPN ręcznie.",
                          COLOUR_ERROR, None),
-    "unsupported": ("Nowe łączenie FortiClient jest wyłączone.", COLOUR_IDLE, None),
+    "unsupported": ("Nowe łączenie {client} jest wyłączone.", COLOUR_IDLE, None),
     "busy": ("Trwa inne łączenie VPN — dokończ je albo anuluj, potem spróbuj ponownie.",
              COLOUR_IDLE, None),
-    "failed": ("Nie udało się połączyć z FortiClient.", COLOUR_ERROR, None),
+    "failed": ("Nie udało się połączyć z {client}.", COLOUR_ERROR, None),
 }
+
+#: The same, as FortiClient reads it.
+OUTCOME_PRESENTATION: dict[str, tuple[str, str, str | None]] = {
+    code: (text.format(client=DEFAULT_CLIENT), colour, state)
+    for code, (text, colour, state) in OUTCOME_TEMPLATES.items()}
 
 #: Fail-safe for a code this version does not know: unsuccessful, card untouched.
 UNKNOWN_OUTCOME = OUTCOME_PRESENTATION["failed"]
@@ -135,8 +144,10 @@ class CardUpdate:
         return label_style_sheet(self.colour)
 
 
-def present_outcome(code, reason=None) -> CardUpdate:
-    text, colour, card_state = OUTCOME_PRESENTATION.get(str(code), UNKNOWN_OUTCOME)
+def present_outcome(code, reason=None, client: str | None = None) -> CardUpdate:
+    text, colour, card_state = OUTCOME_TEMPLATES.get(
+        str(code), OUTCOME_TEMPLATES["failed"])
+    text = text.format(client=client or DEFAULT_CLIENT)
     if str(code) == "autofill-blocked" and reason:
         reason = str(reason)
         if reason in BLOCKED_REASON_TEXT:
@@ -169,8 +180,11 @@ class V2ConnectController(QObject):
     polling_resume = pyqtSignal()
 
     def __init__(self, session, status_label: QLabel, *,
-                 prompt_parent: QWidget, parent: QObject | None = None):
+                 prompt_parent: QWidget, parent: QObject | None = None,
+                 client: str | None = None):
         super().__init__(parent)
+        #: The client named in every sentence the card shows.
+        self._client = client
         self._session = session
         self._label = status_label
         self._started = False
@@ -181,7 +195,7 @@ class V2ConnectController(QObject):
         # the held prompt leaves Cancel on screen, and a click reaches the same
         # token the fill checks before every keystroke.
         self.prompt = ActivationPrompt(prompt_parent, status_label=status_label,
-                                       hold_cancel=True)
+                                       hold_cancel=True, client=client)
         self.worker = ActivationWorker(session.run)
         session.observer = self.worker.report_state
         self.worker.state_changed.connect(self.prompt.apply_state)
@@ -228,10 +242,11 @@ class V2ConnectController(QObject):
 
     def _on_finished(self, outcome) -> None:
         self._finish(present_outcome(getattr(outcome, "code", ""),
-                                     getattr(outcome, "reason", None)), outcome)
+                                     getattr(outcome, "reason", None),
+                                     self._client), outcome)
 
     def _on_failed(self, _exception_type: str) -> None:
-        self._finish(present_outcome("failed"), None)
+        self._finish(present_outcome("failed", client=self._client), None)
 
     def _finish(self, update: CardUpdate, outcome) -> None:
         if self._done:

@@ -39,13 +39,14 @@ from tests.test_vpn_forticlient_detect import (  # noqa: E402
 )
 from tests.test_vpn_forticlient_launch import (  # noqa: E402,F401
     EXPL, EXPLORER, FAKE_SECRETS, POPEN, SPAWN64, W3, W4, FakeLaunchSystem,
-    legacy_semantics, machine, no_real_system, run_both, run_legacy, run_new,
+    legacy_machine_for, legacy_semantics, machine, no_real_system, run_both,
+    run_legacy, run_new,
 )
 
 
 def both(make, monkeypatch, app_path=""):
     """(legacy semantics, new semantics, legacy calls, new calls, raw legacy)."""
-    legacy_machine, new_machine = make(), make()
+    legacy_machine, new_machine = legacy_machine_for(make), make()
     raw = run_legacy(legacy_machine, app_path, monkeypatch)
     result = run_new(new_machine, app_path)
     from tests.test_vpn_forticlient_launch import new_semantics
@@ -199,21 +200,16 @@ def test_6c_new_trace_keys_survive_the_production_redactor(tmp_path, monkeypatch
 # C + D. Fallback semantics
 # ══════════════════════════════════════════════════════════════════════════
 
-def test_7_fallback_after_explorer_is_marked(monkeypatch):
+def test_7_no_explorer_stage_so_nothing_to_fall_back_from(monkeypatch):
     legacy, new, lcalls, ncalls, raw, result = both(machine(explorer="documents"),
                                                     monkeypatch)
     assert legacy == new
-    first, second = result.attempts
-    assert (first.strategy, first.started, first.fallback) == (EXPL, False, False)
-    assert first.error_code == "launch-no-process"
-    assert (second.strategy, second.fallback, second.fallback_from) == (POPEN, True, EXPL)
-    assert result.success and result.started and result.fallback
+    (only,) = result.attempts
+    assert (only.strategy, only.started, only.fallback) == (POPEN, True, False)
+    assert result.success and result.started and not result.fallback
     trace = result.to_trace_data()
-    assert trace["strategies"] == "explorer_lnk,popen_clean_env"
-    assert trace["fallback"] is True and trace["fallback_from"] == "explorer_lnk"
-    steps = launch_steps(raw)
-    assert [s.get("fallback", False) for s in steps] == [False, True]
-    assert steps[1]["fallback_from"] == "explorer_lnk"
+    assert trace["strategies"] == "popen_clean_env"
+    assert "fallback" not in trace
 
 
 @pytest.mark.parametrize("make", [machine(lnk=False), machine(),
@@ -304,17 +300,17 @@ def test_12_legacy_and_provider_share_the_corrected_contract(name, make, monkeyp
     assert new["success"] is True
 
 
-def test_12b_documents_bug_is_still_reproducible(monkeypatch):
-    """Explorer that opens a folder still costs a 4 s wait and a fallback."""
-    legacy, new, lcalls, ncalls, *_ = both(machine(explorer="documents"), monkeypatch)
-    assert lcalls[:2] == ncalls[:2] == [EXPLORER, W4]
-    assert new["attempts"][0][3] == "launch-no-process"
+def test_12b_documents_bug_cannot_happen_in_the_provider(monkeypatch):
+    """A hijacked .lnk association opened "Dokumenty"; the provider no longer
+    hands anything to explorer (2026-10-19)."""
+    *_, ncalls, _raw, _result = both(machine(explorer="documents"), monkeypatch)
+    assert EXPLORER not in ncalls and W4 not in ncalls
 
 
-def test_12c_probe_raising_after_explorer_is_still_unfixed(monkeypatch):
+def test_12c_probe_raising_after_explorer_is_not_reached(monkeypatch):
     make = machine(wait_raises=(4.0,))
     assert legacy_semantics(run_legacy(make(), "", monkeypatch)) == {"raised": "RuntimeError"}
-    assert run_new(make(), "").error_code == "launch-failed"
+    assert run_new(make(), "").success is True
 
 
 def test_production_legacy_imports_the_rule_not_the_new_architecture():

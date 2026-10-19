@@ -28,6 +28,7 @@ from .input_system import (
     Win32InputSystem,
 )
 from .secure_target import SecureWindowTarget, VerifiedWindow
+from .msaa_system import ROLE_SYSTEM_COMBOBOX, ROLE_SYSTEM_TEXT
 
 __all__ = ["autofill_login_password", "PHASES"]
 
@@ -258,18 +259,23 @@ def autofill_login_password(
             if not performed:
                 return _stop(pid, state, inp, tr, PHASE_NAVIGATION, reason)
 
-            # Where the caret ends up depends on how the window came forward —
-            # freshly shown from the tray, or clicked by the user to satisfy
-            # the activation gate.  Rather than assume, walk to the field.
-            found, reason = _locate_text_field(win, inp, guard, state)
-            if not found:
-                return _stop(pid, state, inp, tr, PHASE_LOCATE, reason)
+            # 2026-10-19: with MSAA's focus available the fields are reached
+            # by name (combo, Username, Password) — no Tab counting from
+            # wherever the window put the caret.  Without it, the old search.
+            focus = (getattr(msaa, "focus_element", None)
+                     if msaa is not None else None)
+            if focus is None:
+                # Where the caret ends up depends on how the window came
+                # forward.  Rather than assume, walk to the field.
+                found, reason = _locate_text_field(win, inp, guard, state)
+                if not found:
+                    return _stop(pid, state, inp, tr, PHASE_LOCATE, reason)
 
             # --- profile (no secret) ---------------------------------------- #
             if profile:
                 chosen, reason = _select_profile(
                     win, inp, guard, profile, state, reader,
-                    may_change=may_change)
+                    may_change=may_change, focus=focus)
                 if not chosen:
                     return _stop(pid, state, inp, tr, PHASE_PROFILE, reason)
                 tr.ok("vpn.autofill", event="profile-step",
@@ -277,12 +283,30 @@ def autofill_login_password(
                       verified=True,
                       already_selected=state["profile_already_selected"])
 
+            if focus is not None:
+                moved, reason = _focus_field(win, guard, focus, ROLE_SYSTEM_TEXT,
+                                             FIELD_USERNAME, PHASE_LOCATE)
+                if not moved:
+                    return _stop(pid, state, inp, tr, PHASE_LOCATE, reason)
+
             # --- login ------------------------------------------------------ #
             # An empty login leaves the field alone, as the legacy does
             # (vpn_connect.py `if login:`): whatever FortiClient saved for this
             # connection stays.  Clearing it and pasting nothing wiped a saved
             # username and submitted an empty form (Stage 59, live).
-            if login:
+            read_value = (getattr(msaa, "field_value", None)
+                          if focus is not None else None)
+            if login and read_value is not None:
+                blocked, reason = _fill_field_by_name(
+                    win, inp, guard, read_value, FIELD_USERNAME, login, state,
+                    PHASE_LOGIN_CLIPBOARD, PHASE_LOGIN_PASTE, PHASE_LOGIN_VERIFY,
+                    masked=False, precheck=check_profile)
+                if blocked:
+                    return _stop(pid, state, inp, tr, blocked, reason)
+                state["login"] = True
+                tr.ok("vpn.autofill", event="login-step", field="username",
+                      method="clipboard_paste", entered=True)
+            elif login:
                 blocked, reason = _fill_field(
                     win, inp, guard, login, PHASE_LOGIN_CLEAR, PHASE_LOGIN_PROBE,
                     PHASE_LOGIN_CLIPBOARD, PHASE_LOGIN_PASTE,
@@ -294,19 +318,39 @@ def autofill_login_password(
                 tr.ok("vpn.autofill", event="login-step", field="username",
                       method="clipboard_paste", entered=True)
 
-            # Tab from username to password.
-            performed, reason = guard(win, PHASE_PASSWORD_CLEAR + "-tab",
-                                      lambda: (inp.press_key(VK_TAB),
-                                               inp.sleep(_TO_PASSWORD_S)))
-            if not performed:
-                return _stop(pid, state, inp, tr, PHASE_PASSWORD_CLEAR, reason)
+            # From username to password: by name, or the old Tab.
+            if focus is not None:
+                moved, reason = _focus_field(win, guard, focus, ROLE_SYSTEM_TEXT,
+                                             FIELD_PASSWORD,
+                                             PHASE_PASSWORD_CLEAR + "-focus")
+                if not moved:
+                    return _stop(pid, state, inp, tr, PHASE_PASSWORD_CLEAR, reason)
+                # The focus is confirmed; no fixed wait for the caret to move.
+                inp.sleep(_AFTER_MSAA_FOCUS_S)
+            else:
+                performed, reason = guard(win, PHASE_PASSWORD_CLEAR + "-tab",
+                                          lambda: (inp.press_key(VK_TAB),
+                                                   inp.sleep(_TO_PASSWORD_S)))
+                if not performed:
+                    return _stop(pid, state, inp, tr, PHASE_PASSWORD_CLEAR, reason)
 
             # --- password --------------------------------------------------- #
             # No verify for the password: a password box refuses to be copied
             # from, so reading it back proves nothing.  The login's verify
             # already established that the caret walks the fields as expected.
             # Empty password: field left alone, same as the login above.
-            if password:
+            if password and read_value is not None:
+                blocked, reason = _fill_field_by_name(
+                    win, inp, guard, read_value, FIELD_PASSWORD, password, state,
+                    PHASE_PASSWORD_CLIPBOARD, PHASE_PASSWORD_PASTE,
+                    PHASE_PASSWORD_PASTE + "-verify", masked=True,
+                    precheck=check_profile)
+                if blocked:
+                    return _stop(pid, state, inp, tr, blocked, reason)
+                state["password"] = True
+                tr.ok("vpn.autofill", event="password-step", field="password",
+                      method="clipboard_paste", entered=True)
+            elif password:
                 blocked, reason = _fill_field(
                     win, inp, guard, password, PHASE_PASSWORD_CLEAR,
                     PHASE_PASSWORD_PROBE, PHASE_PASSWORD_CLIPBOARD,
@@ -438,9 +482,32 @@ def _locate_text_field(win, inp, guard, state_holder) -> tuple[bool, str]:
     return False, "no-text-field-found"
 
 
+#: MSAA names of the two credential fields (FortiClient VPN 7.4.3, measured
+#: 2026-10-19).
+FIELD_USERNAME = "Username"
+FIELD_PASSWORD = "Password"
+
+
+def _focus_field(win, guard, focus, role, name, phase) -> tuple[bool, str]:
+    """Guarded MSAA focus on one named element of the verified window."""
+    outcome = {"ok": False, "reason": ""}
+
+    def operation():
+        result = focus(win.hwnd, role, name)
+        outcome["ok"] = bool(getattr(result, "ok", False))
+        outcome["reason"] = getattr(result, "reason", "focus-failed")
+
+    performed, reason = guard(win, phase, operation)
+    if not performed:
+        return False, reason
+    if not outcome["ok"]:
+        return False, outcome["reason"] or "focus-failed"
+    return True, reason
+
+
 def _select_profile(win, inp, guard, profile: str, state,
                     reader: "_ProfileReader", *,
-                    may_change: bool = True) -> tuple[bool, str]:
+                    may_change: bool = True, focus=None) -> tuple[bool, str]:
     """Choose the VPN profile, prove FortiClient shows it, come back to Username.
 
     The form reads: VPN Name combo, the hamburger beside it, Username,
@@ -492,11 +559,20 @@ def _select_profile(win, inp, guard, profile: str, state,
         # showing, never chosen on the user's behalf.
         return False, REASON_PROFILE_UNSPECIFIED
 
-    for step in ("back-1", "back-2"):
-        performed, reason = guard(win, PHASE_PROFILE, lambda: (
-            inp.press_combo(VK_SHIFT, VK_TAB), inp.sleep(_AFTER_TAB_S)))
-        if not performed:
+    if focus is not None:
+        # Straight to the combo by name (2026-10-19) — the hamburger, whose
+        # menu can delete the connection, is never stepped on.
+        moved, reason = _focus_field(win, guard, focus, ROLE_SYSTEM_COMBOBOX,
+                                     fprof.PROFILE_CONTROL_NAME, PHASE_PROFILE)
+        if not moved:
             return False, reason
+        inp.sleep(_AFTER_TAB_S)
+    else:
+        for step in ("back-1", "back-2"):
+            performed, reason = guard(win, PHASE_PROFILE, lambda: (
+                inp.press_combo(VK_SHIFT, VK_TAB), inp.sleep(_AFTER_TAB_S)))
+            if not performed:
+                return False, reason
 
     for need, press in (
             (reader.ready_to_open, lambda: (inp.press_key(VK_SPACE),
@@ -514,6 +590,8 @@ def _select_profile(win, inp, guard, profile: str, state,
     confirmed, reason = _confirm_profile(win, inp, guard, reader)
     if not confirmed:
         return False, reason
+    if focus is not None:
+        return True, reason             # the caller focuses Username by name
 
     # Back to where the login expects to be: combo -> hamburger -> username.
     for step in ("forward-1", "forward-2"):
@@ -809,6 +887,93 @@ def _fill_field(win, inp, guard, secret, clear_phase, probe_phase,
                 inp.press_combo(VK_CONTROL, ord("A")), inp.sleep(_SELECT_ALL_S),
                 inp.press_key(VK_DELETE), inp.sleep(_AFTER_DELETE_S)))
             return verify_phase, "paste-did-not-land"
+    return None, reason
+
+
+#: The longest a paste may take to show in the field (MSAA read-back), and how
+#: often to look.  Measured 2026-10-19: the fixed 0.4 s waits plus the
+#: clipboard read-backs made ~2 s between the login and the password.
+_PASTE_LANDS_WITHIN_S = 1.5
+_PASTE_POLL_S = 0.025
+_AFTER_MSAA_FOCUS_S = 0.05
+#: What FortiClient's password field shows per character (measured).
+_MASK_CHARS = frozenset("•●*")
+
+
+def _fill_field_by_name(win, inp, guard, read_value, name, secret, state,
+                        clipboard_phase, paste_phase, verify_phase, *,
+                        masked: bool, precheck=None) -> tuple[str | None, str]:
+    """Paste `secret` into the field `name`, whose focus MSAA has confirmed,
+    and wait exactly until MSAA shows it there.
+
+    No probe of the caret (the focus was confirmed by name) and no separate
+    clear (Ctrl+A then Ctrl+V replaces the selection).  The read-back is MSAA's
+    value: the text for Username, the mask for Password — compared by length
+    and never readable.  Until it shows, nothing moves on: the password field
+    is not focused while the login could still be on its way.
+    """
+    if not secret:
+        return None, "empty-skipped"
+    refused = {"reason": ""}
+
+    def put_on_clipboard():
+        if precheck is not None:
+            refused["reason"] = precheck()
+            if refused["reason"]:
+                return
+        inp.copy_to_clipboard(secret)
+        state["clip_dirty"] = True
+        inp.sleep(_AFTER_CLIP_SET_S)
+
+    performed, reason = guard(win, clipboard_phase, put_on_clipboard)
+    if not performed:
+        return clipboard_phase, reason
+    if refused["reason"]:
+        return clipboard_phase, refused["reason"]
+
+    def paste():
+        if precheck is not None:
+            refused["reason"] = precheck()
+            if refused["reason"]:
+                return
+        inp.press_combo(VK_CONTROL, ord("A"))
+        inp.press_combo(VK_CONTROL, ord("V"))
+
+    performed, reason = guard(win, paste_phase, paste)
+    if not performed:
+        return paste_phase, reason
+    if refused["reason"]:
+        return paste_phase, refused["reason"]
+
+    def landed(value) -> bool:
+        if not isinstance(value, str):
+            return False
+        if masked:
+            return len(value) == len(secret) and set(value) <= _MASK_CHARS
+        return value == secret
+
+    seen = {"ok": False}
+
+    def verify():
+        waited = 0.0
+        while True:
+            if landed(read_value(win.hwnd, ROLE_SYSTEM_TEXT, name)):
+                seen["ok"] = True
+                return
+            if waited >= _PASTE_LANDS_WITHIN_S:
+                return
+            inp.sleep(_PASTE_POLL_S)
+            waited += _PASTE_POLL_S
+
+    performed, reason = guard(win, verify_phase, verify)
+    if not performed:
+        return verify_phase, reason
+    if not seen["ok"]:
+        # Take it out again rather than leave a value where it did not belong.
+        guard(win, verify_phase, lambda: (
+            inp.press_combo(VK_CONTROL, ord("A")), inp.sleep(_SELECT_ALL_S),
+            inp.press_key(VK_DELETE), inp.sleep(_AFTER_DELETE_S)))
+        return verify_phase, "paste-did-not-land"
     return None, reason
 
 

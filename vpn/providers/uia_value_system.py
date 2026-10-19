@@ -48,6 +48,7 @@ AUTOMATION_ID_PROPERTY_ID = 30011
 VALUE_PATTERN_ID = 10002
 VALUE_IS_READONLY_PROPERTY_ID = 30046
 TREESCOPE_DESCENDANTS = 4
+IS_PASSWORD_PROPERTY_ID = 30019
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,25 @@ class UiaValueSystem:
 
         The value lives only in this call's arguments; it is never returned,
         logged or stored.
+        """
+        raise NotImplementedError
+
+    def value_matches(self, hwnd, automation_id: str, expected: str, *,
+                      expected_pid: int):
+        """Does the element now hold `expected`?  ``None`` when it cannot be
+        read (a password field never exposes its text).  Nothing is returned
+        but the answer; the element's text is compared here and dropped."""
+        return None
+
+    def focus(self, hwnd, automation_id: str, *,
+              expected_pid: int) -> UiaSetOutcome:
+        """Give the element the keyboard focus — only if it is owned by
+        ``expected_pid`` — and confirm that it has it.
+
+        2026-10-19: ``SetValue`` fills a Qt field without Qt's ``textEdited``
+        signal, so Stormshield kept its "Log in" button disabled.  Typing is
+        what the clients react to; this is how the typing finds its field by
+        identity instead of by counting Tab presses.  Carries no value.
         """
         raise NotImplementedError
 
@@ -171,3 +191,48 @@ class Win32UiaValueSystem(UiaValueSystem):
             return UiaSetOutcome(True, reason=f"set-error:{type(exc).__name__}",
                                  process_id=pid)
         return UiaSetOutcome(True, performed=True, reason="set", process_id=pid)
+
+    def focus(self, hwnd, automation_id: str, *,
+              expected_pid: int) -> UiaSetOutcome:
+        try:
+            el, _mod = self._element(hwnd, automation_id)
+        except Exception as exc:
+            return UiaSetOutcome(False, reason=f"uia-error:{type(exc).__name__}")
+        if not el:
+            return UiaSetOutcome(False, reason="not-found")
+        try:
+            pid = int(el.CurrentProcessId)
+        except Exception as exc:
+            return UiaSetOutcome(True, reason=f"pid-error:{type(exc).__name__}")
+        if pid != expected_pid:
+            return UiaSetOutcome(True, reason="pid-mismatch", process_id=pid)
+        try:
+            el.SetFocus()
+        except Exception as exc:
+            return UiaSetOutcome(True, reason=f"focus-error:{type(exc).__name__}",
+                                 process_id=pid)
+        try:
+            again, _mod = self._element(hwnd, automation_id)
+            focused = bool(again and again.CurrentHasKeyboardFocus)
+        except Exception:
+            focused = False
+        if not focused:
+            return UiaSetOutcome(True, reason="focus-not-taken", process_id=pid)
+        return UiaSetOutcome(True, performed=True, reason="focused", process_id=pid)
+
+    def value_matches(self, hwnd, automation_id: str, expected: str, *,
+                      expected_pid: int):
+        try:
+            el, _mod = self._element(hwnd, automation_id)
+            if not el or int(el.CurrentProcessId) != expected_pid:
+                return None
+            if el.GetCurrentPropertyValue(IS_PASSWORD_PROPERTY_ID):
+                return None
+            from comtypes.gen.UIAutomationClient import IUIAutomationValuePattern
+            pattern = el.GetCurrentPattern(VALUE_PATTERN_ID)
+            if not pattern:
+                return None
+            return (pattern.QueryInterface(IUIAutomationValuePattern).CurrentValue
+                    or "") == expected
+        except Exception:
+            return None

@@ -412,6 +412,38 @@ class SecureWindowTarget:
         return ForegroundCheck(True, check.reason, hwnd, owner.pid,
                                owner.image_name, True, iconic)
 
+    def bring_forward(self, hwnd) -> bool:
+        """Ask Windows to put a *verified* client window in front.
+
+        2026-10-19 (owner's decision after the field test): waiting for the
+        user to click the client made every connect stop at "switch to the
+        window".  The measurement that ruled raising out (Stages 18-20) was of
+        a background process; HospitalHub is the foreground program at the
+        moment "Połącz" is clicked, and Windows lets the foreground program
+        hand the foreground on -- measured: ``SetForegroundWindow`` from the
+        connect's worker thread succeeds.
+
+        This only *moves the window*.  It types nothing, and it decides
+        nothing: the gate still waits until :meth:`foreground_check` sees the
+        window in front, and every guard before every keystroke still re-reads
+        the desktop.  A window whose owner does not verify is not touched.
+        Returns whether Windows accepted the request; never raises.
+        """
+        try:
+            if not self.verify_owner(hwnd).verified:
+                return False
+        except Exception:
+            return False
+        try:
+            if self._api.is_iconic(hwnd) is True:
+                self._api.restore_window(hwnd)
+        except Exception:
+            pass
+        try:
+            return bool(self._api.set_foreground_window(hwnd))
+        except Exception:
+            return False
+
     def strict_foreground_check(self, hwnd=None) -> ForegroundCheck:
         """:meth:`foreground_check`, with "unknown" counted as "no".
 

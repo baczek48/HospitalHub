@@ -604,6 +604,36 @@ def _retire_controller(controller) -> None:
         pass
 
 
+#: Autofill stop reasons meaning "the card names a FortiClient profile that is
+#: not configured in FortiClient" (the V2 profile step reports these codes).
+_TUNNEL_MISSING_REASONS = frozenset({
+    "requested-tunnel-not-configured", "requested-profile-untrimmed",
+    "requested-profile-empty", "tunnel-catalog-unavailable",
+    "profile-not-specified"})
+
+
+def _record_legacy_session(p) -> None:
+    """Tell the status poll which profile is being connected.
+
+    2026-10-19 (owner's test): a FortiClient profile connected through V2 kept
+    showing "Rozłączono" and no Disconnect button.  The poll
+    (``vpn_connect.get_status``) decides FortiClient's state from
+    ``vpn_connect._last_connected`` — which ``vpn_connect.connect`` fills and a
+    V2 connect, which never calls it, did not; a profile without a server has
+    no IP to fall back on.  The same values, per provider, the legacy writes.
+    """
+    try:
+        if p.provider == "Stormshield":
+            last = p.server or p.profile_name or ""
+        else:
+            last = p.profile_name or ""
+        vpn_connect._last_connected[p.provider] = last
+        vpn_connect._last_connected_meta[p.provider] = {
+            "server": p.server or "", "profile_name": p.profile_name or ""}
+    except Exception:
+        pass
+
+
 def _vlog(level: str, what: str, p=None, /, **fields) -> None:
     """One line in the VPN log (⚙ Ustawienia VPN → Diagnostyka), when it is
     switched on.  A module function, not a method: it must work for any
@@ -1431,13 +1461,15 @@ class VpnPanel(QWidget):
         running = self._v2_controllers.get(idx)
         if running is not None and getattr(running, "active", False):
             return
+        _record_legacy_session(p)
 
         try:
             request = build_request(p, app_path=app_path, autofill=autofill_on)
             session = PanelConnectSession(request)
             card = self._card_widgets.get(idx)
             controller = V2ConnectController(
-                session, lbl, prompt_parent=card if card is not None else self)
+                session, lbl, prompt_parent=card if card is not None else self,
+                client=p.provider)
             # Keep it alive for the whole session (see __init__ note).
             self._v2_controllers[idx] = controller
             controller.polling_pause.connect(self._pause_status_polling)
@@ -1470,6 +1502,9 @@ class VpnPanel(QWidget):
                        state=str(getattr(outcome, "state", "") or ""),
                        reason_code=str(getattr(outcome, "code", "") or ""),
                        error_code=str(getattr(outcome, "error_code", "") or ""))
+        if (outcome is not None and idx < len(self._profiles)
+                and str(getattr(outcome, "reason", "") or "") in _TUNNEL_MISSING_REASONS):
+            self._explain_missing_tunnel(self._profiles[idx])
         if outcome is not None and getattr(outcome, "started", False):
             self._update_toggle_btn(idx, "connecting")
             vpn_connect.invalidate_adapter_cache()
@@ -1479,6 +1514,35 @@ class VpnPanel(QWidget):
         # and only if it is still *this* session's controller: a click in the
         # same turn may already have started the next one (L14).
         QTimer.singleShot(0, lambda i=idx, c=controller: self._release_v2(i, c))
+
+    def _explain_missing_tunnel(self, p) -> None:
+        """Say plainly which FortiClient profile is missing, and which exist.
+
+        The card's one-line status was easy to miss ("it opens the window and
+        nothing happens").  Non-modal: the session is already over.
+        """
+        try:
+            names = [t.get("name", "") for t in
+                     vpn_connect.get_forti_tunnels_from_registry()]
+        except Exception:
+            names = []
+        wanted = p.profile_name or "(puste)"
+        text = (f"W FortiClient nie ma profilu „{wanted}”, którego używa karta "
+                f"„{p.name or wanted}”.\n\n"
+                "Login i hasło nie zostały wpisane — inaczej trafiłyby do "
+                "profilu, który akurat jest wybrany w FortiClient, czyli do "
+                "innego szpitala.\n\n")
+        if names:
+            text += "Profile skonfigurowane w FortiClient: " + ", ".join(
+                n for n in names if n) + ".\n\n"
+        text += ("Dodaj ten profil w FortiClient albo popraw pole „Nazwa "
+                 "profilu w kliencie” na karcie.")
+        box = QMessageBox(QMessageBox.Icon.Information, "FortiClient — brak profilu",
+                          text, QMessageBox.StandardButton.Ok, self)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.show()
+        self._missing_tunnel_box = box
 
     def _release_v2(self, idx: int, controller) -> None:
         if controller is None or self._v2_controllers.get(idx) is controller:

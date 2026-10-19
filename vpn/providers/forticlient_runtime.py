@@ -171,8 +171,10 @@ class FortiConnectRuntime(FortiConnectSystem):
         """
         from .activation_gate import ActivationGate
 
+        target = self._target()
         return ActivationGate(
-            target=self._target(),
+            target=target,
+            bring_forward=target.bring_forward,
             clock=self._clock if self._clock is not None else SystemClock(),
             cancellation=self.cancellation,
             timeout_s=self.activation_timeout_s,

@@ -1,30 +1,28 @@
-"""Stormshield autofill — three fields, entered backwards, never submitted.
+"""Stormshield autofill — three fields, each focused by identity, never submitted.
 
 The shape is FortiClient's: acquire a verified window, then put every single
 operation through :meth:`VerifiedWindow.run_guarded`, which re-reads the
-desktop before it runs anything.  The *sequence* is nothing like FortiClient's,
-and copying it would have been wrong in two separate ways.
+desktop before it runs anything.
 
-Why backwards
--------------
-Stage 40 measured the real client.  The cursor starts on **Password**, and two
-``Shift+Tab`` presses walk back through **Login** to **Firewall address** —
-confirmed three ways: by probing the live form, by the screenshots of it, and
-by the legacy's own comment.  Walking *forward* was measured and did **not**
-reproduce the reverse order, so this module never tabs forward.
-
-That choice has a second benefit, which is the real reason to prefer it.  The
-client grows an **OTP** field when "Use multifactor authentication" is ticked,
-and it appears *after* Password.  Anything tabbing forward from the address
-field lands one field off as soon as a user enables MFA; walking backwards from
-Password is identical in both layouts.  The legacy sequence has this bug.
+2026-10-19 — why the Shift+Tab sequence is gone
+-----------------------------------------------
+Stage 40 measured the cursor starting on **Password** and walked backwards from
+there.  On the live client today it started on **Firewall address**: the
+password was typed into the address field, in plain text, on screen.  Counting
+keys from wherever the cursor happens to be cannot be made safe.  The form's
+fields carry AutomationIds (Qt's ``objectName``: ``Connexion.addressEdit``,
+``Connexion.loginEdit``, ``Connexion.passwordEdit``), so each field is now
+focused by identity through UI Automation, the focus is confirmed, and only
+then is anything typed (:mod:`vpn.providers.field_fill`).  Typing rather than
+``SetValue``: with ``SetValue`` the values arrived but Qt kept "Log in"
+disabled.  The OTP field that MFA adds is never touched.
 
 Why nothing is submitted
 ------------------------
 The legacy does not press Enter here and neither does this: the user clicks
-**Log in** themselves.  That is not a failure and is not reported as one —
-``AutofillStatus.DONE`` with ``requires_user_action`` in the metadata says the
-fields are filled and the connection has not been attempted.
+**Log in** themselves.  ``AutofillStatus.DONE`` with ``requires_user_action``
+in the metadata says the fields are filled and the connection has not been
+attempted.
 
 Not here on purpose
 -------------------
@@ -95,131 +93,37 @@ def server_address(request: VpnRequest) -> str:
     return f"{server}:{port}" if server and port else server
 
 
+#: AutomationIds of the form, read from the live client's UI Automation tree
+#: (Qt exposes ``objectName``) on 2026-10-19.
+AID_ADDRESS = "Connexion.addressEdit"
+AID_LOGIN = "Connexion.loginEdit"
+AID_PASSWORD = "Connexion.passwordEdit"
+
+
 def autofill_login_password(
         provider, request: VpnRequest, *,
         target: SecureWindowTarget | None = None,
         input_system: InputSystem | None = None,
-        trace=None) -> AutofillResult:
-    """Fill the Stormshield form, backwards from Password, and stop.
+        trace=None, uia=None, cancellation=None) -> AutofillResult:
+    """Fill Firewall address, Login and Password, each by its AutomationId,
+    and stop (the person clicks Log in, as with the legacy).
 
-    `target` defaults to the provider's :meth:`secure_window_target`, which is
-    configured ``require_visible=True, raise_window=False`` — so the window has
-    to be in front and visible already, and nothing here will put it there.
+    2026-10-19: the Shift+Tab sequence below this module's history assumed the
+    cursor started in Password; on the live client it started in Firewall
+    address and the password was typed there, in plain text.  Now every field
+    is focused by identity and confirmed before a single key is sent.
     """
-    tr = _Trace(trace)
-    inp = input_system if input_system is not None else Win32InputSystem()
+    from .field_fill import Field, fill_form
+    from .uia_value_system import Win32UiaValueSystem
+
+    keys = input_system if input_system is not None else Win32InputSystem()
+    uia = uia if uia is not None else Win32UiaValueSystem()
     target = target if target is not None else provider.secure_window_target()
-    pid = provider.id
-    login, password = request.login, request.password
-    address = server_address(request)
-
-    tr.ok("vpn.autofill", event="autofill-start", automation_mode="tab_sequence")
-
-    acquired = target.acquire_any()
-    if not isinstance(acquired, VerifiedWindow):
-        reason = getattr(acquired, "reason", "no-verified-target")
-        no_target = reason in _NO_TARGET_REASONS
-        status = AutofillStatus.NO_TARGET if no_target else AutofillStatus.NO_FOCUS
-        tr.fail("vpn.autofill", event="autofill-failure", reason=reason,
-                error_code=("target-window-untrusted" if no_target
-                            else "focus-failed"))
-        return AutofillResult(
-            provider_id=pid, success=False, status=status, blocked_at="acquire",
-            error_code=(ErrorCode.CLIENT_NOT_FOUND.value if no_target
-                        else ErrorCode.FOCUS_FAILED.value),
-            metadata={"reason_code": reason})
-
-    tr.ok("vpn.autofill", event="target-acquired", image_name=acquired.image_name,
-          pid=acquired.pid)
-
-    state = {"login": False, "password": False}
-
-    def guard(win: VerifiedWindow, phase: str, operation) -> tuple[bool, str]:
-        """Re-confirm the target, then run the operation — or run nothing.
-
-        The secret lives in the closure and never passes through the guard's
-        own signature; what the guard decides is only *whether* to call it.
-        """
-        result = win.run_guarded(phase, operation)
-        return result.performed, result.reason
-
-    with acquired as win:
-        try:
-            # --- Password: where the cursor already is (Stage 40) ---------- #
-            # No Ctrl+A first: the field was measured empty, and selecting all
-            # in a password box would be a keystroke that buys nothing.
-            def enter_password():
-                inp.sleep(_RENDER_WAIT_S)
-                if password:
-                    inp.type_text(password)
-                    inp.sleep(_AFTER_TYPE_S)
-
-            performed, reason = guard(win, PHASE_PASSWORD, enter_password)
-            if not performed:
-                return _stop(pid, state, tr, PHASE_PASSWORD, reason)
-            if password:
-                state["password"] = True
-                tr.ok("vpn.autofill", event="password-step", field="password",
-                      method="type", entered=True)
-
-            # --- back to Login --------------------------------------------- #
-            performed, reason = guard(win, PHASE_TO_LOGIN, lambda: (
-                inp.press_combo(VK_SHIFT, VK_TAB), inp.sleep(_AFTER_TAB_S)))
-            if not performed:
-                return _stop(pid, state, tr, PHASE_TO_LOGIN, reason)
-
-            def enter_login():
-                inp.press_combo(VK_CONTROL, ord("A"))
-                inp.sleep(_SELECT_ALL_S)
-                inp.type_text(login)
-                inp.sleep(_AFTER_TYPE_S)
-
-            if login:
-                performed, reason = guard(win, PHASE_LOGIN, enter_login)
-                if not performed:
-                    return _stop(pid, state, tr, PHASE_LOGIN, reason)
-                state["login"] = True
-                tr.ok("vpn.autofill", event="login-step", field="username",
-                      method="type", entered=True)
-
-            # --- back to Firewall address ---------------------------------- #
-            performed, reason = guard(win, PHASE_TO_ADDRESS, lambda: (
-                inp.press_combo(VK_SHIFT, VK_TAB), inp.sleep(_AFTER_TAB_S)))
-            if not performed:
-                return _stop(pid, state, tr, PHASE_TO_ADDRESS, reason)
-
-            def enter_address():
-                inp.press_combo(VK_CONTROL, ord("A"))
-                inp.sleep(_SELECT_ALL_S)
-                inp.type_text(address)
-                inp.sleep(_AFTER_TYPE_S)
-
-            if address:
-                performed, reason = guard(win, PHASE_ADDRESS, enter_address)
-                if not performed:
-                    return _stop(pid, state, tr, PHASE_ADDRESS, reason)
-                tr.ok("vpn.autofill", event="address-step", field="server",
-                      method="type", entered=True)
-
-            # --- and stop, deliberately ------------------------------------ #
-            # No Enter.  The user reads what was filled in and clicks Log in.
-            tr.ok("vpn.autofill", event="autofill-success",
-                  login_entered=state["login"],
-                  password_entered=state["password"], submitted=False)
-            return AutofillResult(
-                provider_id=pid, success=True, status=AutofillStatus.DONE,
-                login_entered=state["login"],
-                password_entered=state["password"],
-                metadata={"requires_user_action": True, "submitted": False})
-        except Exception as exc:                       # a seam misbehaved
-            tr.fail("vpn.autofill", event="autofill-failure",
-                    error_code="automation-failed", reason=type(exc).__name__)
-            return AutofillResult(
-                provider_id=pid, success=False, status=AutofillStatus.FAILED,
-                login_entered=state["login"],
-                password_entered=state["password"],
-                error_code=ErrorCode.AUTOMATION_FAILED.value,
-                metadata={"reason_code": type(exc).__name__})
+    fields = (Field(PHASE_ADDRESS, AID_ADDRESS, server_address(request)),
+              Field(PHASE_LOGIN, AID_LOGIN, request.login or "", "login"),
+              Field(PHASE_PASSWORD, AID_PASSWORD, request.password or "", "password"))
+    return fill_form(provider.id, target, uia, keys, fields, submit_field=None,
+                     cancellation=cancellation, trace=trace)
 
 
 def _stop(pid: str, state: dict, tr: _Trace, blocked_at: str,

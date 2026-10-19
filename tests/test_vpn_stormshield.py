@@ -357,6 +357,16 @@ class Recording(StormshieldConnectSystem):
         self.calls.append("activation_still_holds")
         return self._still
 
+    def autofill(self, request):
+        """2026-10-19: the flows fill the verified window after activation."""
+        from vpn.types import AutofillResult, AutofillStatus
+        self.calls.append("autofill")
+        return AutofillResult(
+            provider_id=request.provider_id, success=True,
+            status=AutofillStatus.DONE, login_entered=bool(request.login),
+            password_entered=bool(request.password),
+            metadata={"submitted": False, "filled_only": True})
+
 
 class Answer:
     def __init__(self, **kwargs):

@@ -1,35 +1,33 @@
-"""Wait for the user to bring FortiClient forward.  Read only, sends nothing.
+"""Wait until the client window is in front.  Types nothing, sends nothing.
 
-Stages 18-20 established, by measurement, that a background process cannot take
-the foreground away from another process' window: ``SetForegroundWindow``
-refuses, ``AttachThreadInput`` does not help, and the refusal is Windows policy
-rather than a bug.  What *does* work — observed on the real client — is the
-case where the window is already in front: then the existing
-:func:`~secure_window.acquire_focus` succeeds and the Stage-14 autofill runs
-exactly as designed.
+Stages 18-20 measured that a *background* process cannot take the foreground
+away from another process' window, and Stage 22 concluded that the connect
+should wait for the user to bring the client forward.  The field test of
+2026-10-19 showed what that costs: every connect stopped at "switch to the
+window".  HospitalHub is, however, the foreground program at the moment
+"Połącz" is clicked, and the foreground program may hand the foreground on --
+measured, from the connect's worker thread.  So the gate now also *asks* for
+the window to be put in front (:attr:`ActivationGate.bring_forward`, a few
+times while the window is pinned and not yet active) and keeps waiting for the
+user when Windows says no.
 
-So this module changes no mechanism at all.  It changes the **moment**: it
-waits until the user has activated the client themselves, and only then lets
-the existing machinery start.
-
-What it deliberately cannot do
-------------------------------
-It never activates, restores, raises, focuses or types.  It calls exactly one
-thing on the target — :meth:`SecureWindowTarget.foreground_check`, a reading —
-and it accepts no login, no password and no token, because nothing it does
-could need one.  Were it ever to reach for a window it would be re-creating the
-very foreground theft that was measured not to work, and masking the condition
-the guards exist to catch.
+What it still cannot do
+-----------------------
+It never focuses a control and never types, and it accepts no login, no
+password and no token, because nothing it does could need one.  Bringing a
+window forward is a request, not a decision: the gate reports
+:attr:`ActivationState.ACTIVATION_OBSERVED` only once a reading
+(:meth:`SecureWindowTarget.foreground_check`) has seen the verified window in
+front.
 
 What "observed" does and does not mean
 --------------------------------------
 :attr:`ActivationState.ACTIVATION_OBSERVED` is permission to *start*, not proof
 that will hold.  Between the observation and the first keystroke the foreground
 can change again, and this module makes no attempt to prevent that: the
-decision that matters stays where it already was — ``acquire_focus``'s own
+decision that matters stays where it already was -- ``acquire_focus``'s own
 confirmation and then the per-secret guards of the autofill, which re-read the
-desktop before every single operation.  A gate that promised more would be
-lying, and would tempt a caller to trust the promise instead of the guard.
+desktop before every single operation.
 """
 
 from __future__ import annotations
@@ -45,6 +43,7 @@ __all__ = [
     "ActivationGate", "ActivationResult", "ActivationState", "Clock",
     "SystemClock", "CancellationToken", "wait_for_activation",
     "ACTIVATION_TIMEOUT_S", "POLL_INTERVAL_S", "MAX_REPINS",
+    "BRING_FORWARD_ATTEMPTS", "BRING_FORWARD_INTERVAL_S",
 ]
 
 #: How long the user is given to switch to the client.  A budget for giving up
@@ -54,6 +53,12 @@ ACTIVATION_TIMEOUT_S = 60.0
 
 #: The same cadence the rest of this package polls at.
 POLL_INTERVAL_S = 0.5
+
+#: How many times the gate asks for the pinned window to be put in front, and
+#: how far apart.  A client that has just started may still be building its
+#: window, so one request is not always enough; after these, the user decides.
+BRING_FORWARD_ATTEMPTS = 3
+BRING_FORWARD_INTERVAL_S = 1.0
 
 #: How many times the client may be replaced by a *different* window of the
 #: same program while we wait.  One restart is ordinary; three is a client in
@@ -176,7 +181,7 @@ class _Trace:
 
 @dataclass
 class ActivationGate:
-    """Polls a target until the user has put it in front, or the wait ends.
+    """Polls a target until its window is in front, or the wait ends.
 
     The whole state machine is here and it is small on purpose: one reading per
     poll, one pinned identity, one counter.
@@ -198,6 +203,13 @@ class ActivationGate:
     #: breaks must not be able to abort a wait or, worse, leave it half-done.
     observer: Any = None
 
+    #: ``bring_forward(hwnd) -> bool`` asks for the pinned window to be put in
+    #: front (:meth:`SecureWindowTarget.bring_forward`).  ``None`` keeps the
+    #: Stage-22 behaviour: wait for the user only.
+    bring_forward: Any = None
+    bring_forward_attempts: int = BRING_FORWARD_ATTEMPTS
+    bring_forward_interval_s: float = BRING_FORWARD_INTERVAL_S
+
     #: Filled as the wait runs; readable by a caller that cannot take a callback.
     state: ActivationState = ActivationState.LOCATING_TARGET
 
@@ -216,6 +228,8 @@ class ActivationGate:
         started = self.clock.monotonic()
         pinned: tuple | None = None
         polls = repins = 0
+        brought = 0
+        last_bring: float | None = None
 
         tr.ok("vpn.activation", event="await-activation-start",
               timeout_ms=int(self.timeout_s * 1000))
@@ -268,6 +282,22 @@ class ActivationGate:
                                         check.reason, pinned, polls, repins,
                                         started, tr)
 
+            if (pinned is not None and self.bring_forward is not None
+                    and brought < self.bring_forward_attempts
+                    and (last_bring is None
+                         or self.clock.monotonic() - last_bring
+                         >= self.bring_forward_interval_s)):
+                brought += 1
+                last_bring = self.clock.monotonic()
+                try:
+                    accepted = bool(self.bring_forward(pinned[0]))
+                except Exception:
+                    accepted = False
+                tr.ok("vpn.activation", event="bring-forward", attempt=brought,
+                      accepted=accepted)
+                if accepted:
+                    continue      # read the desktop again straight away
+
             waited = self.clock.monotonic() - started
             if waited >= self.timeout_s:
                 ran_out = (ActivationState.ACTIVATION_TIMEOUT if pinned
@@ -311,7 +341,8 @@ def wait_for_activation(target: SecureWindowTarget, *, clock: Clock | None = Non
                         timeout_s: float = ACTIVATION_TIMEOUT_S,
                         poll_interval_s: float = POLL_INTERVAL_S,
                         max_repins: int = MAX_REPINS,
-                        observer=None, trace=None) -> ActivationResult:
+                        observer=None, trace=None,
+                        bring_forward=None) -> ActivationResult:
     """Convenience over :class:`ActivationGate`.
 
     Note what is *not* in this signature: no login, no password, no token, no
@@ -323,4 +354,5 @@ def wait_for_activation(target: SecureWindowTarget, *, clock: Clock | None = Non
         cancellation=cancellation if cancellation is not None
         else CancellationToken(),
         timeout_s=timeout_s, poll_interval_s=poll_interval_s,
-        max_repins=max_repins, observer=observer, trace=trace).wait()
+        max_repins=max_repins, observer=observer, trace=trace,
+        bring_forward=bring_forward).wait()

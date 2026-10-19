@@ -104,7 +104,6 @@ SCANS_IN_PROFILE_STEP = 6
     (PROFILE, None, FakeEnvironment(files=[FORTI_GUI], dirs=[FORTI_DIR]),
      fp.REASON_CATALOG_UNAVAILABLE),
     (PROFILE, tunnels(ipsec=(PROFILE,)), None, fp.REASON_AMBIGUOUS_TUNNEL),
-    ("TYLKO-IPSEC", tunnels(ipsec=("TYLKO-IPSEC",)), None, fp.REASON_UNKNOWN_GROUP),
     (PROFILE, tunnels(GROUP_PREFIX + "X"), None, fp.REASON_LABEL_COLLISION),
 ])
 def test_a1_a_request_that_could_never_be_confirmed_sends_nothing(
@@ -449,7 +448,6 @@ def one_tunnel(name, kind="ssl"):
 @pytest.mark.parametrize("environment", [
     lambda: drive_environment_with_all_tunnels(),
     lambda: FakeEnvironment(files=[FORTI_GUI], dirs=[FORTI_DIR]),   # none
-    lambda: one_tunnel("INNY-PROFIL", kind="ipsec"),                # unmeasured kind
 ])
 def test_d5_no_profile_and_no_unambiguous_target_sends_nothing(environment):
     inp = FakeInput()
@@ -506,7 +504,7 @@ def test_d5d_the_step_never_changes_the_profile_when_none_was_named():
     (("A",), (), "A"),
     (("A", "B"), (), None),
     (("A",), ("B",), None),
-    ((), ("B",), None),
+    ((), ("B",), "B"),          # IPsec: same label, measured 2026-10-19
     ((), (), None),
 ])
 def test_d5e_sole_tunnel(ssl, ipsec, expected):

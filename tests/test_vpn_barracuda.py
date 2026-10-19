@@ -346,6 +346,16 @@ class Recording(BarracudaConnectSystem):
         self.calls.append("activation_still_holds")
         return self._still
 
+    def autofill(self, request):
+        """2026-10-19: the flows fill the verified window after activation."""
+        from vpn.types import AutofillResult, AutofillStatus
+        self.calls.append("autofill")
+        return AutofillResult(
+            provider_id=request.provider_id, success=True,
+            status=AutofillStatus.DONE, login_entered=bool(request.login),
+            password_entered=bool(request.password),
+            metadata={"submitted": False, "filled_only": True})
+
 
 class Answer:
     def __init__(self, **kwargs):
@@ -469,23 +479,28 @@ def test_33_the_runtime_has_no_way_to_type():
 # Security negatives — no credential, no clipboard, no Enter, no tray/topmost
 # ══════════════════════════════════════════════════════════════════════════
 
-def test_34_the_connect_flow_still_stops_before_any_typing():
-    """The connect FLOW never acquires or types — it stops at activation.
-
-    The provider now has an ``autofill_login_password`` (Stage 50C, via the
-    guarded UI Automation seam), but the connect *flow* (``barracuda_connect``)
-    is unchanged: it stops before the autofill and produces no verified window.
-    """
+def test_34_the_connect_flow_fills_only_after_the_activation_holds():
+    """2026-10-19: after the activation is observed *and* re-read, the flow
+    hands the request to the provider's guarded autofill — and only then.  The
+    flow module itself still acquires and types nothing."""
+    request = VpnRequest(provider_id="barracuda", login="u", password="p")
     system = Recording(detection=installed(), launch=launched(),
                        activation=observed(), still=Answer(ok=True))
-    result = flow(system).run(VpnRequest(provider_id="barracuda"))
+    result = flow(system).run(request)
     assert not isinstance(result, VerifiedWindow)
+    assert system.calls[-2:] == ["activation_still_holds", "autofill"]
+    assert result.autofill is not None and result.success
+
+    lost = Recording(detection=installed(), launch=launched(),
+                     activation=observed(), still=Answer(ok=False, reason="x"))
+    flow(lost).run(request)
+    assert "autofill" not in lost.calls, "okno przestało być aktywne — nic nie piszemy"
+
     tree = ast.parse(open(sys.modules["vpn.providers.barracuda_connect"].__file__,
                           encoding="utf-8").read())
     names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    for banned in ("acquire_any", "acquire", "start_autofill", "run_guarded",
-                   "autofill_login_password"):
+    for banned in ("acquire_any", "acquire", "start_autofill", "run_guarded"):
         assert banned not in names, banned
 
 

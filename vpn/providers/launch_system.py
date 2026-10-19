@@ -18,7 +18,7 @@ What is mirrored (constants are pinned by tests against the legacy source):
 
 =====================  =====================================================
 ``open_with_explorer``  ``subprocess.Popen(["explorer.exe", lnk])``
-``spawn_detached``      ``Popen([exe], env=_clean_pyinstaller_env(), cwd=cwd,
+``spawn_detached``      ``Popen([exe], env=user_environment(), cwd=cwd,
                         creationflags=DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP,
                         close_fds=True)``
 ``wait_for_process``    ``_wait_for_process`` — ``tasklist`` every 0.25 s
@@ -45,7 +45,8 @@ from __future__ import annotations
 
 import os
 
-__all__ = ["LaunchSystem", "WindowsLaunchSystem", "clean_pyinstaller_env"]
+__all__ = ["LaunchSystem", "WindowsLaunchSystem", "clean_pyinstaller_env",
+           "user_environment", "desktop_shell_execute"]
 
 EXPLORER_EXE = "explorer.exe"
 #: ``_wait_for_process``: sleep between probes.
@@ -116,6 +117,80 @@ def clean_pyinstaller_env(environ=None) -> dict:
     return env
 
 
+#: Token access rights (winnt.h) — numbers, so this seam needs no win32con.
+_TOKEN_DUPLICATE = 0x0002
+_TOKEN_QUERY = 0x0008
+
+
+def user_environment(environ=None) -> dict:
+    """The user's own environment, as Windows builds it for a fresh logon.
+
+    2026-10-19: a client started with *our* environment — even with the
+    ``_MEI*``/``_PYI*`` keys removed — could still come up broken on some
+    machines: FortiClient's Electron main process failed with "Cannot read
+    properties of null (reading 'TraceLog')", or started with a hidden
+    window.  ``explorer.exe <lnk>`` was meant to avoid that and does not
+    (started from our process it carries our environment too) — and on a
+    machine with a hijacked ``.lnk`` association it opens "Dokumenty".
+    ``CreateEnvironmentBlock(token, inherit=False)`` asks Windows for the
+    environment from the user's registry profile, the same one the desktop
+    gives a program started from the Start menu; nothing of this process
+    leaks into it.  Falls back to :func:`clean_pyinstaller_env` when the call
+    is unavailable.
+    """
+    if environ is None:
+        try:
+            import win32api
+            import win32profile
+            import win32security
+            token = win32security.OpenProcessToken(
+                win32api.GetCurrentProcess(),
+                _TOKEN_QUERY | _TOKEN_DUPLICATE)
+            env = dict(win32profile.CreateEnvironmentBlock(token, False))
+            if env.get("SystemRoot") or env.get("SYSTEMROOT"):
+                return env
+        except Exception:
+            pass
+    return clean_pyinstaller_env(environ)
+
+
+#: ShellWindows.FindWindowSW arguments for "the desktop" (shlobj.h / exdisp.h).
+_CSIDL_DESKTOP = 0
+_SWC_DESKTOP = 8
+_SWFO_NEEDDISPATCH = 1
+
+
+def desktop_shell_execute(exe: str, cwd) -> bool:
+    """Have the running desktop shell (``explorer.exe``) start `exe`.
+
+    2026-10-19, owner's field test: started by this process — directly with a
+    cleaned or a freshly built environment, or through a new ``explorer.exe
+    <lnk>`` — FortiClient still failed on some machines with its Electron
+    "Cannot read properties of null (reading 'TraceLog')" error.  Started by
+    the user from the desktop it works.  ``ShellWindows`` hands us the
+    desktop's own ``IShellDispatch2``; its ``ShellExecute`` runs *in the shell
+    process*, so the client's parent is explorer and its environment is the
+    session's — the same start as a double-click on the shortcut (measured:
+    parent ``explorer.exe``, window shown, a second start reuses the first
+    instance).  Returns False when there is no desktop shell to ask.
+    """
+    import pythoncom
+    import win32com.client
+
+    pythoncom.CoInitialize()
+    try:
+        windows = win32com.client.Dispatch("Shell.Application").Windows()
+        desktop = windows.FindWindowSW(_CSIDL_DESKTOP, None, _SWC_DESKTOP, 0,
+                                       _SWFO_NEEDDISPATCH)
+        if desktop is None:
+            return False
+        desktop.Document.Application.ShellExecute(exe, "", cwd or "", "open", 1)
+        return True
+    finally:
+        windows = desktop = None
+        pythoncom.CoUninitialize()
+
+
 class WindowsLaunchSystem(LaunchSystem):
     """The real machine, using exactly the calls the legacy uses."""
 
@@ -124,9 +199,20 @@ class WindowsLaunchSystem(LaunchSystem):
         subprocess.Popen([EXPLORER_EXE, path])
 
     def spawn_detached(self, exe: str, cwd) -> int | None:
+        """Start `exe` the way the desktop would; the pid when it is known.
+
+        First through the desktop shell (:func:`desktop_shell_execute` — no
+        pid, the shell is the parent); when there is no shell to ask, a
+        detached process with the user's own environment.
+        """
+        try:
+            if desktop_shell_execute(exe, cwd):
+                return None
+        except Exception:
+            pass
         import subprocess
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        proc = subprocess.Popen([exe], env=clean_pyinstaller_env(), cwd=cwd,
+        proc = subprocess.Popen([exe], env=user_environment(), cwd=cwd,
                                 creationflags=flags, close_fds=True)
         return proc.pid
 
@@ -138,6 +224,25 @@ class WindowsLaunchSystem(LaunchSystem):
                 return True
             time.sleep(POLL_INTERVAL_S)
         return False
+
+    def wait_until(self, predicate, timeout: float) -> bool:
+        """Poll `predicate` until it is true or `timeout` elapses.
+
+        Used after a launch to wait for the client's *window*, not only its
+        process (Stormshield starts to the tray).  A predicate that raises
+        counts as "not yet".
+        """
+        import time
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if predicate():
+                    return True
+            except Exception:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(POLL_INTERVAL_S)
 
     def run_capture(self, cmd, timeout):
         import subprocess

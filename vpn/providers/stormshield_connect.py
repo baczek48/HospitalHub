@@ -35,8 +35,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..types import (
-    AutomationMode, ConnectResult, ConnectStep, DetectionState, ErrorCode,
-    VpnRequest, VpnState,
+    AutofillStatus, AutomationMode, ConnectResult, ConnectStep, DetectionState,
+    ErrorCode, VpnRequest, VpnState,
 )
 from .activation_gate import (
     ACTIVATION_TIMEOUT_S, CancellationToken, Clock, SystemClock,
@@ -51,6 +51,7 @@ PHASE_DETECT = "detect"
 PHASE_LAUNCH = "launch"
 PHASE_WINDOW_PROBE = "window_probe"
 PHASE_AWAIT_ACTIVATION = "await_activation"
+PHASE_AUTOFILL = "autofill"
 
 STEP_OK = "ok"
 STEP_FAILED = "failed"
@@ -138,13 +139,21 @@ class StormshieldConnectRuntime(StormshieldConnectSystem):
     def await_activation(self):
         from .activation_gate import ActivationGate
 
+        target = self._target()
         return ActivationGate(
-            target=self._target(),
+            target=target,
+            bring_forward=target.bring_forward,
             clock=self._clock if self._clock is not None else SystemClock(),
             cancellation=self.cancellation,
             timeout_s=self.activation_timeout_s,
             observer=self.activation_observer,
             trace=self._trace).wait()
+
+    def autofill(self, request):
+        """Fill the verified client window (2026-10-19)."""
+        return self._provider.autofill_login_password(
+            request, target=self._target(), cancellation=self.cancellation,
+            trace=self._trace)
 
     def activation_still_holds(self, hwnd):
         """One more strict reading before anything could reach for the window.
@@ -217,9 +226,34 @@ class StormshieldConnectFlow:
                 return self._user_action(steps, launch,
                                          ErrorCode.FOCUS_FAILED.value)
 
-        # -- and stop ------------------------------------------------------- #
-        # The autofill is the next stage.  Until it exists, the client is open
-        # and verified and the person in front of it does the typing.
+
+        # -- autofill (2026-10-19) ------------------------------------------ #
+        # The window is verified and in front.  Fill it field by field
+        # (vpn.providers.field_fill); every step re-confirms the window.
+        if request.autofill and (request.login or request.password):
+            filled = self._system.autofill(request)
+            if filled.status is AutofillStatus.CANCELLED:
+                steps.append(ConnectStep(PHASE_AUTOFILL, STEP_NONE,
+                                         ErrorCode.CANCELLED.value, filled.blocked_at))
+                return ConnectResult(
+                    provider_id=self._provider.id, success=False,
+                    state=VpnState.UNKNOWN, automation=AutomationMode.NONE,
+                    route=ROUTE_GUI, steps=tuple(steps), launch=launch,
+                    autofill=filled, error_code=ErrorCode.CANCELLED.value)
+            done = filled.status is AutofillStatus.DONE
+            steps.append(ConnectStep(PHASE_AUTOFILL, STEP_OK if done else STEP_FAILED,
+                                     None if done else filled.error_code,
+                                     None if done else filled.blocked_at))
+            submitted = bool((filled.metadata or {}).get("submitted"))
+            return ConnectResult(
+                provider_id=self._provider.id, success=True,
+                state=VpnState.CONNECTING if submitted else VpnState.UNKNOWN,
+                automation=AutomationMode.UIA_FOCUS_TYPE,
+                requires_user_action=not submitted, route=ROUTE_GUI,
+                steps=tuple(steps), launch=launch, autofill=filled,
+                error_code=None if done else filled.error_code)
+
+        # Autofill off, or nothing to type: the person does the typing.
         return self._user_action(steps, launch)
 
     # -- results ------------------------------------------------------------ #

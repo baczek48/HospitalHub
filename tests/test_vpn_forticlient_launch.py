@@ -292,8 +292,18 @@ def new_semantics(result: LaunchResult) -> dict:
     }
 
 
+def legacy_machine_for(make):
+    """The legacy reference for the provider: the same machine without the
+    public ``.lnk``.  2026-10-19 the provider dropped the ``explorer_lnk``
+    stage (Documents folder, Electron "TraceLog" crash), so what it must
+    match is the legacy's own no-``.lnk`` path."""
+    m = make()
+    m.env.files.discard(LNK.lower())
+    return m
+
+
 def run_both(make, monkeypatch, app_path=""):
-    legacy_machine, new_machine = make(), make()
+    legacy_machine, new_machine = legacy_machine_for(make), make()
     legacy = legacy_semantics(run_legacy(legacy_machine, app_path, monkeypatch))
     result = run_new(new_machine, app_path)
     return legacy, new_semantics(result), legacy_machine.calls, new_machine.calls, result
@@ -314,46 +324,40 @@ SCENARIOS = [
     # id, machine, app_path, expected semantics subset, expected call sequence.
     # "attempts" in the expectation compares (strategy, started, fallback,
     # error_code) per attempt; the parity assertion compares everything.
-    ("A-explorer-starts", machine(), "",
-     dict(success=True, strategy=EXPL, started=True, fallback=False,
+    ("A-lnk-present-is-not-handed-to-explorer", machine(), "",
+     dict(success=True, strategy=POPEN, started=True, fallback=False,
           process_started=True, requires_user_action=True, error_code=None,
-          attempts=((EXPL, True, False, None),)),
-     [EXPLORER, W4]),
+          attempts=((POPEN, True, False, None),)),
+     [SPAWN64, W3]),
     ("A2-no-lnk-popen-is-first-not-a-fallback", machine(lnk=False), "",
      dict(success=True, strategy=POPEN, started=True, fallback=False,
           fallback_from=None, pid=4242, cwd_source="install_dir", error_code=None,
           attempts=((POPEN, True, False, None),)),
      [SPAWN64, W3]),
-    ("B-explorer-documents-then-popen", machine(explorer="documents"), "",
-     dict(success=True, strategy=POPEN, started=True, fallback=True,
-          fallback_from=EXPL, pid=4242, requires_user_action=True,
-          attempts=((EXPL, False, False, "launch-no-process"),
-                    (POPEN, True, True, None))),
-     [EXPLORER, W4, SPAWN64, W3]),
-    ("C-explorer-raises-then-popen", machine(explorer="raises"), "",
-     dict(success=True, strategy=POPEN, started=True, fallback=True,
-          fallback_from=EXPL,
-          attempts=((EXPL, False, False, "launch-failed"),
-                    (POPEN, True, True, None))),
-     [EXPLORER, SPAWN64, W3]),
+    ("B-hijacked-lnk-cannot-open-documents", machine(explorer="documents"), "",
+     dict(success=True, strategy=POPEN, started=True, fallback=False,
+          fallback_from=None, pid=4242, requires_user_action=True,
+          attempts=((POPEN, True, False, None),)),
+     [SPAWN64, W3]),
+    ("C-broken-explorer-is-never-needed", machine(explorer="raises"), "",
+     dict(success=True, strategy=POPEN, started=True, fallback=False,
+          fallback_from=None, attempts=((POPEN, True, False, None),)),
+     [SPAWN64, W3]),
     ("C2-popen-spawns-but-no-process-still-success",
      machine(explorer="documents", popen="no-process"), "",
-     dict(success=True, strategy=POPEN, started=False, fallback=True,
+     dict(success=True, strategy=POPEN, started=False, fallback=False,
           process_started=True, requires_user_action=True, error_code=None),
-     [EXPLORER, W4, SPAWN64, W3]),
-    ("D-explorer-fails-and-no-executable",
-     machine(explorer="documents", installed=False), "",
-     dict(success=False, strategy=EXPL, started=False,
-          requires_user_action=False, error_code="client-not-found",
-          attempts=((EXPL, False, False, "launch-no-process"),)),
-     [EXPLORER, W4]),
-    ("D2-explorer-raises-and-popen-raises",
+     [SPAWN64, W3]),
+    ("D-lnk-but-no-executable", machine(explorer="documents", installed=False), "",
+     dict(success=False, strategy=None, started=None,
+          requires_user_action=False, error_code="client-not-found", attempts=()),
+     []),
+    ("D2-popen-raises-with-lnk-present",
      machine(explorer="raises", popen="raises"), "",
-     dict(success=False, strategy=POPEN, started=False, fallback=True,
+     dict(success=False, strategy=POPEN, started=False, fallback=False,
           process_started=False, error_code="process-start-failed",
-          attempts=((EXPL, False, False, "launch-failed"),
-                    (POPEN, False, True, "process-start-failed"))),
-     [EXPLORER, SPAWN64]),
+          attempts=((POPEN, False, False, "process-start-failed"),)),
+     [SPAWN64]),
     ("D3-nothing-at-all", machine(lnk=False, installed=False), "",
      dict(success=False, strategy=None, started=None, error_code="client-not-found",
           attempts=()),
@@ -371,19 +375,19 @@ SCENARIOS = [
           process_started=True, observation_failed=True, requires_user_action=True,
           attempts=((POPEN, None, False, "process-started-but-observation-failed"),)),
      [SPAWN64, W3]),
-    ("F3-fallback-then-probe-raises",
+    ("F3-lnk-present-then-probe-raises",
      machine(explorer="documents", wait_raises=(3.0,)), "",
-     dict(success=True, pid=4242, fallback=True, fallback_from=EXPL,
+     dict(success=True, pid=4242, fallback=False, fallback_from=None,
           observation_failed=True),
-     [EXPLORER, W4, SPAWN64, W3]),
-    ("G-already-running-explorer-false-positive",
+     [SPAWN64, W3]),
+    ("G-already-running-starts-again-and-is-seen",
      machine(explorer="documents", running=True), "",
-     dict(success=True, strategy=EXPL, started=True, fallback=False),
-     [EXPLORER, W4]),
-    ("H-lnk-wins-over-configured-app-path",
+     dict(success=True, strategy=POPEN, started=True, fallback=False),
+     [SPAWN64, W3]),
+    ("H-configured-app-path-used-with-lnk-present",
      machine(files=[r"D:\Inny\FortiClient.exe"]), r"D:\Inny\FortiClient.exe",
-     dict(success=True, strategy=EXPL),
-     [EXPLORER, W4]),
+     dict(success=True, strategy=POPEN),
+     [("spawn", r"D:\Inny\FortiClient.exe", DIR_64), W3]),
     ("H2-app-path-used-when-no-lnk",
      machine(lnk=False, files=[r"D:\Inny\FortiClient.exe"]), r"D:\Inny\FortiClient.exe",
      dict(success=True, strategy=POPEN, cwd_source="install_dir"),
@@ -429,22 +433,15 @@ def test_parity_legacy_vs_new(make, app_path, expected, calls, monkeypatch):
 
 
 def test_parity_difference_probe_raising_after_explorer(monkeypatch):
-    """The one documented difference: the legacy lets this exception escape.
-
-    `_wait_for_process` after `explorer.exe` sits outside the legacy `try`,
-    so a failing probe propagates out of `_open_forticlient_gui` (and up into
-    `connect()`).  The provider contract forbids raising: same failure, as data.
-    """
+    """The legacy's escaping exception sat after ``explorer.exe``; with that
+    stage gone the provider never reaches it (2026-10-19)."""
     make = machine(wait_raises=(4.0,))
     legacy_machine, new_machine = make(), make()
     assert legacy_semantics(run_legacy(legacy_machine, "", monkeypatch)) == {
         "raised": "RuntimeError"}
     result = run_new(new_machine, "")
-    assert result.success is False
-    assert result.error_code == "launch-failed"
-    assert result.metadata["reason_code"] == "RuntimeError"
-    assert result.attempts == ()
-    assert new_machine.calls == legacy_machine.calls == [EXPLORER, W4]
+    assert result.success is True and result.strategy == POPEN
+    assert new_machine.calls == [SPAWN64, W3]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -454,64 +451,63 @@ def test_parity_difference_probe_raising_after_explorer(monkeypatch):
 def test_1_basic_strategy_launches():
     result = run_new(machine()(), "")
     assert result.success and result.error_code is None
-    assert result.strategy == "explorer_lnk"
+    assert result.strategy == "popen_clean_env"
 
 
-def test_2_explorer_lnk_works():
-    m = machine()()
-    result = run_new(m, "")
-    assert m.calls == [EXPLORER, W4], "żadnego Popen, gdy .lnk zadziałał"
-    assert result.started is True and result.fallback is False
-    assert len(result.attempts) == 1
+def test_2_lnk_is_never_handed_to_explorer():
+    """2026-10-19: explorer opened "Dokumenty" on a hijacked .lnk and, started
+    from this process, did not give the client a clean environment."""
+    for mode in ("starts", "documents", "raises"):
+        m = machine(explorer=mode)()
+        result = run_new(m, "")
+        assert m.calls == [SPAWN64, W3], mode
+        assert result.started is True and result.fallback is False
+        assert len(result.attempts) == 1
 
 
-def test_3_explorer_without_process_falls_back():
+def test_3_hijacked_lnk_machine_gets_the_client_directly():
     """The "opens Documents instead of FortiClient" machine."""
     m = machine(explorer="documents")()
     result = run_new(m, "")
-    first = result.attempts[0]
-    assert (first.strategy, first.started, first.error_code) == (
-        "explorer_lnk", False, "launch-no-process")
-    assert m.calls[:2] == [EXPLORER, W4] and m.calls[2][0] == "spawn"
+    only = result.attempts[0]
+    assert (only.strategy, only.started, only.error_code) == (
+        "popen_clean_env", True, None)
+    assert "explorer" not in [c[0] for c in m.calls]
 
 
-def test_4_fallback_succeeds():
+def test_4_one_strategy_no_fallback():
     result = run_new(machine(explorer="documents")(), "")
     assert result.success is True
     assert (result.strategy, result.started, result.fallback) == (
-        "popen_clean_env", True, True)
-    assert [a.strategy for a in result.attempts] == ["explorer_lnk", "popen_clean_env"]
+        "popen_clean_env", True, False)
+    assert [a.strategy for a in result.attempts] == ["popen_clean_env"]
     trace = result.to_trace_data()
-    assert trace["strategies"] == "explorer_lnk,popen_clean_env"
-    assert trace["attempt_count"] == 2
+    assert trace["strategies"] == "popen_clean_env"
+    assert trace["attempt_count"] == 1
 
 
-def test_5_strategies_keep_their_order():
-    m = machine(explorer="documents")()
-    run_new(m, "")
-    kinds = [c[0] for c in m.calls]
-    assert kinds == ["explorer", "wait", "spawn", "wait"]
-    assert [c[2] for c in m.calls if c[0] == "wait"] == [4.0, 3.0]
-
-    m = machine(lnk=False)()
-    run_new(m, "")
-    assert "explorer" not in [c[0] for c in m.calls], "bez .lnk nie ma etapu explorer"
+def test_5_spawn_then_one_wait():
+    for make in (machine(explorer="documents"), machine(lnk=False)):
+        m = make()
+        run_new(m, "")
+        assert [c[0] for c in m.calls] == ["spawn", "wait"]
+        assert [c[2] for c in m.calls if c[0] == "wait"] == [3.0]
 
 
 def test_6_pid_is_passed_through():
     result = run_new(machine(lnk=False, pid=5151)(), "")
     assert result.pid == 5151 and result.attempts[-1].pid == 5151
     assert result.to_trace_data()["pid"] == 5151
-    assert run_new(machine()(), "").pid is None, "explorer nie zna pid klienta"
+    assert run_new(machine()(), "").pid == 4242, "z .lnk też znamy pid klienta"
 
 
 def test_7_started_means_process_seen_not_launch_succeeded():
     # Spawned, no process within 3 s: legacy still reports success.
     result = run_new(machine(lnk=False, popen="no-process")(), "")
     assert (result.success, result.started) == (True, False)
-    # A FortiClient that was already running makes explorer look successful.
+    # A FortiClient already running: started again (it raises its own window).
     result = run_new(machine(explorer="documents", running=True)(), "")
-    assert (result.strategy, result.started) == ("explorer_lnk", True)
+    assert (result.strategy, result.started) == ("popen_clean_env", True)
 
 
 @pytest.mark.parametrize("make,code", [
@@ -600,7 +596,7 @@ def test_11b_trace_data_survives_the_existing_redactor(tmp_path, monkeypatch):
         record_result(trace, "vpn.launch", run_new(machine(explorer="documents")(), ""))
         trace.finish("ok")
         text = diagnostics.get_store().read_jsonl()
-        assert '"strategies": "explorer_lnk,popen_clean_env"' in text
+        assert '"strategies": "popen_clean_env"' in text
         assert '"requires_user_action": true' in text and '"pid": 4242' in text
     finally:
         diagnostics.reset_for_tests()
@@ -630,7 +626,7 @@ def test_12_launch_does_no_status_polling():
 
 
 def test_13_launch_waits_only_where_the_legacy_waits():
-    for make, waits in ((machine(), [4.0]), (machine(explorer="documents"), [4.0, 3.0]),
+    for make, waits in ((machine(), [3.0]), (machine(explorer="documents"), [3.0]),
                         (machine(explorer="raises"), [3.0]),
                         (machine(lnk=False, installed=False), [])):
         m = make()
@@ -806,7 +802,7 @@ def test_seam_constants_match_the_legacy_process_probe():
     assert "['tasklist', '/FI', f'IMAGENAME eq {exe_name}', '/NH', '/FO', 'CSV']" in probe_src
 
 
-def test_windows_launch_system_makes_exactly_the_legacy_calls(monkeypatch):
+def test_windows_launch_system_falls_back_to_the_legacy_calls(monkeypatch):
     seen = []
 
     def fake_popen(cmd, **kwargs):
@@ -814,6 +810,8 @@ def test_windows_launch_system_makes_exactly_the_legacy_calls(monkeypatch):
         return _Proc(9090)
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)   # imported lazily by the seam
+    # No desktop shell to ask (2026-10-19: tried first): the detached fallback.
+    monkeypatch.setattr(ls, "desktop_shell_execute", lambda exe, cwd: False)
     monkeypatch.setenv("_MEIPASS2", "x")
     system = ls.WindowsLaunchSystem()
     system.open_with_explorer(LNK)
@@ -895,3 +893,26 @@ def test_launch_attempt_trace_data_is_flat_and_path_free():
     assert attempt.to_trace_data() == {
         "strategy": "popen_clean_env", "started": False, "fallback": True,
         "error_code": "launch-failed", "reason_code": "PermissionError"}
+
+
+def test_windows_launch_system_asks_the_desktop_shell_first(monkeypatch):
+    """2026-10-19: the client is started by explorer, like a double-click."""
+    asked = []
+    monkeypatch.setattr(ls, "desktop_shell_execute",
+                        lambda exe, cwd: asked.append((exe, cwd)) or True)
+    monkeypatch.setattr(subprocess, "Popen", _tripwire("subprocess.Popen"))
+    assert ls.WindowsLaunchSystem().spawn_detached(GUI_64, DIR_64) is None
+    assert asked == [(GUI_64, DIR_64)]
+    TRIPPED.clear()
+
+
+def test_a_broken_desktop_shell_falls_back_to_a_detached_start(monkeypatch):
+    def broken(exe, cwd):
+        raise OSError("no shell")
+
+    seen = []
+    monkeypatch.setattr(ls, "desktop_shell_execute", broken)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda cmd, **kw: seen.append(cmd) or _Proc(77))
+    assert ls.WindowsLaunchSystem().spawn_detached(GUI_64, DIR_64) == 77
+    assert seen == [[GUI_64]]

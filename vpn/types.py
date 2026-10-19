@@ -88,6 +88,7 @@ class AutomationMode(StrEnum):
     WM_SETTEXT = "wm_settext"         # Win32 messages straight into controls
     NATIVE_WINDOW = "native_window"   # WM_SETTEXT with SendInput fallback
     CLI = "cli"                       # credentials passed to a command line
+    UIA_FOCUS_TYPE = "uia_focus_type"  # field focused by AutomationId, then typed
     SYSTEM = "system"                 # Windows supplies them from its profile
 
 

@@ -14,33 +14,27 @@ the running application does not call it: the UI still goes through
 
 Launch
 ------
-The legacy sequence, with the same four fixes applied to the legacy itself in
-stage 9 (both sides pinned by ``tests/test_vpn_forticlient_launch.py`` and
-``tests/test_vpn_forticlient_launch_fixes.py``):
+2026-10-19 (owner's field report): the ``explorer_lnk`` stage is gone.  On the
+owner's machines it opened the "Dokumenty" folder (hijacked ``.lnk``
+association), and started from this process explorer does not give a clean
+environment either: measured here, the client came up with a hidden window and
+a second start died with FortiClient's Electron "Cannot read properties of null
+(reading 'TraceLog')" error.  One strategy is left:
 
-1. ``explorer_lnk`` — when the public-desktop ``FortiClient VPN.lnk`` exists,
-   hand it to ``explorer.exe`` and wait up to 4 s for ``FortiClient.exe``.
-   A spawn error or no process falls through.  ``app_path`` is not consulted
-   in this stage.  On a machine whose ``.lnk`` association is hijacked,
-   explorer opens the user's Documents folder instead — that is *not* fixed
-   here; it shows up as ``started=False, error_code="launch-no-process"``.
-2. ``popen_clean_env`` — locate the executable (the detection lookups), start
-   it detached with a PyInstaller-free environment, wait up to 3 s.
+``popen_clean_env`` — locate the executable (the detection lookups), start it
+detached with the user's own environment
+(:func:`~vpn.providers.launch_system.user_environment`), wait up to 3 s.
+Measured: first start shows the window in front; a start while the client is
+already running restores and raises the existing window (Electron single
+instance) — no crash, no second client.
 
-   * ``cwd`` comes from :func:`launch_rules.choose_launch_cwd`: the install dir
-     only if it is an existing directory, else the executable's directory.
-   * ``fallback=True`` (and ``fallback_from="explorer_lnk"``) only when stage 1
-     was actually tried and failed.
-   * Spawn raised → ``process-start-failed``.  Spawned but the process probe
-     raised → still a success, ``process_started=True``,
-     ``observation_failed=True``, pid kept.
-   * Spawned, probe fine but no process within 3 s → success with
-     ``started=False`` (unchanged legacy behaviour).
-
-Not fixed on purpose: the Documents folder, the 4 s / 3 s timeouts, a client
-that explorer starts after the 4 s window (a second instance may follow), and
-a probe raising right after explorer (legacy lets it escape; here it becomes
-``launch-failed``).
+* ``cwd`` comes from :func:`launch_rules.choose_launch_cwd`: the install dir
+  only if it is an existing directory, else the executable's directory.
+* Spawn raised → ``process-start-failed``.  Spawned but the process probe
+  raised → still a success, ``process_started=True``,
+  ``observation_failed=True``, pid kept.
+* Spawned, probe fine but no process within 3 s → success with
+  ``started=False`` (unchanged legacy behaviour).
 
 System calls go through :class:`~vpn.providers.launch_system.LaunchSystem`;
 detection never touches it.
@@ -540,12 +534,11 @@ class FortiClientProvider(VpnProvider):
     # -- launch ------------------------------------------------------------ #
 
     def launch(self, request: VpnRequest | None = None) -> LaunchResult:
-        """Start FortiClient — mirrors legacy ``_open_forticlient_gui``.
+        """Start FortiClient (the legacy ``_open_forticlient_gui`` without its
+        ``explorer.exe`` stage — see the module docstring).
 
-        Never raises.  The one place the legacy lets an exception escape (the
-        process wait after ``explorer.exe`` sits outside its ``try``) comes
-        back here as ``launch-failed`` with the exception type as
-        ``reason_code``.
+        Never raises: an unexpected exception comes back as ``launch-failed``
+        with the exception type as ``reason_code``.
         """
         app_path = request.app_path if request is not None else ""
         attempts: list[LaunchAttempt] = []
@@ -556,29 +549,8 @@ class FortiClientProvider(VpnProvider):
                                        reason_code=type(exc).__name__)
 
     def _launch(self, app_path: str, attempts: list[LaunchAttempt]) -> LaunchResult:
-        # Stage 1 — explorer.exe <public .lnk> (vpn_connect.py:1402).
-        if self._env.is_file(LNK_PATH) and self._valid_exe(LNK_PATH):
-            try:
-                self._system.open_with_explorer(LNK_PATH)
-            except Exception as exc:
-                attempts.append(LaunchAttempt(
-                    STRATEGY_EXPLORER_LNK, started=False, process_started=False,
-                    error_code=ErrorCode.LAUNCH_FAILED.value,
-                    reason_code=type(exc).__name__))
-            else:
-                # Legacy: outside the try — an exception here escapes (not
-                # fixed in stage 9); launch() turns it into launch-failed.
-                started = bool(self._system.wait_for_process(GUI_EXE_NAME,
-                                                             EXPLORER_WAIT_S))
-                attempts.append(LaunchAttempt(
-                    STRATEGY_EXPLORER_LNK, started=started, process_started=True,
-                    error_code=None if started
-                    else ErrorCode.LAUNCH_NO_PROCESS.value))
-                if started:
-                    return self._launch_result(True, attempts)
-                # No process: hijacked .lnk association ("opens Documents").
-
-        # Stage 2 — direct executable, clean env, detached (vpn_connect.py:1438).
+        # The only stage (2026-10-19): direct executable, the user's own
+        # environment, detached.  No explorer.exe — see the module docstring.
         gui, _source = self._gui_executable(app_path)
         install_dir = self._install_dir()
         if not gui:

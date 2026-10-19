@@ -42,8 +42,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 __all__ = ["ActivationPresenter", "ActivationPrompt", "ActivationWorker",
-           "STATE_MESSAGES", "STATE_COLOURS", "WAITING_STATES",
-           "label_style_sheet"]
+           "STATE_MESSAGES", "STATE_TEMPLATES", "STATE_COLOURS", "WAITING_STATES",
+           "DEFAULT_CLIENT", "label_style_sheet", "state_message"]
 
 #: What the user reads, per state name.  Deliberately free of: any promise that
 #: the switch will happen by itself or within some time, the words "click Done"
@@ -51,21 +51,42 @@ __all__ = ["ActivationPresenter", "ActivationPrompt", "ActivationWorker",
 #: active), and every diagnostic detail.  No handle, no pid, no error code, and
 #: of course no login, password or token: none of that is the user's problem
 #: and none of it belongs on a screen somebody might be standing behind.
-STATE_MESSAGES = {
-    "locating-target": "Szukam okna FortiClienta…",
+STATE_TEMPLATES = {
+    "locating-target": "Uruchamiam {client}…",
     "awaiting-activation":
-        "FortiClient został uruchomiony. Przełącz się do okna FortiClient, "
-        "aby kontynuować.",
-    "activation-observed": "Okno FortiClienta jest aktywne — wypełniam dane…",
+        "Okno {client} jest otwarte, ale nieaktywne — kliknij je, "
+        "aby wpisać dane.",
+    "activation-observed": "Okno {client} jest aktywne — wypełniam dane…",
     "activation-timeout":
-        "Nie przełączono się do okna FortiClienta. Wpisz dane ręcznie albo "
-        "spróbuj ponownie.",
+        "Okno {client} nie zostało aktywowane — nic nie wpisano. Spróbuj "
+        "ponownie albo wpisz dane ręcznie.",
     "no-target":
-        "Nie znaleziono okna FortiClienta. Uruchom klienta i spróbuj ponownie.",
+        "Nie pojawiło się okno {client}. Otwórz je (np. z zasobnika) i "
+        "spróbuj ponownie.",
     "target-changed":
-        "Okno FortiClienta zmieniło się w trakcie oczekiwania. Spróbuj ponownie.",
+        "Okno {client} zmieniło się w trakcie oczekiwania. Spróbuj ponownie.",
     "cancelled": "Anulowano — nic nie zostało wpisane.",
 }
+
+#: The client named when the caller names none (the first migrated provider).
+DEFAULT_CLIENT = "FortiClient"
+
+
+def state_message(state, client: str | None = None) -> str | None:
+    """The sentence for `state`, naming `client`; None for an unknown state.
+
+    2026-10-19: every provider used to read "FortiClient" here — a Barracuda
+    connect said "FortiClient został uruchomiony".
+    """
+    template = STATE_TEMPLATES.get(str(state))
+    if template is None:
+        return None
+    return template.format(client=client or DEFAULT_CLIENT)
+
+
+#: The sentences as FortiClient reads them (kept for callers and tests that
+#: name no client).
+STATE_MESSAGES = {state: state_message(state) for state in STATE_TEMPLATES}
 
 #: The panel's own status palette, used with the panel's own meanings: amber is
 #: "in progress" (it is what "◌ Łączenie…" uses), green "it worked", red "it
@@ -109,8 +130,10 @@ class ActivationPresenter:
     """
 
     def __init__(self, state: str = "locating-target", *,
-                 hold_cancel: bool = False):
+                 hold_cancel: bool = False, client: str | None = None):
         self.state = str(state)
+        #: The client named in the sentences ("FortiClient", "Stormshield"…).
+        self.client = client or DEFAULT_CLIENT
         #: Keep Cancel through :data:`HELD_STATES` until released (Stage 47).
         #: Off by default: a prompt that only watches the gate ends with it.
         self.hold_cancel = bool(hold_cancel)
@@ -125,7 +148,7 @@ class ActivationPresenter:
 
     @property
     def message(self) -> str:
-        return STATE_MESSAGES.get(self.state, UNKNOWN_MESSAGE)
+        return state_message(self.state, self.client) or UNKNOWN_MESSAGE
 
     @property
     def colour(self) -> str:
@@ -229,9 +252,10 @@ class ActivationPrompt(QWidget):
     cancelled = pyqtSignal()
 
     def __init__(self, parent=None, *, status_label: QLabel | None = None,
-                 hold_cancel: bool = False):
+                 hold_cancel: bool = False, client: str | None = None):
         super().__init__(parent)
-        self.presenter = ActivationPresenter(hold_cancel=hold_cancel)
+        self.presenter = ActivationPresenter(hold_cancel=hold_cancel,
+                                             client=client)
 
         #: True when the sentence goes into a label this widget does not own —
         #: the VPN card's existing status line.
@@ -240,7 +264,7 @@ class ActivationPrompt(QWidget):
         self._label.setWordWrap(True)
 
         self._cancel = QPushButton("Anuluj")
-        self._cancel.setToolTip("Przerwij oczekiwanie — nic nie zostanie wpisane")
+        self._cancel.setToolTip("Przerwij — nic więcej nie zostanie wpisane")
         self._cancel.clicked.connect(self.request_cancel)
 
         layout = QHBoxLayout(self)

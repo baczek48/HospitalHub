@@ -44,11 +44,11 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def profile(provider="FortiClient", login=LOGIN, **kw):
+def profile(provider="FortiClient", login=LOGIN, profile_name=PROFILE, **kw):
     return models.VpnProfile(name="p", provider=provider, server=SERVER,
                              port=PORT, login=login, password=PASSWORD,
                              group="g", domain="d", app_path=r"C:\x\client.exe",
-                             profile_name=PROFILE, **kw)
+                             profile_name=profile_name, **kw)
 
 
 class FakeTimer:
@@ -90,10 +90,11 @@ class FakeController:
     instances = []
     raise_on_init = False
 
-    def __init__(self, session, label, *, prompt_parent=None):
+    def __init__(self, session, label, *, prompt_parent=None, client=None):
         if FakeController.raise_on_init:
             raise RuntimeError("V2 controller boom")
         self.session = session
+        self.client = client
         self.label = label
         self.prompt = QWidget(prompt_parent)
         self.polling_pause = _Signal()
@@ -370,6 +371,8 @@ def test_9_v2_route_builds_a_session_for_the_clicked_provider(
     assert len(FakeSession.instances) == 1
     assert FakeSession.instances[0].request.provider_id == provider_id
     assert len(FakeController.instances) == 1
+    # 2026-10-19: the card's sentences name the clicked client, not FortiClient.
+    assert FakeController.instances[0].client == provider_name
 
 
 def test_9b_gate_off_no_provider_builds_a_v2_session(app, monkeypatch):
@@ -595,3 +598,59 @@ def test_q_a_cli_outcomes_monitor_is_not_adopted_by_the_panel(app, monkeypatch,
     panel._on_v2_finished(0, outcome)
 
     assert started == [], "…and nothing consumes it yet (the recorded gap)"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-19 (owner's test): status after a V2 connect, and a missing profile
+# ══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("provider,expected", [
+    ("FortiClient", PROFILE), ("Barracuda", PROFILE), ("Stormshield", SERVER)])
+def test_v2_click_tells_the_status_poll_which_profile_connects(
+        app, monkeypatch, wire_v2, provider, expected):
+    """Without it a FortiClient profile with no server never showed Connected."""
+    monkeypatch.setattr(vpn_panel, "select_connect_route", lambda name: "v2")
+    monkeypatch.setattr(vpn_connect, "_last_connected", {})
+    monkeypatch.setattr(vpn_connect, "_last_connected_meta", {})
+    make_panel([profile(provider=provider)], QLabel())._connect_card(0)
+    assert vpn_connect._last_connected[provider] == expected
+    assert vpn_connect._last_connected_meta[provider] == {
+        "server": SERVER, "profile_name": PROFILE}
+
+
+def test_a_missing_forticlient_profile_is_explained_with_the_ones_that_exist(
+        app, monkeypatch):
+    from vpn.panel_bridge import PanelConnectOutcome, PanelOutcome
+    shown = []
+    monkeypatch.setattr(vpn_connect, "get_forti_tunnels_from_registry",
+                        lambda: [{"name": "1SZP"}, {"name": "Betanin"}])
+    monkeypatch.setattr(vpn_panel, "QTimer",
+                        SimpleNamespace(singleShot=lambda ms, fn: None))
+    panel = make_panel([profile(profile_name="Wieluń")], QLabel())
+    monkeypatch.setattr(panel, "_explain_missing_tunnel",
+                        lambda p: shown.append(p.profile_name), raising=False)
+    outcome = PanelConnectOutcome(code=PanelOutcome.AUTOFILL_BLOCKED,
+                                  reason="requested-tunnel-not-configured")
+    panel._on_v2_finished(0, outcome)
+    assert shown == ["Wieluń"]
+
+    other = []
+    monkeypatch.setattr(panel, "_explain_missing_tunnel",
+                        lambda p: other.append(p), raising=False)
+    panel._on_v2_finished(0, PanelConnectOutcome(code=PanelOutcome.AUTOFILL_BLOCKED,
+                                                 reason="focus-lost"))
+    assert other == [], "inne blokady nie udają braku profilu"
+
+
+def test_the_missing_profile_message_names_the_configured_ones(app, monkeypatch):
+    monkeypatch.setattr(vpn_connect, "get_forti_tunnels_from_registry",
+                        lambda: [{"name": "1SZP"}, {"name": "Betanin"}])
+    host = QWidget()
+    panel = make_panel([profile(profile_name="Wieluń")], QLabel())
+    shown = []
+    monkeypatch.setattr(vpn_panel.QMessageBox, "show",
+                        lambda self: shown.append(self.text()))
+    vpn_panel.VpnPanel._explain_missing_tunnel.__get__(host)(panel._profiles[0])
+    assert shown and "„Wieluń”" in shown[0]
+    assert "1SZP, Betanin" in shown[0]
+    assert PASSWORD not in shown[0] and LOGIN not in shown[0]
