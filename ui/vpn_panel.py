@@ -634,6 +634,37 @@ def _record_legacy_session(p) -> None:
         pass
 
 
+def explain_missing_tunnel(parent, p) -> None:
+    """Say plainly which FortiClient profile is missing, and which exist.
+
+    The one-line status was easy to miss ("it opens the window and nothing
+    happens").  Non-modal: the session is already over.  Shared by the VPN
+    cards and the hospital window's VPN button.
+    """
+    try:
+        names = [t.get("name", "") for t in
+                 vpn_connect.get_forti_tunnels_from_registry()]
+    except Exception:
+        names = []
+    wanted = p.profile_name or "(puste)"
+    text = (f"W FortiClient nie ma profilu „{wanted}”, którego używa karta "
+            f"„{p.name or wanted}”.\n\n"
+            "Login i hasło nie zostały wpisane — inaczej trafiłyby do "
+            "profilu, który akurat jest wybrany w FortiClient, czyli do "
+            "innego szpitala.\n\n")
+    if names:
+        text += "Profile skonfigurowane w FortiClient: " + ", ".join(
+            n for n in names if n) + ".\n\n"
+    text += ("Dodaj ten profil w FortiClient albo popraw pole „Nazwa "
+             "profilu w kliencie” na karcie.")
+    box = QMessageBox(QMessageBox.Icon.Information, "FortiClient — brak profilu",
+                      text, QMessageBox.StandardButton.Ok, parent)
+    box.setModal(False)
+    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    box.show()
+    parent._missing_tunnel_box = box
+
+
 def _vlog(level: str, what: str, p=None, /, **fields) -> None:
     """One line in the VPN log (⚙ Ustawienia VPN → Diagnostyka), when it is
     switched on.  A module function, not a method: it must work for any
@@ -1516,33 +1547,7 @@ class VpnPanel(QWidget):
         QTimer.singleShot(0, lambda i=idx, c=controller: self._release_v2(i, c))
 
     def _explain_missing_tunnel(self, p) -> None:
-        """Say plainly which FortiClient profile is missing, and which exist.
-
-        The card's one-line status was easy to miss ("it opens the window and
-        nothing happens").  Non-modal: the session is already over.
-        """
-        try:
-            names = [t.get("name", "") for t in
-                     vpn_connect.get_forti_tunnels_from_registry()]
-        except Exception:
-            names = []
-        wanted = p.profile_name or "(puste)"
-        text = (f"W FortiClient nie ma profilu „{wanted}”, którego używa karta "
-                f"„{p.name or wanted}”.\n\n"
-                "Login i hasło nie zostały wpisane — inaczej trafiłyby do "
-                "profilu, który akurat jest wybrany w FortiClient, czyli do "
-                "innego szpitala.\n\n")
-        if names:
-            text += "Profile skonfigurowane w FortiClient: " + ", ".join(
-                n for n in names if n) + ".\n\n"
-        text += ("Dodaj ten profil w FortiClient albo popraw pole „Nazwa "
-                 "profilu w kliencie” na karcie.")
-        box = QMessageBox(QMessageBox.Icon.Information, "FortiClient — brak profilu",
-                          text, QMessageBox.StandardButton.Ok, self)
-        box.setModal(False)
-        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        box.show()
-        self._missing_tunnel_box = box
+        explain_missing_tunnel(self, p)
 
     def _release_v2(self, idx: int, controller) -> None:
         if controller is None or self._v2_controllers.get(idx) is controller:

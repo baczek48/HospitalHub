@@ -271,31 +271,43 @@ def test_1d_clicking_connect_goes_through_the_legacy_module(
     assert timers == [15000 if autofill else 2000], "opóźnienie pollu jak dotąd"
 
 
-def test_1e_vpn_panel_wires_v2_and_keeps_legacy_detail_panel_stays_legacy():
+def test_1e_vpn_panel_wires_v2_and_the_hospital_button_uses_the_same_route():
     """Stage 52: ``vpn_panel`` gains the V2 wiring names and keeps the legacy
-    call; ``detail_panel`` is untouched — still legacy only."""
-    def names_in(rel):
-        tree = ast.parse(open(os.path.join(_PARENT, "ui", rel),
-                              encoding="utf-8").read())
+    call.  2026-10-20 (owner): the hospital window's VPN button takes the same
+    route — through ``ui.vpn_panel``'s own gate and bridge names, never its own
+    import of the bridge — and keeps the legacy call for every other provider."""
+    def parse(rel):
+        with open(os.path.join(_PARENT, "ui", rel), encoding="utf-8") as f:
+            return ast.parse(f.read())
+
+    def names_in(tree):
         names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
         called = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
                   and isinstance(n.value, ast.Name) and n.value.id == "vpn_connect"}
         return names, called
 
-    panel_names, panel_called = names_in("vpn_panel.py")
+    panel_names, panel_called = names_in(parse("vpn_panel.py"))
     assert "connect_monitored" in panel_called, "legacy call still present"
     for token in ("select_connect_route", "PanelConnectSession",
                   "V2ConnectController", "build_request"):
         assert token in panel_names, ("vpn_panel missing V2 wiring", token)
 
-    # detail_panel is NOT wired — no V2 names, still legacy.
-    detail_names, detail_called = names_in("detail_panel.py")
+    detail = parse("detail_panel.py")
+    detail_names, detail_called = names_in(detail)
+    assert "connect_monitored" in detail_called, "legacy path kept for the rest"
+    # Every V2 name it uses is an attribute of ui.vpn_panel (``_vp.<name>``).
     for token in ("select_connect_route", "PanelConnectSession",
-                  "V2ConnectController", "build_request", "present_outcome",
-                  "panel_bridge", "vpn_v2_connect"):
-        assert token not in detail_names, ("detail_panel", token)
-    assert "connect_monitored" in detail_called
+                  "V2ConnectController", "build_request"):
+        uses = [n for n in ast.walk(detail) if isinstance(n, ast.Attribute)
+                and n.attr == token]
+        assert uses and all(isinstance(n.value, ast.Name) and n.value.id == "_vp"
+                            for n in uses), token
+    modules = {n.module for n in ast.walk(detail) if isinstance(n, ast.ImportFrom)}
+    modules |= {a.name for n in ast.walk(detail) if isinstance(n, ast.Import)
+                for a in n.names}
+    assert not any(m and (m == "vpn" or m.startswith("vpn.")) for m in modules)
+    assert "ui.vpn_v2_connect" not in modules
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -321,6 +333,12 @@ def test_2_no_production_module_names_the_bridge_or_the_controller():
         if rel in (os.path.join("ui", "vpn_v2_connect.py"),
                    os.path.join("ui", "vpn_v2_twofactor.py"),
                    os.path.join("ui", "vpn_panel.py")):
+            continue
+        if rel == os.path.join("ui", "detail_panel.py"):
+            # 2026-10-20: the hospital button goes through ui.vpn_panel's gate
+            # (test_1e pins how); it names no bridge module itself.
+            for token in ("panel_bridge", "vpn_v2_connect"):
+                assert token not in source, (rel, token)
             continue
         for token in ("panel_bridge", "vpn_v2_connect", "V2ConnectController",
                       "PanelConnectSession", "select_connect_route"):

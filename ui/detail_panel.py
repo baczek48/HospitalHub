@@ -638,6 +638,14 @@ class DetailPanel(QWidget):
             "QToolButton:pressed { background: #1a3a5c; }"
         )
         self._vpn_btn.clicked.connect(self._on_vpn_btn_clicked)
+        # 2026-10-20: a V2 connect from this button reports here, like a VPN
+        # card's status line; hidden when nothing is going on.
+        self._vpn_status_lbl = QLabel()
+        self._vpn_status_lbl.setMaximumWidth(420)
+        self._vpn_status_lbl.setVisible(False)
+        self._vpn_header = header
+        self._vpn_v2_controller = None
+        header.addWidget(self._vpn_status_lbl)
         header.addWidget(self._vpn_btn)
 
         # Poll VPN status every 2s to keep button state in sync
@@ -1678,8 +1686,16 @@ class DetailPanel(QWidget):
             self._update_vpn_btn()
             return
 
-        # Connect first (without token — FortiClient will show Token field in GUI)
+        # FortiClient, Stormshield, Barracuda: the same V2 connect as the VPN
+        # card (2026-10-20, owner: "po co to rozbijać").  Everything else, and
+        # every disarmed provider, keeps the legacy path below.
         autofill = load_vpn_autofill_enabled()
+        from ui import vpn_panel as _vp
+        if _vp.select_connect_route(profile.provider) != _vp.ROUTE_LEGACY:
+            self._connect_vpn_v2(profile, autofill)
+            return
+
+        # Connect first (without token — FortiClient will show Token field in GUI)
         ok, msg, process = vpn_connect.connect_monitored(
             profile.provider, profile.server, profile.port,
             profile.login, profile.password,
@@ -1753,6 +1769,70 @@ class DetailPanel(QWidget):
             worker.twofa_detected.connect(lambda _: self._handle_auto_2fa(worker, profile))
             worker.start()
             self._vpn_monitor_worker = worker  # keep reference
+
+    def _connect_vpn_v2(self, profile, autofill: bool) -> None:
+        """Run the V2 connect the VPN card runs, reporting next to the button.
+
+        The same pieces as ``VpnPanel._connect_card_v2``: the request and the
+        session from the bridge, the controller with its Cancel button, the
+        session recorded for the status poll, and the missing-profile
+        explanation.  One connect at a time from this window.
+        """
+        from ui import vpn_panel as _vp
+        running = self._vpn_v2_controller
+        if running is not None and getattr(running, "active", False):
+            return
+        app_path = profile.app_path or _vp.load_vpn_provider_paths().get(
+            profile.provider, "")
+        _vp._record_legacy_session(profile)
+        lbl = self._vpn_status_lbl
+        try:
+            request = _vp.build_request(profile, app_path=app_path,
+                                        autofill=autofill)
+            session = _vp.PanelConnectSession(request)
+            controller = _vp.V2ConnectController(
+                session, lbl, prompt_parent=self, client=profile.provider)
+            self._vpn_v2_controller = controller
+            controller.finished.connect(
+                lambda outcome, p=profile, c=controller:
+                    self._on_vpn_v2_finished(p, outcome, c))
+            header = self._vpn_header
+            header.insertWidget(header.indexOf(self._vpn_btn), controller.prompt)
+            lbl.setVisible(True)
+            self._update_vpn_btn("Connecting")
+            controller.start()
+        except Exception as exc:
+            _vp._vlog("error", "Połącz (V2, okno szpitala) — błąd uruchomienia",
+                      profile, error=f"{type(exc).__name__}: {exc}")
+            lbl.setText("Błąd połączenia V2")
+            lbl.setVisible(True)
+            self._vpn_v2_controller = None
+            self._update_vpn_btn()
+
+    def _on_vpn_v2_finished(self, profile, outcome, controller) -> None:
+        from ui import vpn_panel as _vp
+        started = bool(getattr(outcome, "started", False))
+        _vp._vlog("info" if started else "warn", "Połącz (V2, okno szpitala) — wynik",
+                  profile, started=started,
+                  state=str(getattr(outcome, "state", "") or ""),
+                  reason_code=str(getattr(outcome, "code", "") or ""),
+                  error_code=str(getattr(outcome, "error_code", "") or ""))
+        if str(getattr(outcome, "reason", "") or "") in _vp._TUNNEL_MISSING_REASONS:
+            _vp.explain_missing_tunnel(self, profile)
+        if started:
+            vpn_connect.invalidate_adapter_cache()
+        self._vpn_last_status = None
+        QTimer.singleShot(2000, self._update_vpn_btn)
+        # The sentence stays readable for a while, then the line goes away.
+        QTimer.singleShot(20000, lambda c=controller: self._hide_vpn_v2_status(c))
+
+    def _hide_vpn_v2_status(self, controller) -> None:
+        try:
+            if self._vpn_v2_controller is controller:
+                self._vpn_status_lbl.setVisible(False)
+                self._vpn_v2_controller = None
+        except RuntimeError:
+            pass
 
     def _handle_auto_2fa(self, worker, profile):
         from ui.vpn_panel import TwoFactorDialog
