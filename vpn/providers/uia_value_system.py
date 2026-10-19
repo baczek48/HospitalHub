@@ -49,6 +49,13 @@ VALUE_PATTERN_ID = 10002
 VALUE_IS_READONLY_PROPERTY_ID = 30046
 TREESCOPE_DESCENDANTS = 4
 IS_PASSWORD_PROPERTY_ID = 30019
+CONTROL_TYPE_PROPERTY_ID = 30003
+COMBOBOX_CONTROL_TYPE = 50003
+LIST_ITEM_CONTROL_TYPE = 50007
+TEXT_CONTROL_TYPE = 50020
+SELECTION_PATTERN_ID = 10001
+SELECTION_ITEM_PATTERN_ID = 10010
+EXPAND_COLLAPSE_PATTERN_ID = 10005
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,19 @@ class UiaValueSystem:
         logged or stored.
         """
         raise NotImplementedError
+
+    def select_list_item(self, hwnd, text: str, *,
+                         expected_pid: int) -> UiaSetOutcome:
+        """In the window's one combo box, select the item showing exactly
+        `text`, and confirm the combo now shows it.
+
+        2026-10-20 (owner's laptop): Barracuda showed its "Default" profile —
+        a certificate form without User Name — while the card was "MCX".  The
+        items are data objects whose own name is a class name; the profile
+        name is the text inside each item, so that is what is matched,
+        character for character, and exactly one item must match.
+        """
+        return UiaSetOutcome(False, reason="not-supported")
 
     def value_matches(self, hwnd, automation_id: str, expected: str, *,
                       expected_pid: int):
@@ -207,6 +227,14 @@ class Win32UiaValueSystem(UiaValueSystem):
         if pid != expected_pid:
             return UiaSetOutcome(True, reason="pid-mismatch", process_id=pid)
         try:
+            hidden = bool(el.CurrentIsOffscreen) or not bool(el.CurrentIsEnabled)
+        except Exception:
+            hidden = False
+        if hidden:
+            # A field of another layout (Barracuda's certificate form keeps
+            # User Name in the tree, collapsed): SetFocus would only raise.
+            return UiaSetOutcome(True, reason="field-not-shown", process_id=pid)
+        try:
             el.SetFocus()
         except Exception as exc:
             return UiaSetOutcome(True, reason=f"focus-error:{type(exc).__name__}",
@@ -236,3 +264,92 @@ class Win32UiaValueSystem(UiaValueSystem):
                     or "") == expected
         except Exception:
             return None
+
+    def select_list_item(self, hwnd, text: str, *,
+                         expected_pid: int) -> UiaSetOutcome:
+        import time
+        try:
+            import comtypes
+            import comtypes.client
+            from .msaa_system import ensure_com_apartment
+            ensure_com_apartment(comtypes)
+            comtypes.client.GetModule("UIAutomationCore.dll")
+            from comtypes.gen.UIAutomationClient import (
+                CUIAutomation, IUIAutomation, IUIAutomationExpandCollapsePattern,
+                IUIAutomationSelectionItemPattern, IUIAutomationSelectionPattern,
+            )
+            uia = comtypes.client.CreateObject(CUIAutomation, interface=IUIAutomation)
+            root = uia.ElementFromHandle(hwnd)
+            combos = root.FindAll(TREESCOPE_DESCENDANTS, uia.CreatePropertyCondition(
+                CONTROL_TYPE_PROPERTY_ID, COMBOBOX_CONTROL_TYPE))
+        except Exception as exc:
+            return UiaSetOutcome(False, reason=f"uia-error:{type(exc).__name__}")
+        if not combos or combos.Length != 1:
+            return UiaSetOutcome(False, reason="list-not-unique")
+        combo = combos.GetElement(0)
+        try:
+            pid = int(combo.CurrentProcessId)
+        except Exception as exc:
+            return UiaSetOutcome(True, reason=f"pid-error:{type(exc).__name__}")
+        if pid != expected_pid:
+            return UiaSetOutcome(True, reason="pid-mismatch", process_id=pid)
+        walker = uia.RawViewWalker
+
+        def texts(el):
+            out, stack = [], [el]
+            while stack:
+                cur = stack.pop()
+                child = walker.GetFirstChildElement(cur)
+                while child:
+                    try:
+                        if int(child.CurrentControlType) == TEXT_CONTROL_TYPE:
+                            out.append(child.CurrentName or "")
+                    except Exception:
+                        pass
+                    stack.append(child)
+                    child = walker.GetNextSiblingElement(child)
+            return out
+
+        def shown() -> list:
+            try:
+                sel = combo.GetCurrentPattern(SELECTION_PATTERN_ID).QueryInterface(
+                    IUIAutomationSelectionPattern).GetCurrentSelection()
+                return [t for i in range(sel.Length) for t in texts(sel.GetElement(i))]
+            except Exception:
+                return []
+
+        try:
+            expand = combo.GetCurrentPattern(EXPAND_COLLAPSE_PATTERN_ID).QueryInterface(
+                IUIAutomationExpandCollapsePattern)
+        except Exception as exc:
+            return UiaSetOutcome(True, reason=f"no-expand:{type(exc).__name__}",
+                                 process_id=pid)
+        try:
+            expand.Expand()
+            time.sleep(0.4)
+            items = combo.FindAll(TREESCOPE_DESCENDANTS, uia.CreatePropertyCondition(
+                CONTROL_TYPE_PROPERTY_ID, LIST_ITEM_CONTROL_TYPE))
+            hits = [items.GetElement(i) for i in range(items.Length)
+                    if text in texts(items.GetElement(i))]
+            if len(hits) != 1:
+                expand.Collapse()
+                return UiaSetOutcome(True, reason=("profile-not-in-client" if not hits
+                                                   else "profile-ambiguous"),
+                                     process_id=pid)
+            hits[0].GetCurrentPattern(SELECTION_ITEM_PATTERN_ID).QueryInterface(
+                IUIAutomationSelectionItemPattern).Select()
+            time.sleep(0.2)
+            expand.Collapse()
+        except Exception as exc:
+            try:
+                expand.Collapse()
+            except Exception:
+                pass
+            return UiaSetOutcome(True, reason=f"select-error:{type(exc).__name__}",
+                                 process_id=pid)
+        for _ in range(20):
+            if shown() == [text]:
+                return UiaSetOutcome(True, performed=True, reason="selected",
+                                     process_id=pid)
+            time.sleep(0.05)
+        return UiaSetOutcome(True, reason="profile-not-confirmed", process_id=pid)

@@ -15,6 +15,12 @@ Certificate password    ``PasswordBoxCert``      **no**
 profile combo ("MCX")   (none)                   **no** — already selected
 ======================  =======================  ==========================
 
+2026-10-20 (owner's laptop): the client showed its "Default" profile — a
+certificate form with no User Name — while the card was "MCX".  The card's
+profile is now chosen in the client's list first (by the text of the item,
+exactly; :meth:`UiaValueSystem.select_list_item`) and confirmed, and only
+then is anything typed.
+
 2026-10-19 (owner's field test): each field is focused by its AutomationId,
 the focus confirmed, and the value typed (:mod:`vpn.providers.field_fill`);
 then Enter in the password field submits — what the legacy's keystrokes did,
@@ -93,7 +99,9 @@ def autofill_login_password(
     fields = (Field(PHASE_LOGIN, AID_USER, request.login or "", "login"),
               Field(PHASE_PASSWORD, AID_PASSWORD, request.password or "", "password"))
     second_factor = bool(request.requires_2fa or request.token)
+    profile = (request.profile_name or "").strip()
     return fill_form(provider.id, target, uia, keys, fields,
                      submit_field=None if second_factor or not request.password
                      else AID_PASSWORD,
-                     cancellation=cancellation, trace=trace)
+                     cancellation=cancellation, trace=trace,
+                     select_profile=profile or None)

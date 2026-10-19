@@ -111,9 +111,20 @@ _PROFILE_UNSUPPORTED = (
     "(np. IPsec). Wybierz profil ręcznie i zaloguj się. "
     "Logowanie nie zostało wysłane.")
 _PROFILE_UNCONFIRMED = (
-    "Nie udało się potwierdzić profilu VPN w FortiClient. Wybierz profil "
+    "Nie udało się potwierdzić profilu VPN w {client}. Wybierz profil "
     "ręcznie i zaloguj się. Logowanie nie zostało wysłane.")
+#: 2026-10-20: Barracuda's profile list and form (owner's laptop).
+_CLIENT_PROFILE_MISSING = (
+    "W kliencie nie ma profilu z karty („Nazwa profilu w kliencie”) albo jest "
+    "ich kilka o tej nazwie. Logowanie nie zostało wysłane.")
+_FIELD_NOT_SHOWN = (
+    "Klient pokazuje formularz bez pola na login (inny profil, np. "
+    "certyfikatowy). Wybierz właściwy profil i zaloguj się ręcznie. "
+    "Logowanie nie zostało wysłane.")
 BLOCKED_REASON_TEXT = {
+    "profile-not-in-client": _CLIENT_PROFILE_MISSING,
+    "profile-ambiguous": _CLIENT_PROFILE_MISSING,
+    "field-not-shown": _FIELD_NOT_SHOWN,
     "requested-tunnel-not-configured": _PROFILE_CONFIG,
     "requested-profile-untrimmed": _PROFILE_CONFIG,
     "requested-profile-empty": _PROFILE_CONFIG,
@@ -153,7 +164,7 @@ def present_outcome(code, reason=None, client: str | None = None) -> CardUpdate:
         if reason in BLOCKED_REASON_TEXT:
             text = BLOCKED_REASON_TEXT[reason]
         elif reason.startswith(_PROFILE_PREFIXES):
-            text = _PROFILE_UNCONFIRMED
+            text = _PROFILE_UNCONFIRMED.format(client=client or DEFAULT_CLIENT)
     return CardUpdate(text=text, colour=colour, card_state=card_state,
                       poll_after_ms=POLL_AFTER_START_MS if card_state else None)
 

@@ -332,3 +332,91 @@ def test_every_typed_field_ends_with_one_real_key_that_edits_nothing():
         for i, event in enumerate(keys.events):
             if event[0] == "type":
                 assert keys.events[i + 1] == ("key", event[1], VK_END)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-20 (owner's laptop): Barracuda showed "Default", the card was MCX
+# ══════════════════════════════════════════════════════════════════════════
+
+class ProfileUia(FakeUia):
+    """A combo whose items are `profiles`; selecting changes the layout."""
+
+    def __init__(self, *, owner_pid, profiles=("Default", "MCX"), shown="Default",
+                 confirm=True, **kw):
+        super().__init__(owner_pid=owner_pid, **kw)
+        self.profiles, self.shown, self.confirm = profiles, shown, confirm
+
+    def select_list_item(self, hwnd, text, *, expected_pid):
+        self.calls.append("select:" + text)
+        if self._owner != expected_pid:
+            return UiaSetOutcome(True, reason="pid-mismatch")
+        hits = [p for p in self.profiles if p == text]
+        if len(hits) != 1:
+            return UiaSetOutcome(True, reason="profile-not-in-client" if not hits
+                                 else "profile-ambiguous")
+        if not self.confirm:
+            return UiaSetOutcome(True, reason="profile-not-confirmed")
+        self.shown = text
+        return UiaSetOutcome(True, performed=True, reason="selected")
+
+    def focus(self, hwnd, automation_id, *, expected_pid):
+        if automation_id == ba.AID_USER and self.shown == "Default":
+            self.calls.append(automation_id)
+            return UiaSetOutcome(True, reason="field-not-shown")
+        return super().focus(hwnd, automation_id, expected_pid=expected_pid)
+
+
+def barra_profile(profile_name="MCX", **uia_kwargs):
+    provider = tb.provider()
+    target = provider.secure_window_target(api=tb.Desktop(),
+                                           finder=ListFinder((tb.HWND,)))
+    uia = ProfileUia(owner_pid=tb.PID, **uia_kwargs)
+    keys = FakeKeys(uia)
+    request = VpnRequest(provider_id="barracuda", login=LOGIN, password=PASSWORD,
+                         profile_name=profile_name)
+    result = provider.autofill_login_password(request, target=target, uia=uia,
+                                              input_system=keys)
+    return result, uia, keys
+
+
+def test_barra_the_cards_profile_is_chosen_before_anything_is_typed():
+    result, uia, keys = barra_profile()
+    assert result.status is AutofillStatus.DONE, result.metadata
+    assert uia.calls[0] == "select:MCX"
+    assert uia.shown == "MCX"
+    assert keys.typed() == [(ba.AID_USER, LOGIN), (ba.AID_PASSWORD, PASSWORD)]
+
+
+@pytest.mark.parametrize("kwargs,reason", [
+    (dict(profiles=("Default",)), "profile-not-in-client"),
+    (dict(profiles=("MCX", "MCX")), "profile-ambiguous"),
+    (dict(confirm=False), "profile-not-confirmed"),
+])
+def test_barra_a_profile_that_cannot_be_chosen_types_nothing(kwargs, reason):
+    result, _uia, keys = barra_profile(**kwargs)
+    assert result.status is AutofillStatus.BLOCKED
+    assert result.metadata["reason_code"] == reason
+    assert keys.events == []
+
+
+def test_barra_without_a_profile_name_the_form_shown_is_used():
+    result, uia, keys = barra_profile(profile_name="", shown="MCX")
+    assert result.status is AutofillStatus.DONE
+    assert not [c for c in uia.calls if c.startswith("select:")]
+
+
+def test_barra_a_form_without_user_name_stops_with_a_clear_reason():
+    """The laptop's case without a profile name: "Default", certificate form."""
+    result, _uia, keys = barra_profile(profile_name="")
+    assert result.status is AutofillStatus.BLOCKED
+    assert result.metadata["reason_code"] == "field-not-shown"
+    assert keys.events == []
+
+
+def test_the_card_says_what_happened_for_the_new_reasons():
+    from ui.vpn_v2_connect import present_outcome
+    for reason in ("profile-not-in-client", "profile-ambiguous", "field-not-shown",
+                   "profile-not-confirmed"):
+        text = present_outcome("autofill-blocked", reason, client="Barracuda").text
+        assert "FortiClient" not in text and "{" not in text, (reason, text)
+        assert "Logowanie nie zostało wysłane" in text

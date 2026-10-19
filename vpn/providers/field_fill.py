@@ -42,6 +42,8 @@ _AFTER_CLEAR_S = 0.05
 _AFTER_TYPE_S = 0.2
 #: One more attempt for a field whose text can be read back and is wrong.
 _RETRIES = 1
+#: After the profile changed, the form re-lays itself out.
+_PROFILE_SETTLE_S = 0.4
 
 
 @dataclass(frozen=True)
@@ -167,7 +169,7 @@ class _Trace:
 
 
 def fill_form(provider_id: str, target, uia, keys, fields, *, submit_field=None,
-              cancellation=None, trace=None) -> AutofillResult:
+              cancellation=None, trace=None, select_profile=None) -> AutofillResult:
     """Acquire the verified client window, fill `fields`, optionally press Enter
     in `submit_field`; an :class:`AutofillResult` either way.
 
@@ -208,6 +210,23 @@ def fill_form(provider_id: str, target, uia, keys, fields, *, submit_field=None,
     entered: tuple[str, ...] = ()
     with acquired as win:
         try:
+            if select_profile is not None:
+                if cancelled():
+                    return _stopped(provider_id, tr, FillOutcome(
+                        False, "profile", "cancelled"))
+                chosen = win.run_guarded(
+                    "profile", lambda: uia.select_list_item(
+                        win.hwnd, select_profile, expected_pid=win.pid))
+                result = chosen.value
+                if not chosen.performed:
+                    return _stopped(provider_id, tr, FillOutcome(
+                        False, "profile", chosen.reason))
+                if result is None or not getattr(result, "ok", False):
+                    return _stopped(provider_id, tr, FillOutcome(
+                        False, "profile", getattr(result, "reason", "profile-failed")))
+                tr.ok("vpn.autofill", event="profile-step", method="uia_select",
+                      verified=True)
+                keys.sleep(_PROFILE_SETTLE_S)
             outcome = fill_fields(win, uia, keys, fields, cancelled=cancelled)
             entered = outcome.entered
             if not outcome.ok:
