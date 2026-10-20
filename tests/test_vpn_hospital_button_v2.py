@@ -179,3 +179,43 @@ def test_a_configured_path_and_builtin_providers_are_left_alone(monkeypatch):
     monkeypatch.setattr(vp, "load_vpn_provider_paths", lambda: {})
     assert vp.resolve_client_path(models.VpnProfile(
         name="x", provider="FortiClient", app_path="")) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-20: Barracuda's idle adapter is Up with 169.254.1.10
+# ══════════════════════════════════════════════════════════════════════════
+
+def _adapter(ips, up=True, name="barracuda virtual adapter (vpn)"):
+    return {"description": name, "friendly_name": "barracuda vpn",
+            "ipv4_addresses": list(ips), "oper_status_up": up}
+
+
+@pytest.mark.parametrize("adapters,expected", [
+    ([_adapter(["169.254.1.10"], up=True)], "Disconnected"),   # owner's laptop, idle
+    ([_adapter([], up=True)], "Disconnected"),
+    ([_adapter([], up=False)], "Disconnected"),
+    ([_adapter(["10.20.30.40"], up=True)], "Connected"),
+    ([_adapter(["169.254.1.10", "10.20.30.40"])], "Connected"),
+    ([{"description": "intel ethernet", "friendly_name": "ethernet",
+       "ipv4_addresses": ["192.168.1.5"], "oper_status_up": True}], "Disconnected"),
+])
+def test_barracuda_is_connected_only_with_a_real_tunnel_address(monkeypatch,
+                                                                adapters, expected):
+    monkeypatch.setattr(vpn_connect, "_get_adapters", lambda: adapters)
+    monkeypatch.setattr(vpn_connect, "get_status",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy")))
+    assert vp.vpn_status("Barracuda", "", "MCX") == expected
+
+
+def test_without_an_adapter_list_the_legacy_answers(monkeypatch):
+    monkeypatch.setattr(vpn_connect, "_get_adapters", lambda: [])
+    monkeypatch.setattr(vpn_connect, "get_status", lambda *a, **k: "Connected")
+    assert vp.vpn_status("Barracuda", "", "MCX") == "Connected"
+
+
+def test_other_providers_keep_the_legacy_status(monkeypatch):
+    seen = []
+    monkeypatch.setattr(vpn_connect, "get_status",
+                        lambda *a, **k: seen.append(a) or "Connected")
+    assert vp.vpn_status("FortiClient", "x", "WIELUN", "s") == "Connected"
+    assert seen == [("FortiClient", "x", "WIELUN", "s")]

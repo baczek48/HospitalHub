@@ -547,7 +547,7 @@ class StatusWorker(QThread):
         results = {}
         for idx, provider, app_path, profile_name, server in self._profiles:
             try:
-                status = vpn_connect.get_status(provider, app_path, profile_name, server)
+                status = vpn_status(provider, app_path, profile_name, server)
                 if status:
                     results[idx] = status
             except Exception:
@@ -681,6 +681,47 @@ def _record_legacy_session(p) -> None:
             "server": p.server or "", "profile_name": p.profile_name or ""}
     except Exception:
         pass
+
+
+#: Adapter keywords of the Barracuda client (as in the legacy status check).
+_BARRACUDA_ADAPTER = ("nacvpn", "barracuda")
+
+
+def barracuda_status() -> str | None:
+    """Connected only with a real tunnel address on Barracuda's adapter.
+
+    2026-10-20 (owner's laptop, MCX disconnected): the "Barracuda Virtual
+    Adapter (VPN)" stays *Up* with 169.254.1.10, and the legacy check counts
+    any IPv4 or an Up state as connected — so the card stayed green.  Here an
+    address in 169.254.0.0/16 (link-local) and the Up state alone mean
+    disconnected.  No adapter list at all (the API failed): ``None``, and the
+    caller asks the legacy.
+    """
+    adapters = vpn_connect._get_adapters()
+    if not adapters:
+        return None
+    for ad in adapters:
+        names = f"{ad.get('description', '')} {ad.get('friendly_name', '')}".lower()
+        if not any(k in names for k in _BARRACUDA_ADAPTER):
+            continue
+        if any(not str(ip).startswith("169.254.") for ip in ad.get("ipv4_addresses") or ()):
+            return "Connected"
+    return "Disconnected"
+
+
+def vpn_status(provider: str, app_path: str = "", profile_name: str = "",
+               server=None):
+    """The status a card shows: the legacy's, except Barracuda's (above)."""
+    if provider == "Barracuda":
+        try:
+            status = barracuda_status()
+        except Exception:
+            status = None
+        if status is not None:
+            return status
+    if server is None:
+        return vpn_connect.get_status(provider, app_path, profile_name)
+    return vpn_connect.get_status(provider, app_path, profile_name, server)
 
 
 def _find_program(name: str) -> str:

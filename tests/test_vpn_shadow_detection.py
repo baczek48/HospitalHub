@@ -554,7 +554,11 @@ def _vpn_connect_attributes(rel):
 def test_production_ui_still_drives_the_vpn_through_vpn_connect():
     detail = _vpn_connect_attributes(os.path.join("ui", "detail_panel.py"))
     panel = _vpn_connect_attributes(os.path.join("ui", "vpn_panel.py"))
-    assert {"connect_monitored", "disconnect", "get_status"} <= detail
+    # 2026-10-20: the hospital button asks ui.vpn_panel.vpn_status, which is
+    # vpn_connect.get_status for everyone but Barracuda (idle adapter Up).
+    assert {"connect_monitored", "disconnect"} <= detail
+    with open(os.path.join(_PARENT, "ui", "detail_panel.py"), encoding="utf-8") as f:
+        assert "vpn_status(" in f.read()
     assert {"launch_app", "connect_monitored", "disconnect", "get_status"} <= panel
     for name in ("connect", "connect_monitored", "disconnect", "get_status",
                  "launch_app"):

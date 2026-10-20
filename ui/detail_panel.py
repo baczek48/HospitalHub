@@ -444,7 +444,8 @@ class _VpnStatusProbe(QThread):
 
     def run(self):
         try:
-            status = vpn_connect.get_status(*self._args)
+            from ui.vpn_panel import vpn_status
+            status = vpn_status(*self._args)
         except Exception:
             status = None
         self.result.emit(self._key, status)
@@ -1680,7 +1681,8 @@ class DetailPanel(QWidget):
             return
 
         # Toggle: disconnect if connected, connect if not
-        status = vpn_connect.get_status(profile.provider, profile.app_path, profile.profile_name)
+        from ui import vpn_panel as _vp
+        status = _vp.vpn_status(profile.provider, profile.app_path, profile.profile_name)
         if status == "Connected":
             vpn_connect.disconnect(profile.provider, profile.server, profile.app_path, profile.profile_name)
             self._update_vpn_btn()
