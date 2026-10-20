@@ -133,13 +133,20 @@ class ToolServer:
         return self.url
 
     def stop(self) -> None:
+        """Returns at once; the server winds down in the background
+        (``shutdown`` waits for the serve loop — it froze "Zakończ")."""
         server, self._server = self._server, None
-        if server is not None:
+        if server is None:
+            return
+
+        def close():
             try:
                 server.shutdown()
                 server.server_close()
             except Exception:
                 pass
+
+        threading.Thread(target=close, name="claude-tools-stop", daemon=True).start()
 
     # -- JSON-RPC ------------------------------------------------------------ #
 
@@ -272,23 +279,31 @@ class ClaudeProcess:
             proc.stdin.flush()
 
     def stop(self) -> None:
+        """Returns at once: closing stdin ends Claude Code (measured ~0.5 s);
+        a process still there after 2 s is killed — in the background, the
+        UI thread waited for it before (owner: "wyłączenie trwało chwilę")."""
         with self._lock:
             proc, self._proc = self._proc, None
+        workdir, self._dir = self._dir, None
         if proc is not None:
             try:
                 proc.stdin.close()
             except Exception:
                 pass
-            try:
-                proc.wait(timeout=3)
-            except Exception:
+
+        def finish():
+            if proc is not None:
                 try:
-                    proc.kill()
+                    proc.wait(timeout=2)
                 except Exception:
-                    pass
-        if self._dir:
-            shutil.rmtree(self._dir, ignore_errors=True)
-            self._dir = None
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            if workdir:
+                shutil.rmtree(workdir, ignore_errors=True)
+
+        threading.Thread(target=finish, name="claude-stop", daemon=True).start()
 
     # -- readers ------------------------------------------------------------- #
 

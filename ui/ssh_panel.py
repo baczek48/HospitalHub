@@ -8839,14 +8839,22 @@ class SshDialog(QDialog):
             self._btn_claude.setChecked(False)
             return
         from ui.claude_panel import ClaudeSupportPanel
+        # The last conversation stayed on screen after it ended; it goes now —
+        # left in the splitter it took the new panel's width, and "Wsparcie
+        # Claude" seemed to do nothing the second time (owner, 2026-10-20).
+        old = getattr(self, "_claude_old_panel", None)
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
+            self._claude_old_panel = None
         session = self._sessions[idx]
         panel = ClaudeSupportPanel(_SupportTarget(self, session), self)
         panel.closed.connect(self._on_claude_support_closed)
         self._claude_panel = panel
         self._claude_session = session
         self._main_splitter.addWidget(panel)
-        total = sum(self._main_splitter.sizes()) or self.width()
-        left, term = self._main_splitter.sizes()[:2]
+        sizes = self._main_splitter.sizes()
+        left, term = sizes[0], sum(sizes[1:])
         self._main_splitter.setSizes([left, max(400, term - 380), 380])
         tab = self._tab_widget.indexOf(session.pane)
         if tab >= 0:

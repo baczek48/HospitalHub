@@ -302,3 +302,130 @@ def test_long_code_lines_wrap_instead_of_widening_the_panel():
     from ui.claude_panel import wrapped_html
     html = wrapped_html("```\n" + "x" * 300 + "\n```")
     assert "white-space:pre;" not in html and "white-space: pre;" not in html
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-20 (owner): live mode, a quick "Zakończ", and opening it again
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_new_lines_are_what_follows_the_last_known_end():
+    from ui.claude_panel import new_lines
+    before = ["$ ls", "a b", "$ docker ps", "asi-db Up"]
+    after = before + ["$ docker logs asi-backend", "ERROR: no db"]
+    assert new_lines(before, after) == ["$ docker logs asi-backend", "ERROR: no db"]
+    assert new_lines(before, before) == []
+    assert new_lines(before, ["$ clear-screen", "x"]) == ["$ clear-screen", "x"]
+
+
+class LiveTarget(Target):
+    def __init__(self):
+        super().__init__()
+        self.text = "$ docker ps\nasi-db Up"
+
+    def read(self, lines):
+        return self.text
+
+
+def test_live_mode_sends_only_the_news_after_the_terminal_settles(app, monkeypatch):
+    import ui.claude_panel as cp
+    clock = [1000.0]
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    target = LiveTarget()
+    panel, proc = make_panel(app, target)
+    panel._btn_live.setChecked(True)
+    target.text += "\n$ docker logs asi-backend\nERROR: connection refused"
+    panel._live_tick()                       # changed: wait for it to settle
+    assert proc.sent == []
+    clock[0] += cp._LIVE_QUIET_S + 0.1
+    panel._live_tick()
+    assert len(proc.sent) == 1
+    assert proc.sent[0].startswith("[NA ŻYWO]")
+    assert "ERROR: connection refused" in proc.sent[0] and "asi-db Up" not in proc.sent[0]
+    # Claude says nothing worth showing: no bubble, a quiet status
+    before = panel._messages.count()
+    proc.on_event("text", "OK")
+    proc.on_event("turn_end", {"is_error": False, "text": "OK"})
+    pump()
+    assert panel._messages.count() == before
+    assert "bez uwag" in panel._state.text()
+    # more output too soon: held back until the gap has passed
+    target.text += "\nERROR: again"
+    panel._live_tick()
+    clock[0] += cp._LIVE_QUIET_S + 0.1
+    panel._live_tick()
+    assert len(proc.sent) == 1
+    clock[0] += cp._LIVE_MIN_GAP_S
+    panel._live_tick()
+    assert len(proc.sent) == 2 and "ERROR: again" in proc.sent[1]
+    panel.end()
+
+
+def test_live_mode_off_sends_nothing(app):
+    target = LiveTarget()
+    panel, proc = make_panel(app, target)
+    target.text += "\nERROR: x"
+    panel._live_tick()
+    assert not panel._live_timer.isActive() and proc.sent == []
+    panel.end()
+
+
+def test_stopping_does_not_wait_for_claude_code():
+    import time
+
+    class Slow:
+        def __init__(self):
+            self.stdin = self
+
+        def close(self):
+            pass
+
+        def wait(self, timeout=None):
+            time.sleep(timeout or 0)
+
+        def kill(self):
+            pass
+
+    p = cs.ClaudeProcess("u", "t", "x", lambda *a: None)
+    p._proc = Slow()
+    started = time.monotonic()
+    p.stop()
+    assert time.monotonic() - started < 0.5
+
+
+def test_support_can_be_opened_again_in_the_same_window(app, tmp_path, monkeypatch):
+    sys.path.insert(0, _HERE)
+    import time
+    import models
+    from ssh_fake_server import FakeServer
+    from ui import ssh_panel as sp
+    import ui.claude_panel as cp
+    srv = FakeServer(str(tmp_path))
+    monkeypatch.setattr(sp, "_make_client", srv.make_client_patch())
+    monkeypatch.setattr(sp.QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(cp.cs, "ClaudeProcess", FakeProcess)
+    monkeypatch.setattr(cp.cs, "find_claude", lambda: "claude.exe")
+    m = models.Machine(ip="10.0.0.5", credentials=[
+        models.Credential(login="u", password=srv.password)])
+    dlg = sp.SshDialog(m)
+    dlg.resize(1300, 700)
+    dlg.show()
+    end = time.monotonic() + 8
+    while time.monotonic() < end and not dlg._sessions:
+        pump()
+    try:
+        for _round in range(2):
+            dlg._btn_claude.setChecked(True)
+            pump()
+            panel = dlg._claude_panel
+            assert panel is not None
+            assert dlg._main_splitter.sizes()[-1] > 200, dlg._main_splitter.sizes()
+            panel.end()
+            pump()
+            assert dlg._claude_panel is None and not dlg._btn_claude.isChecked()
+        panels = [w for w in (dlg._main_splitter.widget(i)
+                              for i in range(dlg._main_splitter.count()))
+                  if isinstance(w, cp.ClaudeSupportPanel)]
+        assert len(panels) <= 1, "stare panele nie zostają w oknie"
+    finally:
+        dlg.close_without_asking()
+        srv.drop()

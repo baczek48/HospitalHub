@@ -26,6 +26,16 @@ import claude_support as cs
 
 __all__ = ["ClaudeSupportPanel", "system_prompt"]
 
+#: Live mode: how often the tab is looked at, how long it must stay still
+#: before its news is sent, the least time between two updates (each one is a
+#: turn of the owner's subscription), and the most one update carries.
+_LIVE_POLL_MS = 1000
+_LIVE_QUIET_S = 2.0
+_LIVE_MIN_GAP_S = 15.0
+_LIVE_MAX_LINES = 120
+#: What Claude answers in live mode when nothing deserves a comment.
+LIVE_SILENT = "OK"
+
 #: What one read may carry back (the model needs the end, not 50 000 lines).
 _MAX_LINES = 2000
 _MAX_CHARS = 60000
@@ -54,6 +64,8 @@ QPushButton#claudeSend {{ background: {ACCENT}; color: #ffffff; border: none;
                           font-weight: bold; }}
 QPushButton#claudeSend:hover {{ background: {ACCENT_HOVER}; }}
 QPushButton#claudeSend:disabled {{ background: {ACCENT_DIM}; color: #a8806f; }}
+QPushButton#claudeLive:checked {{ background: {ACCENT}; color: #ffffff;
+                                  border-color: {ACCENT}; }}
 """
 
 
@@ -74,8 +86,27 @@ def system_prompt(label: str) -> str:
         "skutki. Unikaj komend bez końca (top, less, tail -f) — podawaj wersje z "
         "limitem. Nigdy nie proś o hasła. Logi mogą zawierać dane osobowe "
         "pacjentów — nie powtarzaj ich bez potrzeby.\n"
-        "Zanim odpowiesz na pierwsze pytanie, przeczytaj terminal (terminal_read)."
+        "Zanim odpowiesz na pierwsze pytanie, przeczytaj terminal (terminal_read).\n"
+        "Tryb „na żywo”: wiadomości zaczynające się od [NA ŻYWO] zawierają nowe "
+        "wyjście terminala, wysłane automatycznie. Odpowiedz na nie tylko wtedy, "
+        "gdy jest coś ważnego (błąd, ostrzeżenie, wynik komendy, o którą prosiłeś "
+        "albo o który pytał administrator) — krótko. Jeśli nic istotnego, odpowiedz "
+        f"dokładnie jednym słowem: {LIVE_SILENT}"
     )
+
+
+def new_lines(previous: list[str], current: list[str]) -> list[str]:
+    """What `current` adds after `previous`: the rows after the last place
+    where the end of `previous` appears in `current` (all of `current` when
+    it does not — a cleared screen)."""
+    anchor = [line for line in previous if line.strip()][-4:]
+    if not anchor:
+        return [line for line in current]
+    rows = current
+    for start in range(len(rows) - len(anchor), -1, -1):
+        if [r for r in rows[start:start + len(anchor)]] == anchor:
+            return rows[start + len(anchor):]
+    return list(rows)
 
 
 class _Job:
@@ -141,6 +172,15 @@ class ClaudeSupportPanel(QWidget):
         self._process = None
         self._busy = False
         self._ended = False
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(_LIVE_POLL_MS)
+        self._live_timer.timeout.connect(self._live_tick)
+        self._live_seen: list[str] = []
+        self._live_text = None
+        self._live_changed = 0.0
+        self._live_sent_at = 0.0
+        self._live_turn = False
+        self._live_spoke = False
         self._tool_request.connect(self._on_tool_request,
                                    Qt.ConnectionType.QueuedConnection)
         self._process_event.connect(self._on_process_event,
@@ -159,6 +199,14 @@ class ClaudeSupportPanel(QWidget):
         title.setObjectName("claudeTitle")
         head.addWidget(title)
         head.addStretch()
+        self._btn_live = QPushButton("Na żywo")
+        self._btn_live.setObjectName("claudeLive")
+        self._btn_live.setCheckable(True)
+        self._btn_live.setToolTip(
+            "Claude śledzi terminal i komentuje nowe wyjście, gdy jest w nim coś "
+            "ważnego (najwyżej co 15 s; każda aktualizacja zużywa subskrypcję)")
+        self._btn_live.toggled.connect(self._toggle_live)
+        head.addWidget(self._btn_live)
         self._btn_end = QPushButton("Zakończ")
         self._btn_end.setToolTip("Zakończ wsparcie — Claude traci dostęp do terminala")
         self._btn_end.clicked.connect(self.end)
@@ -312,6 +360,8 @@ class ClaudeSupportPanel(QWidget):
 
     def _finish_ui(self) -> None:
         self._ended = True
+        self._live_timer.stop()
+        self._btn_live.setEnabled(False)
         self._input.setEnabled(False)
         self._btn_send.setEnabled(False)
         self._btn_end.setEnabled(False)
@@ -342,18 +392,71 @@ class ClaudeSupportPanel(QWidget):
         if kind == "ready" and not payload.get("connected", False):
             self._bubble("Claude Code nie połączył się z terminalem HospitalHub.", "error")
         elif kind == "text":
-            self._bubble(str(payload), "claude")
+            if self._live_turn and str(payload).strip().rstrip(".") == LIVE_SILENT:
+                pass                      # nothing worth saying about the news
+            else:
+                self._live_spoke = True
+                self._bubble(str(payload), "claude")
         elif kind == "tool":
             self._state.setText("Claude czyta terminal…")
         elif kind == "turn_end":
             if payload.get("is_error"):
                 self._bubble(_login_hint(payload.get("text", "")), "error")
-            self._set_busy(False, "")
+            live, self._live_turn = self._live_turn, False
+            spoke, self._live_spoke = self._live_spoke, False
+            self._set_busy(False, "Na żywo: bez uwag." if live and not spoke else "")
         elif kind == "exit":
             stderr = str(payload.get("stderr") or "")
             self._bubble("Claude Code zakończył działanie."
                          + (f"\n{_login_hint(stderr)}" if stderr else ""), "error")
             self.end()
+
+    # -- live mode --------------------------------------------------------- #
+
+    def _toggle_live(self, on: bool) -> None:
+        if self._ended:
+            return
+        if on:
+            self._live_seen = self._tail()
+            self._live_text = None
+            self._live_sent_at = 0.0
+            self._live_timer.start()
+            self._bubble("Na żywo: Claude śledzi terminal i odezwie się, gdy w nowym "
+                         "wyjściu będzie coś ważnego.", "info")
+        else:
+            self._live_timer.stop()
+            self._bubble("Na żywo wyłączone.", "info")
+
+    def _tail(self) -> list[str]:
+        if not self._target.alive():
+            return []
+        return self._target.read(_LIVE_MAX_LINES * 2).splitlines()
+
+    def _live_tick(self) -> None:
+        import time
+        if self._ended or not self._target.alive():
+            return
+        text = "\n".join(self._tail())
+        now = time.monotonic()
+        if text != self._live_text:
+            self._live_text, self._live_changed = text, now
+            return
+        if (self._busy or now - self._live_changed < _LIVE_QUIET_S
+                or now - self._live_sent_at < _LIVE_MIN_GAP_S):
+            return
+        current = text.splitlines()
+        added = [line for line in new_lines(self._live_seen, current)]
+        if not any(line.strip() for line in added):
+            return
+        self._live_seen = current
+        self._live_sent_at = now
+        chunk = "\n".join(added[-_LIVE_MAX_LINES:]).strip()
+        try:
+            self._process.send(f"[NA ŻYWO] Nowe wyjście w terminalu:\n```\n{chunk}\n```")
+        except Exception:
+            return
+        self._live_turn = True
+        self._set_busy(True, "Na żywo: Claude patrzy na nowe wyjście…")
 
     # -- the read tool (server thread → UI thread) ---------------------------- #
 
