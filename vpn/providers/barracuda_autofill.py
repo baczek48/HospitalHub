@@ -11,7 +11,8 @@ field                   ``AutomationId``         handled here
 User Name               ``TextBoxUser``          yes  — login
 User Password           ``PasswordBoxUser``      yes  — password
 OTP (hidden until MFA)  ``PasswordBoxOTP``       **no** — a separate contract
-Certificate password    ``PasswordBoxCert``      **no**
+Certificate password    ``PasswordBoxCert``      the card's password, in a
+                                                 "Barracuda License" profile
 profile combo ("MCX")   (none)                   **no** — already selected
 ======================  =======================  ==========================
 
@@ -47,6 +48,9 @@ __all__ = ["autofill_login_password", "PHASES", "PHASE_LOGIN", "PHASE_PASSWORD",
 #: The measured AutomationIds of the two credential fields.
 AID_USER = "TextBoxUser"
 AID_PASSWORD = "PasswordBoxUser"
+#: The second password of a "Barracuda License" profile (owner's laptop,
+#: 2026-10-20: User Password + Certificate/License Password, no User Name).
+AID_CERT = "PasswordBoxCert"
 
 PHASE_LOGIN = "login"
 PHASE_PASSWORD = "password"
@@ -100,8 +104,34 @@ def autofill_login_password(
               Field(PHASE_PASSWORD, AID_PASSWORD, request.password or "", "password"))
     second_factor = bool(request.requires_2fa or request.token)
     profile = (request.profile_name or "").strip()
+    login, password = request.login or "", request.password or ""
+
+    def layout(win, default_fields, default_submit):
+        """Which form the chosen profile shows.
+
+        With User Name: login → User Name, password → User Password.
+        Without it ("Barracuda License"): the card's login → User Password,
+        its password → Certificate/License Password — the two fields under
+        the list, in order, which is what the legacy's keystrokes filled and
+        what the owner's MCX card holds (confirmed by the owner).  Anything
+        else: the default fields, which then refuse as not shown.
+        """
+        shown = getattr(uia, "is_shown", None)
+        if shown is None:
+            return default_fields, default_submit
+        if shown(win.hwnd, AID_USER, expected_pid=win.pid) is not False:
+            return default_fields, default_submit
+        if (shown(win.hwnd, AID_PASSWORD, expected_pid=win.pid)
+                and shown(win.hwnd, AID_CERT, expected_pid=win.pid)):
+            license_fields = (
+                Field(PHASE_LOGIN, AID_PASSWORD, login, "login"),
+                Field(PHASE_PASSWORD, AID_CERT, password, "password"))
+            return license_fields, (None if second_factor or not password
+                                    else AID_CERT)
+        return default_fields, default_submit
+
     return fill_form(provider.id, target, uia, keys, fields,
                      submit_field=None if second_factor or not request.password
                      else AID_PASSWORD,
                      cancellation=cancellation, trace=trace,
-                     select_profile=profile or None)
+                     select_profile=profile or None, layout=layout)

@@ -439,3 +439,74 @@ def test_barra_a_client_without_a_profile_list_goes_on_to_the_fields():
                    profile_name="MCX"), target=target, uia=uia, input_system=keys)
     assert result.status is AutofillStatus.DONE
     assert keys.typed() == [(ba.AID_USER, LOGIN), (ba.AID_PASSWORD, PASSWORD)]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-20: a "Barracuda License" profile (owner's laptop)
+# ══════════════════════════════════════════════════════════════════════════
+
+class LicenseUia(ProfileUia):
+    """After MCX is chosen the form shows User Password + Certificate/License
+    Password, no User Name."""
+
+    def __init__(self, *, owner_pid, **kw):
+        super().__init__(owner_pid=owner_pid, **kw)
+
+    def is_shown(self, hwnd, automation_id, *, expected_pid):
+        if self.shown != "MCX":
+            return automation_id == ba.AID_PASSWORD
+        return automation_id in (ba.AID_PASSWORD, ba.AID_CERT)
+
+    def focus(self, hwnd, automation_id, *, expected_pid):
+        if automation_id == ba.AID_USER:
+            self.calls.append(automation_id)
+            return UiaSetOutcome(True, reason="field-not-shown")
+        return FakeUia.focus(self, hwnd, automation_id, expected_pid=expected_pid)
+
+
+def barra_license(**req):
+    provider = tb.provider()
+    target = provider.secure_window_target(api=tb.Desktop(),
+                                           finder=ListFinder((tb.HWND,)))
+    uia = LicenseUia(owner_pid=tb.PID)
+    keys = FakeKeys(uia)
+    fields = dict(login=LOGIN, password=PASSWORD, profile_name="MCX")
+    fields.update(req)
+    result = provider.autofill_login_password(
+        VpnRequest(provider_id="barracuda", **fields), target=target, uia=uia,
+        input_system=keys)
+    return result, uia, keys
+
+
+def test_barra_license_profile_fills_the_two_fields_under_the_list():
+    """As the legacy did and the owner confirmed: the card's login into User
+    Password, its password into Certificate/License Password, Enter there."""
+    result, uia, keys = barra_license()
+    assert result.status is AutofillStatus.DONE, result.metadata
+    assert keys.typed() == [(ba.AID_PASSWORD, LOGIN), (ba.AID_CERT, PASSWORD)]
+    enters = [e for e in keys.events if e[0] == "key" and e[2] == VK_RETURN]
+    assert enters == [("key", ba.AID_CERT, VK_RETURN)]
+    assert ba.AID_USER not in uia.calls, "User Name nie istnieje w tym układzie"
+
+
+def test_barra_license_profile_with_a_second_factor_is_not_submitted():
+    result, _uia, keys = barra_license(requires_2fa=True)
+    assert result.status is AutofillStatus.DONE
+    assert not [e for e in keys.events if e[0] == "key" and e[2] == VK_RETURN]
+
+
+def test_barra_user_name_layout_is_unchanged_when_is_shown_is_known():
+    class UserNameUia(ProfileUia):
+        def is_shown(self, hwnd, automation_id, *, expected_pid):
+            return automation_id in (ba.AID_USER, ba.AID_PASSWORD)
+
+    provider = tb.provider()
+    target = provider.secure_window_target(api=tb.Desktop(),
+                                           finder=ListFinder((tb.HWND,)))
+    uia = UserNameUia(owner_pid=tb.PID)
+    keys = FakeKeys(uia)
+    result = provider.autofill_login_password(
+        VpnRequest(provider_id="barracuda", login=LOGIN, password=PASSWORD,
+                   profile_name="MCX"), target=target, uia=uia, input_system=keys)
+    assert result.status is AutofillStatus.DONE
+    assert keys.typed() == [(ba.AID_USER, LOGIN), (ba.AID_PASSWORD, PASSWORD)]

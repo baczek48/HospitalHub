@@ -634,6 +634,61 @@ def _record_legacy_session(p) -> None:
         pass
 
 
+def _find_program(name: str) -> str:
+    """A shortcut or executable for a custom provider named `name`.
+
+    2026-10-20 (owner): an "Anydesk" card only has to open AnyDesk, and with
+    no path on the card or in the VPN settings the legacy answered
+    "Nieobsługiwany provider".  Looked for, in order: Start-menu and desktop
+    shortcuts whose name contains `name`, then ``<Program Files>/<name>/
+    <name>.exe``.  Case-insensitive; the first hit wins; "" when none.
+    """
+    wanted = (name or "").strip().lower()
+    if not wanted:
+        return ""
+    env = os.environ.get
+    shortcut_dirs = [
+        os.path.join(env("PROGRAMDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+        os.path.join(env("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
+        os.path.join(env("PUBLIC", ""), "Desktop"),
+        os.path.join(env("USERPROFILE", ""), "Desktop"),
+    ]
+    for root in shortcut_dirs:
+        if not root or not os.path.isdir(root):
+            continue
+        for folder, _dirs, files in os.walk(root):
+            for fname in sorted(files):
+                low = fname.lower()
+                if low.endswith(".lnk") and wanted in low and "uninstall" not in low:
+                    return os.path.join(folder, fname)
+    for base in (env("PROGRAMFILES(X86)", ""), env("PROGRAMFILES", ""),
+                 env("LOCALAPPDATA", "")):
+        if not base:
+            continue
+        folder = os.path.join(base, name.strip())
+        if os.path.isdir(folder):
+            for fname in os.listdir(folder):
+                if fname.lower() == wanted + ".exe":
+                    return os.path.join(folder, fname)
+    return ""
+
+
+def resolve_client_path(p) -> str:
+    """The card's path, the VPN settings' path, or — for a custom provider —
+    a program found by its name."""
+    if p.app_path:
+        return p.app_path
+    configured = load_vpn_provider_paths().get(p.provider, "")
+    if configured:
+        return configured
+    if p.provider and p.provider not in models.VPN_PROVIDERS_BUILTIN:
+        try:
+            return _find_program(p.provider)
+        except Exception:
+            return ""
+    return ""
+
+
 def explain_missing_tunnel(parent, p) -> None:
     """Say plainly which FortiClient profile is missing, and which exist.
 
@@ -1403,9 +1458,7 @@ class VpnPanel(QWidget):
 
     def _resolve_app_path(self, p) -> str:
         """Return profile app_path, falling back to global provider path."""
-        if p.app_path:
-            return p.app_path
-        return load_vpn_provider_paths().get(p.provider, "")
+        return resolve_client_path(p)
 
     def _connect_card(self, idx: int):
         if idx >= len(self._profiles):

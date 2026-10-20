@@ -120,6 +120,16 @@ class UiaValueSystem:
         """
         return UiaSetOutcome(False, reason="not-supported")
 
+    def is_shown(self, hwnd, automation_id: str, *, expected_pid: int):
+        """Is the element on screen and enabled?  ``None`` when unknown.
+
+        2026-10-20: Barracuda's form depends on the profile's authentication
+        — User Name + User Password, or (Barracuda License) User Password +
+        Certificate/License Password — and the fill picks its fields by what
+        is shown.
+        """
+        return None
+
     def value_matches(self, hwnd, automation_id: str, expected: str, *,
                       expected_pid: int):
         """Does the element now hold `expected`?  ``None`` when it cannot be
@@ -329,7 +339,10 @@ class Win32UiaValueSystem(UiaValueSystem):
                     CONTROL_TYPE_PROPERTY_ID, LIST_ITEM_CONTROL_TYPE))
                 for j in range(items.Length):
                     item = items.GetElement(j)
-                    if text in texts(item):
+                    if text in texts(item) and not any(
+                            uia.CompareElements(item, seen) for _c, _e, seen in hits):
+                        # One item may be reported twice (2026-10-20: a
+                        # "profile-ambiguous" with a single MCX in the list).
                         hits.append((combo, expand, item))
             except Exception:
                 pass
@@ -354,19 +367,26 @@ class Win32UiaValueSystem(UiaValueSystem):
             except Exception:
                 return []
 
-        try:
-            expand.Expand()
-            time.sleep(0.4)
-            item.GetCurrentPattern(SELECTION_ITEM_PATTERN_ID).QueryInterface(
-                IUIAutomationSelectionItemPattern).Select()
-            time.sleep(0.2)
-            expand.Collapse()
-        except Exception as exc:
+        error = None
+        for _attempt in range(2):          # a COMError once in a while (field log)
             try:
+                expand.Expand()
+                time.sleep(0.4)
+                item.GetCurrentPattern(SELECTION_ITEM_PATTERN_ID).QueryInterface(
+                    IUIAutomationSelectionItemPattern).Select()
+                time.sleep(0.2)
                 expand.Collapse()
-            except Exception:
-                pass
-            return UiaSetOutcome(True, reason=f"select-error:{type(exc).__name__}",
+                error = None
+                break
+            except Exception as exc:
+                error = exc
+                try:
+                    expand.Collapse()
+                except Exception:
+                    pass
+                time.sleep(0.3)
+        if error is not None:
+            return UiaSetOutcome(True, reason=f"select-error:{type(error).__name__}",
                                  process_id=pid)
         for _ in range(20):
             if shown() == [text]:
@@ -374,3 +394,14 @@ class Win32UiaValueSystem(UiaValueSystem):
                                      process_id=pid)
             time.sleep(0.05)
         return UiaSetOutcome(True, reason="profile-not-confirmed", process_id=pid)
+
+    def is_shown(self, hwnd, automation_id: str, *, expected_pid: int):
+        try:
+            el, _mod = self._element(hwnd, automation_id)
+            if not el:
+                return False
+            if int(el.CurrentProcessId) != expected_pid:
+                return False
+            return not el.CurrentIsOffscreen and bool(el.CurrentIsEnabled)
+        except Exception:
+            return None

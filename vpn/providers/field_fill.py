@@ -169,7 +169,8 @@ class _Trace:
 
 
 def fill_form(provider_id: str, target, uia, keys, fields, *, submit_field=None,
-              cancellation=None, trace=None, select_profile=None) -> AutofillResult:
+              cancellation=None, trace=None, select_profile=None,
+              layout=None) -> AutofillResult:
     """Acquire the verified client window, fill `fields`, optionally press Enter
     in `submit_field`; an :class:`AutofillResult` either way.
 
@@ -227,6 +228,9 @@ def fill_form(provider_id: str, target, uia, keys, fields, *, submit_field=None,
                 tr.ok("vpn.autofill", event="profile-step", method="uia_select",
                       verified=True)
                 keys.sleep(_PROFILE_SETTLE_S)
+            if layout is not None:
+                # The form is known only now, after the profile (2026-10-20).
+                fields, submit_field = layout(win, fields, submit_field)
             outcome = fill_fields(win, uia, keys, fields, cancelled=cancelled)
             entered = outcome.entered
             if not outcome.ok:

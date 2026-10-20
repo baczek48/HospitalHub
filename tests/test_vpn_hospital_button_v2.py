@@ -134,3 +134,47 @@ def test_a_missing_forticlient_profile_is_explained(app, wired, monkeypatch):
     FakeController.instances[0].finished.emit(PanelConnectOutcome(
         code=PanelOutcome.AUTOFILL_BLOCKED, reason="requested-tunnel-not-configured"))
     assert shown == ["WIELUN"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-20: a custom provider ("Anydesk") only has to open its program
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_custom_provider_without_a_path_finds_its_start_menu_shortcut(
+        tmp_path, monkeypatch):
+    menu = tmp_path / "ProgramData" / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    (menu / "AnyDesk").mkdir(parents=True)
+    (menu / "AnyDesk" / "AnyDesk.lnk").write_bytes(b"x")
+    (menu / "AnyDesk" / "Uninstall AnyDesk.lnk").write_bytes(b"x")
+    for var in ("APPDATA", "PUBLIC", "USERPROFILE", "PROGRAMFILES(X86)",
+                "PROGRAMFILES", "LOCALAPPDATA"):
+        monkeypatch.setenv(var, str(tmp_path / "nothing"))
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "ProgramData"))
+    monkeypatch.setattr(vp, "load_vpn_provider_paths", lambda: {})
+    card = models.VpnProfile(name="Lubań", provider="Anydesk", app_path="")
+    assert vp.resolve_client_path(card).endswith(r"AnyDesk\AnyDesk.lnk")
+
+
+def test_a_custom_provider_finds_program_files_exe(tmp_path, monkeypatch):
+    pf = tmp_path / "PF86" / "AnyDesk"
+    pf.mkdir(parents=True)
+    (pf / "AnyDesk.exe").write_bytes(b"x")
+    for var in ("PROGRAMDATA", "APPDATA", "PUBLIC", "USERPROFILE",
+                "PROGRAMFILES", "LOCALAPPDATA"):
+        monkeypatch.setenv(var, str(tmp_path / "nothing"))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "PF86"))
+    monkeypatch.setattr(vp, "load_vpn_provider_paths", lambda: {})
+    card = models.VpnProfile(name="Lubań", provider="Anydesk", app_path="")
+    # Windows paths ignore case; the folder is looked up by the provider name.
+    assert vp.resolve_client_path(card).lower().endswith(r"anydesk\anydesk.exe")
+
+
+def test_a_configured_path_and_builtin_providers_are_left_alone(monkeypatch):
+    monkeypatch.setattr(vp, "load_vpn_provider_paths", lambda: {"Anydesk": r"D:\a.exe"})
+    monkeypatch.setattr(vp, "_find_program",
+                        lambda name: (_ for _ in ()).throw(AssertionError(name)))
+    assert vp.resolve_client_path(models.VpnProfile(
+        name="x", provider="Anydesk", app_path="")) == r"D:\a.exe"
+    monkeypatch.setattr(vp, "load_vpn_provider_paths", lambda: {})
+    assert vp.resolve_client_path(models.VpnProfile(
+        name="x", provider="FortiClient", app_path="")) == ""

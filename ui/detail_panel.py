@@ -1700,7 +1700,7 @@ class DetailPanel(QWidget):
             profile.provider, profile.server, profile.port,
             profile.login, profile.password,
             profile.group, profile.domain,
-            profile.app_path, profile.profile_name, "",
+            _vp.resolve_client_path(profile), profile.profile_name, "",
             autofill=autofill,
         )
         if not ok:
@@ -1782,8 +1782,7 @@ class DetailPanel(QWidget):
         running = self._vpn_v2_controller
         if running is not None and getattr(running, "active", False):
             return
-        app_path = profile.app_path or _vp.load_vpn_provider_paths().get(
-            profile.provider, "")
+        app_path = _vp.resolve_client_path(profile)
         _vp._record_legacy_session(profile)
         lbl = self._vpn_status_lbl
         try:
