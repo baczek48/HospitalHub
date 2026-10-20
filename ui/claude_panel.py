@@ -15,8 +15,10 @@ from __future__ import annotations
 import re
 import threading
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QTextDocument
+import math
+
+from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QTextDocument
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
@@ -149,6 +151,64 @@ def _trim(text: str) -> str:
     return "\n".join(lines[-_MAX_LINES:])[-_MAX_CHARS:]
 
 
+class TypingBubble(QWidget):
+    """A speech bubble with three dots rising and fading in a wave — Claude is
+    writing, or looking at new output in live mode (owner, 2026-10-20)."""
+
+    _SIZE = (58, 30)
+    _FRAME_MS = 40
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(*self._SIZE)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._FRAME_MS)
+        self._timer.timeout.connect(self._step)
+
+    def start(self) -> None:
+        self._timer.start()
+        self.show()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self.hide()
+
+    def running(self) -> bool:
+        return self._timer.isActive()
+
+    def _step(self) -> None:
+        self._phase = (self._phase + 0.22) % (2 * math.pi)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        body = QRectF(1, 1, w - 2, h - 7)
+        p.setPen(QPen(QColor(ACCENT_DIM), 1))
+        p.setBrush(QColor("#161b22"))
+        p.drawRoundedRect(body, 11, 11)
+        # the little tail at the bottom left
+        from PyQt6.QtGui import QPolygonF
+        from PyQt6.QtCore import QPointF
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPolygon(QPolygonF([QPointF(9, h - 7), QPointF(17, h - 7), QPointF(7, h - 1)]))
+        p.setPen(QPen(QColor(ACCENT_DIM), 1))
+        p.drawLine(QPointF(7, h - 1), QPointF(9, h - 7.5))
+        p.drawLine(QPointF(7, h - 1), QPointF(17, h - 7.5))
+        cy = body.center().y()
+        for i in range(3):
+            wave = math.sin(self._phase - i * 0.75)          # -1 … 1
+            lift = max(0.0, wave) * 3.0
+            colour = QColor(ACCENT)
+            colour.setAlphaF(0.35 + 0.65 * (wave + 1) / 2)
+            p.setBrush(colour)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPointF(w / 2 - 12 + i * 12, cy - lift), 3.2, 3.2)
+        p.end()
+
+
 class ClaudeSupportPanel(QWidget):
     """The conversation and the Claude Code process behind it."""
 
@@ -181,6 +241,7 @@ class ClaudeSupportPanel(QWidget):
         self._live_sent_at = 0.0
         self._live_turn = False
         self._live_spoke = False
+        self._typing_row = None
         self._tool_request.connect(self._on_tool_request,
                                    Qt.ConnectionType.QueuedConnection)
         self._process_event.connect(self._on_process_event,
@@ -257,8 +318,32 @@ class ClaudeSupportPanel(QWidget):
 
     def _add(self, widget: QWidget) -> None:
         self._messages.insertWidget(self._messages.count() - 1, widget)
+        if self._typing_row is not None and self._typing_row.isVisible():
+            # Claude is still at it: the dots stay under the newest message.
+            self._messages.removeWidget(self._typing_row)
+            self._messages.insertWidget(self._messages.count() - 1, self._typing_row)
         QTimer.singleShot(30, lambda: self._scroll.verticalScrollBar().setValue(
             self._scroll.verticalScrollBar().maximum()))
+
+    def _show_typing(self) -> None:
+        if self._typing_row is None:
+            row = QWidget()
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(2, 0, 0, 0)
+            self._typing = TypingBubble(row)
+            lay.addWidget(self._typing)
+            lay.addStretch()
+            self._typing_row = row
+        else:
+            self._messages.removeWidget(self._typing_row)
+        self._typing_row.show()
+        self._add(self._typing_row)
+        self._typing.start()
+
+    def _hide_typing(self) -> None:
+        if self._typing_row is not None:
+            self._typing.stop()
+            self._typing_row.hide()
 
     def _bubble(self, text: str, who: str) -> QLabel:
         lbl = QLabel()
@@ -311,6 +396,10 @@ class ClaudeSupportPanel(QWidget):
         self._busy = busy
         self._btn_send.setEnabled(not busy and not self._ended)
         self._state.setText(text)
+        if busy and not self._ended:
+            self._show_typing()
+        else:
+            self._hide_typing()
 
     # -- lifecycle ----------------------------------------------------------- #
 
@@ -360,6 +449,7 @@ class ClaudeSupportPanel(QWidget):
 
     def _finish_ui(self) -> None:
         self._ended = True
+        self._hide_typing()
         self._live_timer.stop()
         self._btn_live.setEnabled(False)
         self._input.setEnabled(False)

@@ -429,3 +429,20 @@ def test_support_can_be_opened_again_in_the_same_window(app, tmp_path, monkeypat
     finally:
         dlg.close_without_asking()
         srv.drop()
+
+
+def test_the_typing_bubble_shows_while_claude_works_and_follows_new_messages(app):
+    panel, proc = make_panel(app)
+    panel.show()
+    panel._input.setPlainText("co z backendem?")
+    panel._send()
+    pump()
+    assert panel._typing.running() and panel._typing_row.isVisible()
+    proc.on_event("text", "Czytam logi…")
+    pump()
+    last = panel._messages.itemAt(panel._messages.count() - 2).widget()
+    assert last is panel._typing_row, "kropki pod najnowszą wiadomością"
+    proc.on_event("turn_end", {"is_error": False, "text": ""})
+    pump()
+    assert not panel._typing.running() and not panel._typing_row.isVisible()
+    panel.end()
