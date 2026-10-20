@@ -170,7 +170,7 @@ def legacy_recorder(monkeypatch):
 
 @pytest.mark.parametrize("provider_name", [
     "FortiClient", "Stormshield", "Barracuda", "GlobalProtect",
-    "SonicWall NetExtender", "Windows VPN", "Nieznany provider"])
+    "SonicWall NetExtender", "Windows VPN"])
 def test_a_gate_off_every_provider_goes_legacy(app, monkeypatch, provider_name):
     """All flags are False, so the real route is legacy for everyone."""
     for cls in (FortiClientProvider, StormshieldProvider, BarracudaProvider):
@@ -605,7 +605,7 @@ def test_q_a_cli_outcomes_monitor_is_not_adopted_by_the_panel(app, monkeypatch,
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("provider,expected", [
-    ("FortiClient", PROFILE), ("Barracuda", PROFILE), ("Stormshield", SERVER)])
+    ("FortiClient", PROFILE), ("Stormshield", SERVER), ("Barracuda", None)])
 def test_v2_click_tells_the_status_poll_which_profile_connects(
         app, monkeypatch, wire_v2, provider, expected):
     """Without it a FortiClient profile with no server never showed Connected."""
@@ -613,6 +613,11 @@ def test_v2_click_tells_the_status_poll_which_profile_connects(
     monkeypatch.setattr(vpn_connect, "_last_connected", {})
     monkeypatch.setattr(vpn_connect, "_last_connected_meta", {})
     make_panel([profile(provider=provider)], QLabel())._connect_card(0)
+    if expected is None:
+        # 2026-10-20: Barracuda's status is its adapter's; a recorded profile
+        # kept the card "connected" after the adapter was gone.
+        assert provider not in vpn_connect._last_connected
+        return
     assert vpn_connect._last_connected[provider] == expected
     assert vpn_connect._last_connected_meta[provider] == {
         "server": SERVER, "profile_name": PROFILE}
@@ -654,3 +659,52 @@ def test_the_missing_profile_message_names_the_configured_ones(app, monkeypatch)
     assert shown and "„Wieluń”" in shown[0]
     assert "1SZP, Betanin" in shown[0]
     assert PASSWORD not in shown[0] and LOGIN not in shown[0]
+
+
+def test_a_custom_provider_opens_its_program_instead_of_the_legacy(app, monkeypatch):
+    """2026-10-20: "Uruchomiono Anydesk" was said for a shortcut that opened
+    nothing; a custom provider now opens its program and reports honestly."""
+    calls = legacy_recorder(monkeypatch)
+    opened = []
+    monkeypatch.setattr(vpn_panel, "load_vpn_autofill_enabled", lambda: True)
+    monkeypatch.setattr(vpn_panel, "open_custom_program",
+                        lambda owner, p, lbl, autofill: opened.append(p.provider))
+    make_panel([profile(provider="Anydesk")], QLabel())._connect_card(0)
+    assert calls == [] and opened == ["Anydesk"]
+
+
+@pytest.mark.parametrize("reason,fragment", [
+    ("window-shown", "Otwarto Anydesk"),
+    ("no-window", "okno się nie pojawiło"),
+    ("shortcut-target-missing", "nieistniejącego"),
+])
+def test_the_card_says_what_happened_to_the_program(app, monkeypatch, reason, fragment):
+    monkeypatch.setattr(vpn_panel, "resolve_client_path", lambda p: r"C:\x\AnyDesk.lnk")
+
+    class Instant:
+        def __init__(self, path, parent=None):
+            self.done = SimpleNamespace(connect=lambda fn: self.__dict__.update(fn=fn))
+            self.finished = SimpleNamespace(connect=lambda fn: None)
+
+        def deleteLater(self):
+            pass
+
+        def start(self):
+            self.fn(SimpleNamespace(reason=reason))
+
+    monkeypatch.setattr(vpn_panel, "_ProgramOpenWorker", Instant)
+    lbl = QLabel()
+    vpn_panel.open_custom_program(QWidget(), profile(provider="Anydesk"), lbl, True)
+    assert fragment in lbl.text()
+
+
+def test_no_path_found_says_so_without_starting_anything(app, monkeypatch):
+    monkeypatch.setattr(vpn_panel, "resolve_client_path", lambda p: "")
+
+    def never(*a, **k):
+        raise AssertionError("nothing may start")
+
+    monkeypatch.setattr(vpn_panel, "_ProgramOpenWorker", never)
+    lbl = QLabel()
+    vpn_panel.open_custom_program(QWidget(), profile(provider="Anydesk"), lbl, True)
+    assert "Nie znaleziono programu Anydesk" in lbl.text()

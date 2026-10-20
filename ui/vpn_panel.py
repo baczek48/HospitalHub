@@ -1,4 +1,5 @@
 import locale
+from types import SimpleNamespace
 import os
 import sys
 
@@ -25,7 +26,8 @@ from diagnostics import actionlog
 # builds a session and hands it to the V2 controller.  `panel_bridge` is the
 # sanctioned abstraction; providers are never imported here directly.
 from vpn.panel_bridge import (
-    ROUTE_LEGACY, PanelConnectSession, build_request, select_connect_route,
+    ROUTE_LEGACY, PanelConnectSession, build_request, open_program,
+    select_connect_route,
 )
 from ui.vpn_v2_connect import V2ConnectController
 from ui.dialogs import _clipboard_copy
@@ -174,7 +176,9 @@ class VpnSettingsDialog(QDialog):
         paths_scroll = QScrollArea()
         paths_scroll.setWidgetResizable(True)
         paths_scroll.setMaximumHeight(200)
-        paths_scroll.setMinimumHeight(90)     # ~3 rows, never 1.5 (V-22)
+        # ~4 rows.  90 px let the custom-provider list below squeeze it to two
+        # rows with a scroll bar on a laptop screen (owner, 2026-10-20).
+        paths_scroll.setMinimumHeight(124)
         paths_scroll.setStyleSheet("QScrollArea { border: 1px solid #21262d; background: #0d1117; }")
         paths_widget = QWidget()
         self._paths_layout = QVBoxLayout(paths_widget)
@@ -182,26 +186,10 @@ class VpnSettingsDialog(QDialog):
         self._paths_layout.setSpacing(4)
 
         self._path_edits: dict[str, QLineEdit] = {}
-        saved_paths = load_vpn_provider_paths()
+        self._path_rows: dict[str, QWidget] = {}
+        self._saved_paths = load_vpn_provider_paths()
         for provider in models.VPN_PROVIDERS:
-            row = QHBoxLayout()
-            row.setSpacing(4)
-            lbl = QLabel(provider)
-            lbl.setFixedWidth(160)
-            lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
-            row.addWidget(lbl)
-            edit = QLineEdit()
-            edit.setPlaceholderText("np. C:\\...\\client.exe")
-            edit.setStyleSheet(_FIELD_STYLE)
-            edit.setText(saved_paths.get(provider, ""))
-            row.addWidget(edit, 1)
-            btn_browse = QPushButton("...")
-            btn_browse.setFixedSize(28, 28)
-            btn_browse.setStyleSheet(_SMALL_BTN)
-            btn_browse.clicked.connect(lambda _, e=edit: self._browse_path(e))
-            row.addWidget(btn_browse)
-            self._paths_layout.addLayout(row)
-            self._path_edits[provider] = edit
+            self._add_path_row(provider)
 
         self._paths_layout.addStretch()
         paths_scroll.setWidget(paths_widget)
@@ -236,9 +224,20 @@ class VpnSettingsDialog(QDialog):
         custom_row.addWidget(btn_add_custom)
         lay.addLayout(custom_row)
 
-        self._custom_container = QVBoxLayout()
+        # Its own scroll area (2026-10-20): growing in the dialog's layout, the
+        # rows overlapped and squeezed the paths list on a laptop screen.
+        custom_scroll = QScrollArea()
+        custom_scroll.setWidgetResizable(True)
+        custom_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        custom_scroll.setMaximumHeight(88)
+        custom_widget = QWidget()
+        self._custom_container = QVBoxLayout(custom_widget)
+        # Right margin: the "×" buttons stay clear of the scroll bar.
+        self._custom_container.setContentsMargins(0, 0, 14, 0)
         self._custom_container.setSpacing(2)
-        lay.addLayout(self._custom_container)
+        custom_scroll.setWidget(custom_widget)
+        self._custom_scroll = custom_scroll
+        lay.addWidget(custom_scroll)
         self._rebuild_custom_list()
 
         # --- Section: Automation ---
@@ -356,6 +355,34 @@ class VpnSettingsDialog(QDialog):
         if path:
             edit.setText(path)
 
+    def _add_path_row(self, provider: str) -> None:
+        """One "provider: path [...]" row in the paths list, before its stretch."""
+        row_w = QWidget()
+        row = QHBoxLayout(row_w)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        lbl = QLabel(provider)
+        lbl.setFixedWidth(160)
+        lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
+        row.addWidget(lbl)
+        edit = QLineEdit()
+        edit.setPlaceholderText("np. C:\\...\\client.exe")
+        edit.setStyleSheet(_FIELD_STYLE)
+        edit.setText(self._saved_paths.get(provider, ""))
+        row.addWidget(edit, 1)
+        btn_browse = QPushButton("...")
+        btn_browse.setFixedSize(28, 28)
+        btn_browse.setStyleSheet(_SMALL_BTN)
+        btn_browse.clicked.connect(lambda _, e=edit: self._browse_path(e))
+        row.addWidget(btn_browse)
+        stretch_at = self._paths_layout.count()
+        if stretch_at and self._paths_layout.itemAt(stretch_at - 1).spacerItem():
+            self._paths_layout.insertWidget(stretch_at - 1, row_w)
+        else:
+            self._paths_layout.addWidget(row_w)
+        self._path_edits[provider] = edit
+        self._path_rows[provider] = row_w
+
     def _add_custom(self):
         name = self._custom_edit.text().strip()
         if not name:
@@ -365,20 +392,35 @@ class VpnSettingsDialog(QDialog):
         self._custom_list.append(name)
         self._custom_edit.clear()
         self._rebuild_custom_list()
+        # Its path can be set straight away (2026-10-20: AnyDesk needed a
+        # save and a reopen before it had a row to take its path).
+        if name not in self._path_edits:
+            self._add_path_row(name)
 
     def _remove_custom(self, name: str):
         if name in self._custom_list:
             self._custom_list.remove(name)
             self._rebuild_custom_list()
+            row_w = self._path_rows.pop(name, None)
+            self._path_edits.pop(name, None)
+            if row_w is not None:
+                row_w.setParent(None)
+                row_w.deleteLater()
 
     def _rebuild_custom_list(self):
         while self._custom_container.count():
             item = self._custom_container.takeAt(0)
             w = item.widget()
             if w:
+                # Hidden and unparented now, not at the next idle moment: an
+                # old row still painted under the new ones was the stray bar
+                # in the list after adding a provider (2026-10-20).
+                w.hide()
+                w.setParent(None)
                 w.deleteLater()
         for name in self._custom_list:
             row_w = QWidget()
+            row_w.setFixedHeight(26)
             row_l = QHBoxLayout(row_w)
             row_l.setContentsMargins(0, 0, 0, 0)
             row_l.setSpacing(4)
@@ -395,6 +437,7 @@ class VpnSettingsDialog(QDialog):
             btn_rm.clicked.connect(lambda _, n=name: self._remove_custom(n))
             row_l.addWidget(btn_rm)
             self._custom_container.addWidget(row_w)
+        self._custom_container.addStretch()
 
     def get_paths(self) -> dict:
         return {k: v.text().strip() for k, v in self._path_edits.items() if v.text().strip()}
@@ -623,6 +666,12 @@ def _record_legacy_session(p) -> None:
     no IP to fall back on.  The same values, per provider, the legacy writes.
     """
     try:
+        if p.provider == "Barracuda":
+            # Its status comes from the client's adapter, which works.  A
+            # recorded profile made the legacy's session fallback answer
+            # "Connected" after the adapter was gone (owner, 2026-10-20:
+            # the card stayed connected after disconnecting).
+            return
         if p.provider == "Stormshield":
             last = p.server or p.profile_name or ""
         else:
@@ -687,6 +736,81 @@ def resolve_client_path(p) -> str:
         except Exception:
             return ""
     return ""
+
+
+#: What a custom provider's card says after trying to open its program.
+_PROGRAM_OPEN_TEXT = {
+    "window-shown": ("Otwarto {name}.", "#58a6ff"),
+    "program-missing": ("Nie znaleziono programu {name} — wskaż ścieżkę "
+                        "(Ustawienia VPN albo edycja karty).", "#f85149"),
+    "shortcut-target-missing": ("Skrót {name} prowadzi do nieistniejącego "
+                                "pliku — wskaż ścieżkę do programu.", "#f85149"),
+    "launch-failed": ("Nie udało się uruchomić {name}.", "#f85149"),
+    "no-window": ("Uruchomiono {name}, ale jego okno się nie pojawiło — "
+                  "sprawdź ścieżkę.", "#d29922"),
+}
+
+
+class _ProgramOpenWorker(QThread):
+    """Opens a custom provider's program off the UI thread (it waits for the
+    program's window for a few seconds)."""
+
+    done = pyqtSignal(object)
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self) -> None:
+        try:
+            result = open_program(self._path)
+        except Exception as exc:
+            result = SimpleNamespace(ok=False, reason="launch-failed",
+                                     image_name=type(exc).__name__)
+        self.done.emit(result)
+
+
+def open_custom_program(owner, p, lbl, autofill: bool, on_done=None) -> None:
+    """A custom provider (AnyDesk and the like): open its program, honestly.
+
+    2026-10-20: the legacy said "Uruchomiono Anydesk" for a shortcut that
+    opened nothing.  Now the card says what really happened.  With autofill
+    off the password goes to the clipboard, as the legacy does.
+    """
+    name = p.provider
+    path = resolve_client_path(p)
+    if not autofill and p.password:
+        try:
+            _clipboard_copy(p.password)
+        except Exception:
+            pass
+
+    def show(reason: str) -> None:
+        text, colour = _PROGRAM_OPEN_TEXT.get(reason, _PROGRAM_OPEN_TEXT["launch-failed"])
+        try:
+            if lbl is not None:
+                lbl.setStyleSheet(f"color: {colour}; font-size: 10px; border: none;")
+                lbl.setText(text.format(name=name))
+                lbl.setVisible(True)
+        except RuntimeError:
+            pass
+        _vlog("info" if reason == "window-shown" else "warn",
+              "Połącz — program własnego providera", p, result=reason)
+        if on_done is not None:
+            on_done(reason)
+
+    if not path:
+        show("program-missing")
+        return
+    if lbl is not None:
+        lbl.setStyleSheet("color: #d29922; font-size: 10px; border: none;")
+        lbl.setText(f"Uruchamiam {name}…")
+        lbl.setVisible(True)
+    worker = _ProgramOpenWorker(path, owner)
+    worker.done.connect(lambda result: show(getattr(result, "reason", "launch-failed")))
+    worker.finished.connect(worker.deleteLater)
+    owner._program_open_worker = worker
+    worker.start()
 
 
 def explain_missing_tunnel(parent, p) -> None:
@@ -1474,6 +1598,11 @@ class VpnPanel(QWidget):
             return
 
         autofill_on = load_vpn_autofill_enabled()
+        if p.provider and p.provider not in models.VPN_PROVIDERS_BUILTIN:
+            _vlog("info", "Połącz — kliknięto", p, autofill=autofill_on,
+                  method="program", app_path=app_path or "(brak)")
+            open_custom_program(self, p, lbl, autofill_on)
+            return
         route = select_connect_route(p.provider)
         _vlog("info", "Połącz — kliknięto", p, autofill=autofill_on,
                    method="legacy" if route == ROUTE_LEGACY else "v2",

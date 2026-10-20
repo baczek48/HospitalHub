@@ -1691,6 +1691,11 @@ class DetailPanel(QWidget):
         # every disarmed provider, keeps the legacy path below.
         autofill = load_vpn_autofill_enabled()
         from ui import vpn_panel as _vp
+        if profile.provider and profile.provider not in models.VPN_PROVIDERS_BUILTIN:
+            # A custom provider (AnyDesk…): open the program, say what happened.
+            _vp.open_custom_program(self, profile, self._vpn_status_lbl, autofill)
+            QTimer.singleShot(20000, lambda: self._vpn_status_lbl.setVisible(False))
+            return
         if _vp.select_connect_route(profile.provider) != _vp.ROUTE_LEGACY:
             self._connect_vpn_v2(profile, autofill)
             return

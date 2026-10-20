@@ -103,7 +103,8 @@ def test_an_armed_provider_runs_the_v2_session_not_the_legacy(app, wired,
     assert controller.started and controller.client == provider
     assert controller.label is host._vpn_status_lbl
     assert host._vpn_status_lbl.isVisibleTo(host)
-    assert vpn_connect._last_connected[provider], "status wie, ktory profil"
+    if provider != "Barracuda":       # Barracuda: adapter only (2026-10-20)
+        assert vpn_connect._last_connected[provider], "status wie, ktory profil"
     assert "Connecting" in host.button_states
 
 

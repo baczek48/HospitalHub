@@ -66,6 +66,8 @@ from .types import (
     VpnRequest,
 )
 
+from .providers.program_launcher import ProgramOpen, open_program  # noqa: E402,F401
+
 __all__ = ["ROUTE_LEGACY", "ROUTE_FORTICLIENT_V2", "ROUTE_STORMSHIELD_V2",
            "ROUTE_BARRACUDA_V2", "V2_PROVIDERS", "v2_route_for",
            "v2_provider_id_for", "resolve_v2_provider",

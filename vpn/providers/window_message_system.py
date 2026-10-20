@@ -87,6 +87,10 @@ class WindowMessageSystem:
     def sleep(self, seconds: float) -> None:
         raise NotImplementedError
 
+    def visible_top_windows(self) -> list:
+        """Visible top-level windows that have a title (any process)."""
+        return []
+
     def tray_icon_windows(self) -> list:
         """Qt's hidden tray-icon message windows (class contains
         ``TrayIcon``), of every process.  The caller verifies the owner."""
@@ -161,3 +165,21 @@ class Win32WindowMessageSystem(WindowMessageSystem):
     def post_tray_double_click(self, hwnd) -> None:
         import win32gui
         win32gui.PostMessage(hwnd, _QT_TRAY_CALLBACK, 0, _WM_LBUTTONDBLCLK)
+
+    def visible_top_windows(self) -> list:
+        import win32gui
+        found: list = []
+
+        def _cb(hwnd, _):
+            try:
+                if win32gui.IsWindowVisible(hwnd) and win32gui.GetWindowText(hwnd):
+                    found.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(_cb, None)
+        except Exception:
+            pass
+        return found
