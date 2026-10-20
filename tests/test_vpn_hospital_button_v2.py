@@ -185,32 +185,53 @@ def test_a_configured_path_and_builtin_providers_are_left_alone(monkeypatch):
 # 2026-10-20: Barracuda's idle adapter is Up with 169.254.1.10
 # ══════════════════════════════════════════════════════════════════════════
 
-def _adapter(ips, up=True, name="barracuda virtual adapter (vpn)"):
-    return {"description": name, "friendly_name": "barracuda vpn",
-            "ipv4_addresses": list(ips), "oper_status_up": up}
+def _legacy(up=True, desc="barracuda virtual adapter (vpn)", name="barracuda vpn"):
+    # The legacy reader: names and the Up flag; no IPv4 (it cannot read them).
+    return {"description": desc, "friendly_name": name, "ipv4_addresses": [],
+            "oper_status_up": up}
 
 
-@pytest.mark.parametrize("adapters,expected", [
-    ([_adapter(["169.254.1.10"], up=True)], "Disconnected"),   # owner's laptop, idle
-    ([_adapter([], up=True)], "Disconnected"),
-    ([_adapter([], up=False)], "Disconnected"),
-    ([_adapter(["10.20.30.40"], up=True)], "Connected"),
-    ([_adapter(["169.254.1.10", "10.20.30.40"])], "Connected"),
-    ([{"description": "intel ethernet", "friendly_name": "ethernet",
-       "ipv4_addresses": ["192.168.1.5"], "oper_status_up": True}], "Disconnected"),
+@pytest.mark.parametrize("addresses,expected", [
+    ({"barracuda vpn": ["169.254.1.10"]}, "Disconnected"),     # laptop, idle, Up
+    ({"barracuda vpn": []}, "Disconnected"),
+    ({"barracuda vpn": ["192.168.189.52"]}, "Connected"),      # laptop, connected
+    ({"barracuda vpn": ["169.254.1.10", "10.20.30.40"]}, "Connected"),
+    ({"ethernet 3": ["192.168.1.100"], "barracuda vpn": ["169.254.1.10"]},
+     "Disconnected"),
 ])
 def test_barracuda_is_connected_only_with_a_real_tunnel_address(monkeypatch,
-                                                                adapters, expected):
-    monkeypatch.setattr(vpn_connect, "_get_adapters", lambda: adapters)
+                                                                addresses, expected):
+    monkeypatch.setattr(vpn_connect, "_get_adapters", lambda: [_legacy()])
+    monkeypatch.setattr(vp, "_ipv4_by_adapter", lambda: addresses)
     monkeypatch.setattr(vpn_connect, "get_status",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy")))
     assert vp.vpn_status("Barracuda", "", "MCX") == expected
 
 
-def test_without_an_adapter_list_the_legacy_answers(monkeypatch):
-    monkeypatch.setattr(vpn_connect, "_get_adapters", lambda: [])
+def test_an_adapter_named_by_its_description_only_is_found(monkeypatch):
+    monkeypatch.setattr(vpn_connect, "_get_adapters",
+                        lambda: [_legacy(desc="barracuda virtual adapter (vpn)",
+                                         name="połączenie vpn 7")])
+    monkeypatch.setattr(vp, "_ipv4_by_adapter",
+                        lambda: {"połączenie vpn 7": ["192.168.189.52"]})
+    assert vp.vpn_status("Barracuda", "", "MCX") == "Connected"
+
+
+def test_without_readable_addresses_the_legacy_answers(monkeypatch):
+    def broken():
+        raise OSError("no psutil")
+
+    monkeypatch.setattr(vp, "_ipv4_by_adapter", broken)
     monkeypatch.setattr(vpn_connect, "get_status", lambda *a, **k: "Connected")
     assert vp.vpn_status("Barracuda", "", "MCX") == "Connected"
+
+
+def test_the_legacy_reader_really_misses_addresses_so_it_is_not_trusted():
+    """Pinned so nobody "simplifies" back to the legacy's ipv4_addresses."""
+    import inspect
+    source = inspect.getsource(vp.barracuda_status)
+    assert "_ipv4_by_adapter()" in source
+    assert "ipv4_addresses" not in source
 
 
 def test_other_providers_keep_the_legacy_status(monkeypatch):

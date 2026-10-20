@@ -687,24 +687,45 @@ def _record_legacy_session(p) -> None:
 _BARRACUDA_ADAPTER = ("nacvpn", "barracuda")
 
 
+def _ipv4_by_adapter() -> dict:
+    """``{friendly name (lowercase): [IPv4, ...]}`` from psutil.
+
+    The legacy reader (``vpn_connect._get_adapters``) reports no IPv4 for
+    ordinary adapters — measured 2026-10-20: "Ethernet 3" with 192.168.1.100
+    came back empty, only the loopback had its address — so its addresses
+    cannot decide anything; its Up flag carried the old status.
+    """
+    import psutil
+    out: dict = {}
+    for name, addrs in psutil.net_if_addrs().items():
+        out[str(name).lower()] = [a.address for a in addrs
+                                  if getattr(a, "family", None) == 2]   # AF_INET
+    return out
+
+
 def barracuda_status() -> str | None:
     """Connected only with a real tunnel address on Barracuda's adapter.
 
-    2026-10-20 (owner's laptop, MCX disconnected): the "Barracuda Virtual
-    Adapter (VPN)" stays *Up* with 169.254.1.10, and the legacy check counts
-    any IPv4 or an Up state as connected — so the card stayed green.  Here an
-    address in 169.254.0.0/16 (link-local) and the Up state alone mean
-    disconnected.  No adapter list at all (the API failed): ``None``, and the
-    caller asks the legacy.
+    2026-10-20 (owner's laptop): disconnected, the "Barracuda VPN" adapter
+    stays Up with 169.254.1.10; connected, it has 192.168.189.52.  The legacy
+    check counts an Up state as connected, so the card stayed green.  Here a
+    link-local address (169.254.0.0/16) or no address means disconnected.
+    Barracuda's adapters are recognised as before (description or name with
+    "barracuda"/"nacvpn"); their addresses come from psutil.  ``None`` when the
+    addresses cannot be read — the caller asks the legacy then.
     """
-    adapters = vpn_connect._get_adapters()
-    if not adapters:
+    try:
+        addresses = _ipv4_by_adapter()
+    except Exception:
         return None
-    for ad in adapters:
-        names = f"{ad.get('description', '')} {ad.get('friendly_name', '')}".lower()
-        if not any(k in names for k in _BARRACUDA_ADAPTER):
-            continue
-        if any(not str(ip).startswith("169.254.") for ip in ad.get("ipv4_addresses") or ()):
+    names = set()
+    for ad in vpn_connect._get_adapters() or ():
+        text = f"{ad.get('description', '')} {ad.get('friendly_name', '')}".lower()
+        if any(k in text for k in _BARRACUDA_ADAPTER):
+            names.add(str(ad.get("friendly_name", "")).lower())
+    names |= {n for n in addresses if any(k in n for k in _BARRACUDA_ADAPTER)}
+    for name in names:
+        if any(not ip.startswith("169.254.") for ip in addresses.get(name, ())):
             return "Connected"
     return "Disconnected"
 
