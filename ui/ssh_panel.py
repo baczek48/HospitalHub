@@ -7994,6 +7994,39 @@ def _make_ssh_window_icon() -> QIcon:
     return QIcon(pix)
 
 
+class _SupportTarget:
+    """One SSH tab as "Wsparcie Claude" sees it (ui.claude_panel): its screen
+    and scrollback, read only.  It cannot type, and sees nothing else."""
+
+    def __init__(self, dialog: 'SshDialog', session: '_Session'):
+        self._dialog = dialog
+        self._session = session
+
+    def label(self) -> str:
+        return self._session.label
+
+    def alive(self) -> bool:
+        s = self._session
+        if s not in self._dialog._sessions:
+            return False
+        channel = getattr(s.worker, "_channel", None)
+        return channel is not None and not getattr(channel, "closed", True)
+
+    def read(self, lines: int) -> str:
+        """The last `lines` rows: the end of the scrollback, then the screen."""
+        term = self._session.term
+        term.flush_now()
+        screen = term._screen
+        visible = [line.rstrip() for line in screen.display]
+        top = screen.history.top            # up to 250 000 rows: take the end only
+        start = max(0, len(top) - lines)
+        rows = [top[i].text.rstrip() for i in range(start, len(top))] + visible
+        while rows and not rows[-1]:
+            rows.pop()
+        return "\n".join(rows[-lines:])
+
+
+
 class SshDialog(QDialog):
     # Class-level list to prevent garbage collection of detached windows
     _alive: list['SshDialog'] = []
@@ -8154,8 +8187,26 @@ class SshDialog(QDialog):
             "QPushButton:hover{background:#152b15;border-color:#2d5a2d;}")
         btn_new.clicked.connect(self._prompt_new_session)
 
+        # Wsparcie Claude (2026-10-20): a conversation about the current tab.
+        self._btn_claude = QPushButton("Wsparcie Claude")
+        set_icon(self._btn_claude, "chat", "#d2a8ff", on="#ffffff", size=14)
+        self._btn_claude.setCheckable(True)
+        self._btn_claude.setToolTip(
+            "Rozmowa z Claude o bieżącej karcie terminala — Claude tylko czyta "
+            "ekran i podpowiada komendy, wpisujesz je sam")
+        self._btn_claude.setStyleSheet(
+            "QPushButton{background:#1d1530;color:#d2a8ff;"
+            "border:1px solid #3b2a5c;border-radius:6px;padding:4px 12px;"
+            "font-size:11px;}"
+            "QPushButton:checked{background:#8957e5;color:#fff;border-color:#8957e5;}"
+            "QPushButton:hover{background:#2a1f45;}")
+        self._btn_claude.toggled.connect(self._toggle_claude_support)
+        self._claude_panel = None
+        self._claude_session = None
+
         tb.addWidget(self._btn_multiexec)
         tb.addWidget(btn_new)
+        tb.addWidget(self._btn_claude)
         tb.addStretch()
         tlay.addLayout(tb)
 
@@ -8773,11 +8824,65 @@ class SshDialog(QDialog):
         s.sftp_history.clear()
         s.last_stats = None
 
+    def _toggle_claude_support(self, on: bool) -> None:
+        if not on:
+            if self._claude_panel is not None:
+                self._claude_panel.end()
+            return
+        if self._multiexec or self._claude_panel is not None:
+            self._btn_claude.setChecked(self._claude_panel is not None)
+            return
+        idx = self._tab_widget.currentIndex()
+        if idx < 0 or idx >= len(self._sessions):
+            self._status("Otwórz kartę terminala, której ma dotyczyć wsparcie.", err=True)
+            self._btn_claude.setChecked(False)
+            return
+        from ui.claude_panel import ClaudeSupportPanel
+        session = self._sessions[idx]
+        panel = ClaudeSupportPanel(_SupportTarget(self, session), self)
+        panel.closed.connect(self._on_claude_support_closed)
+        self._claude_panel = panel
+        self._claude_session = session
+        self._main_splitter.addWidget(panel)
+        total = sum(self._main_splitter.sizes()) or self.width()
+        left, term = self._main_splitter.sizes()[:2]
+        self._main_splitter.setSizes([left, max(400, term - 380), 380])
+        tab = self._tab_widget.indexOf(session.pane)
+        if tab >= 0:
+            self._tab_widget.setTabText(tab, "● " + session.label)
+        panel.start()
+
+    def _on_claude_support_closed(self) -> None:
+        panel, session = self._claude_panel, self._claude_session
+        self._claude_panel = None
+        self._claude_session = None
+        if session is not None:
+            tab = self._tab_widget.indexOf(session.pane)
+            if tab >= 0:
+                self._tab_widget.setTabText(tab, session.label)
+        if panel is not None:
+            # Kept on screen until the button is clicked again, so the last
+            # answer can still be read; the next toggle removes it.
+            QTimer.singleShot(0, lambda p=panel: self._retire_claude_panel(p))
+        self._btn_claude.blockSignals(True)
+        self._btn_claude.setChecked(False)
+        self._btn_claude.blockSignals(False)
+
+    def _retire_claude_panel(self, panel) -> None:
+        self._claude_old_panel = getattr(self, "_claude_old_panel", None)
+        if self._claude_old_panel is not None and self._claude_old_panel is not panel:
+            self._claude_old_panel.setParent(None)
+            self._claude_old_panel.deleteLater()
+        self._claude_old_panel = panel
+
     def _close_session(self, idx: int):
         """Stop and remove one terminal session tab."""
         if idx < 0 or idx >= len(self._sessions):
             return
         s = self._sessions.pop(idx)
+        panel = getattr(self, "_claude_panel", None)
+        if panel is not None and s is getattr(self, "_claude_session", None):
+            panel.target_gone()
         # Push edits still waiting in temp while this session's SFTP is open
         # (C1-04): the teardown below closes it, and a flush after that met a
         # closed transport — the last ~2 s of edits were lost.
@@ -9553,6 +9658,8 @@ class SshDialog(QDialog):
         if not self._confirm_close():
             event.ignore()
             return
+        if getattr(self, "_claude_panel", None) is not None:
+            self._claude_panel.end()
         # The SFTP panel first: its last flush needs the connections the loop
         # below closes (C1-04).
         self._sftp_panel.stop()
