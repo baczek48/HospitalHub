@@ -90,7 +90,10 @@ Name: "{group}\Odinstaluj {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Uruchom {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; runasoriginaluser (2026-10-20): started elevated by the UAC-elevated
+; installer, the app failed on two machines (permissions and more); started
+; from the desktop it worked.  Start it as the signed-in user instead.
+Filename: "{app}\{#MyAppExeName}"; Description: "Uruchom {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Code]
 const

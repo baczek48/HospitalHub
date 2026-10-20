@@ -322,6 +322,23 @@ class StormshieldProvider(VpnProvider):
 
         if wait_until(shown, WINDOW_WAIT_S):
             return
+        # The tray icon first (2026-10-20): on some machines a second start
+        # does not show the window, a double-click on the icon does.  Only an
+        # icon window whose owner verifies as this client is touched.
+        activate = getattr(self._system, "activate_tray", None)
+        if activate is not None:
+            target = self.secure_window_target()
+
+            def is_client(hwnd) -> bool:
+                owner = target.verify_owner(hwnd)
+                return bool(owner.verified) and (
+                    (owner.image_name or "").lower() == GUI_EXE_NAME)
+
+            try:
+                if activate(is_client) and wait_until(shown, WINDOW_WAIT_S):
+                    return
+            except Exception:
+                pass
         for _ in range(RESHOW_ATTEMPTS):
             try:
                 self._system.spawn_detached(gui, cwd)

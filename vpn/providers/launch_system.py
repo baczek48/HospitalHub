@@ -225,6 +225,25 @@ class WindowsLaunchSystem(LaunchSystem):
             time.sleep(POLL_INTERVAL_S)
         return False
 
+    def activate_tray(self, is_client) -> bool:
+        """Double-click the tray icon of the client — the first tray window
+        for which ``is_client(hwnd)`` holds (the caller verifies the owner).
+
+        2026-10-20: on the owner's other machine Stormshield stayed in the
+        tray after a second start; the legacy's tray double-click is what
+        shows it there (as it does Hillstone, same log).
+        """
+        from .window_message_system import Win32WindowMessageSystem
+        messages = Win32WindowMessageSystem()
+        for hwnd in messages.tray_icon_windows():
+            try:
+                if is_client(hwnd):
+                    messages.post_tray_double_click(hwnd)
+                    return True
+            except Exception:
+                continue
+        return False
+
     def wait_until(self, predicate, timeout: float) -> bool:
         """Poll `predicate` until it is true or `timeout` elapses.
 

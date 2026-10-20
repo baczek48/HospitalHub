@@ -141,10 +141,12 @@ def test_a3_an_ambiguous_missing_or_partial_tree_sends_no_key(scan, reason):
     scans = {"two": node_scan(inp, one, one),
              "none": node_scan(inp),
              "truncated": MsaaScan(ok=True, combos=(one,), truncated=True)}
-    inp.msaa = ScriptedMsaa(inp, [scans[scan]])
+    # "none" stays none however long it is waited for (2026-10-20).
+    inp.msaa = ScriptedMsaa(inp, [scans[scan]] * (100 if scan == "none" else 1))
     result = drive(inp)
 
-    assert result.metadata["reason_code"] == reason
+    # 2026-10-20: a missing combo's refusal also names the combos found.
+    assert result.metadata["reason_code"].split(":")[0] == reason
     assert keys(inp.events)[-1:] != [SHIFT_TAB] and SHIFT_TAB not in inp.events
     nothing_secret_left(inp, result)
 
@@ -705,3 +707,38 @@ def test_h3_both_readers_initialise_com_before_their_first_call():
     uia = open(uv.__file__, encoding="utf-8").read()
     body = uia[uia.index("def _element"):]
     assert body.index("ensure_com_apartment(comtypes)") < body.index("CreateObject")
+
+
+def test_a3b_a_combo_that_appears_late_is_waited_for():
+    """2026-10-20: read straight after the client started, the combo was not
+    there yet (the owner's other machine).  A missing combo is waited for —
+    reading only, no key — and the fill goes on once it shows."""
+    inp = FakeInput()
+    one = inp.msaa.node(HWND)
+    real = inp.msaa
+
+    class Late(type(real)):
+        calls = 0
+
+        def combo_boxes(self, hwnd):
+            Late.calls += 1
+            if Late.calls <= 3:
+                return node_scan(inp)
+            return real.combo_boxes(hwnd)
+
+    inp.msaa = Late(inp)
+    result = drive(inp)
+    assert result.status is AutofillStatus.DONE, result.metadata
+    assert Late.calls > 3
+    waits = [e for e in inp.events if e == ("sleep", fa._CONTROL_POLL_S)]
+    assert len(waits) == 3
+
+
+def test_a3c_a_combo_that_never_appears_is_named_in_the_refusal():
+    inp = FakeInput()
+    inp.msaa = ScriptedMsaa(inp, [node_scan(inp)] * 100)
+    result = drive(inp)
+    assert result.metadata["reason_code"].startswith(fp.REASON_CONTROL_MISSING + ":0:")
+    waited = sum(e[1] for e in inp.events if e == ("sleep", fa._CONTROL_POLL_S))
+    assert waited >= fa._CONTROL_APPEARS_WITHIN_S
+    nothing_secret_left(inp, result)

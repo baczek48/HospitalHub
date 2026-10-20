@@ -284,15 +284,10 @@ class Win32UiaValueSystem(UiaValueSystem):
                 CONTROL_TYPE_PROPERTY_ID, COMBOBOX_CONTROL_TYPE))
         except Exception as exc:
             return UiaSetOutcome(False, reason=f"uia-error:{type(exc).__name__}")
-        if not combos or combos.Length != 1:
-            return UiaSetOutcome(False, reason="list-not-unique")
-        combo = combos.GetElement(0)
-        try:
-            pid = int(combo.CurrentProcessId)
-        except Exception as exc:
-            return UiaSetOutcome(True, reason=f"pid-error:{type(exc).__name__}")
-        if pid != expected_pid:
-            return UiaSetOutcome(True, reason="pid-mismatch", process_id=pid)
+        if not combos or combos.Length == 0:
+            # One profile, no list (2026-10-20): nothing to choose; the
+            # fields still refuse a form that is not the login one.
+            return UiaSetOutcome(True, performed=True, reason="no-list")
         walker = uia.RawViewWalker
 
         def texts(el):
@@ -310,6 +305,47 @@ class Win32UiaValueSystem(UiaValueSystem):
                     child = walker.GetNextSiblingElement(child)
             return out
 
+        # Every visible combo of the verified process is a candidate; the one
+        # holding exactly one item with the profile's text is the list
+        # (2026-10-20: "list-not-unique" on the owner's other machine).
+        hits = []                 # (combo, expand pattern, item)
+        pid = None
+        for i in range(combos.Length):
+            combo = combos.GetElement(i)
+            try:
+                if int(combo.CurrentProcessId) != expected_pid:
+                    pid = int(combo.CurrentProcessId)
+                    continue
+                if combo.CurrentIsOffscreen or not combo.CurrentIsEnabled:
+                    continue
+                expand = combo.GetCurrentPattern(EXPAND_COLLAPSE_PATTERN_ID).QueryInterface(
+                    IUIAutomationExpandCollapsePattern)
+            except Exception:
+                continue
+            try:
+                expand.Expand()
+                time.sleep(0.4)
+                items = combo.FindAll(TREESCOPE_DESCENDANTS, uia.CreatePropertyCondition(
+                    CONTROL_TYPE_PROPERTY_ID, LIST_ITEM_CONTROL_TYPE))
+                for j in range(items.Length):
+                    item = items.GetElement(j)
+                    if text in texts(item):
+                        hits.append((combo, expand, item))
+            except Exception:
+                pass
+            finally:
+                try:
+                    expand.Collapse()
+                except Exception:
+                    pass
+        if not hits:
+            return UiaSetOutcome(True, reason=("pid-mismatch" if pid is not None
+                                               else "profile-not-in-client"))
+        if len(hits) > 1:
+            return UiaSetOutcome(True, reason="profile-ambiguous")
+        combo, expand, item = hits[0]
+        pid = expected_pid
+
         def shown() -> list:
             try:
                 sel = combo.GetCurrentPattern(SELECTION_PATTERN_ID).QueryInterface(
@@ -319,24 +355,9 @@ class Win32UiaValueSystem(UiaValueSystem):
                 return []
 
         try:
-            expand = combo.GetCurrentPattern(EXPAND_COLLAPSE_PATTERN_ID).QueryInterface(
-                IUIAutomationExpandCollapsePattern)
-        except Exception as exc:
-            return UiaSetOutcome(True, reason=f"no-expand:{type(exc).__name__}",
-                                 process_id=pid)
-        try:
             expand.Expand()
             time.sleep(0.4)
-            items = combo.FindAll(TREESCOPE_DESCENDANTS, uia.CreatePropertyCondition(
-                CONTROL_TYPE_PROPERTY_ID, LIST_ITEM_CONTROL_TYPE))
-            hits = [items.GetElement(i) for i in range(items.Length)
-                    if text in texts(items.GetElement(i))]
-            if len(hits) != 1:
-                expand.Collapse()
-                return UiaSetOutcome(True, reason=("profile-not-in-client" if not hits
-                                                   else "profile-ambiguous"),
-                                     process_id=pid)
-            hits[0].GetCurrentPattern(SELECTION_ITEM_PATTERN_ID).QueryInterface(
+            item.GetCurrentPattern(SELECTION_ITEM_PATTERN_ID).QueryInterface(
                 IUIAutomationSelectionItemPattern).Select()
             time.sleep(0.2)
             expand.Collapse()

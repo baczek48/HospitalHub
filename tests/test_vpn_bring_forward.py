@@ -285,3 +285,67 @@ def test_sentences_name_the_clicked_client(client):
         assert "{" not in text
         if client != "FortiClient":
             assert "FortiClient" not in text
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-20: Stormshield stayed in the tray on the owner's other machine
+# ══════════════════════════════════════════════════════════════════════════
+
+class TrayLaunch(WaitingLaunch):
+    """A second start shows nothing; a tray double-click does."""
+
+    def __init__(self, *, tray_shows=True, client_hwnds=(0x77,)):
+        super().__init__(shown_after_spawns=99)
+        self.tray_shows = tray_shows
+        self.client_hwnds = client_hwnds
+        self.asked_about = []
+        self.tray_clicked = False
+
+    def activate_tray(self, is_client):
+        for hwnd in (0x66,) + tuple(self.client_hwnds):
+            self.asked_about.append(hwnd)
+            if is_client(hwnd):
+                self.tray_clicked = self.tray_shows
+                return True
+        return False
+
+
+def storm_tray(launch):
+    p = provider(system=launch)
+
+    class Owner:
+        def __init__(self, ok, image):
+            self.verified, self.image_name = ok, image
+
+    class Target:
+        def first_verified_candidate(self):
+            return (1, None) if launch.tray_clicked else None
+
+        def verify_owner(self, hwnd):
+            if hwnd in launch.client_hwnds:
+                return Owner(True, ss.GUI_EXE_NAME)
+            return Owner(True, "hillstonesecureconnect.exe")    # someone else's tray
+
+    p.secure_window_target = lambda *a, **k: Target()
+    return p
+
+
+def test_stormshield_in_the_tray_is_shown_by_its_tray_icon_before_restarting():
+    launch = TrayLaunch()
+    assert storm_tray(launch).launch().success
+    assert launch.tray_clicked
+    assert len(launch.spawned) == 1, "bez kolejnych startow"
+
+
+def test_another_programs_tray_icon_is_never_clicked():
+    launch = TrayLaunch(client_hwnds=())
+    storm_tray(launch).launch()
+    assert not launch.tray_clicked
+    assert 0x66 in launch.asked_about
+    assert len(launch.spawned) == 1 + ss.RESHOW_ATTEMPTS, "zostaje ponowny start"
+
+
+def test_a_tray_click_that_shows_nothing_falls_back_to_starting_again():
+    launch = TrayLaunch(tray_shows=False)
+    storm_tray(launch).launch()
+    assert len(launch.spawned) == 1 + ss.RESHOW_ATTEMPTS

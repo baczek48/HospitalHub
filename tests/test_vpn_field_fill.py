@@ -420,3 +420,22 @@ def test_the_card_says_what_happened_for_the_new_reasons():
         text = present_outcome("autofill-blocked", reason, client="Barracuda").text
         assert "FortiClient" not in text and "{" not in text, (reason, text)
         assert "Logowanie nie zostało wysłane" in text
+
+
+def test_barra_a_client_without_a_profile_list_goes_on_to_the_fields():
+    """2026-10-20: one profile, no list — nothing to choose, the fields decide."""
+    class NoList(ProfileUia):
+        def select_list_item(self, hwnd, text, *, expected_pid):
+            self.calls.append("select:" + text)
+            return UiaSetOutcome(True, performed=True, reason="no-list")
+
+    provider = tb.provider()
+    target = provider.secure_window_target(api=tb.Desktop(),
+                                           finder=ListFinder((tb.HWND,)))
+    uia = NoList(owner_pid=tb.PID, shown="MCX")
+    keys = FakeKeys(uia)
+    result = provider.autofill_login_password(
+        VpnRequest(provider_id="barracuda", login=LOGIN, password=PASSWORD,
+                   profile_name="MCX"), target=target, uia=uia, input_system=keys)
+    assert result.status is AutofillStatus.DONE
+    assert keys.typed() == [(ba.AID_USER, LOGIN), (ba.AID_PASSWORD, PASSWORD)]

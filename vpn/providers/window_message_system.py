@@ -28,6 +28,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Qt5's tray callback message and the mouse event it carries (legacy
+#: ``_activate_qt_tray_icon``; measured working on the owner's machines).
+_QT_TRAY_CALLBACK = 0x8000 + 101
+_WM_LBUTTONDBLCLK = 0x0203
+
 __all__ = ["WindowControl", "WindowMessageSystem", "Win32WindowMessageSystem",
            "EDIT", "BUTTON", "is_connect_button"]
 
@@ -82,6 +87,16 @@ class WindowMessageSystem:
     def sleep(self, seconds: float) -> None:
         raise NotImplementedError
 
+    def tray_icon_windows(self) -> list:
+        """Qt's hidden tray-icon message windows (class contains
+        ``TrayIcon``), of every process.  The caller verifies the owner."""
+        return []
+
+    def post_tray_double_click(self, hwnd) -> None:
+        """What a double-click on the tray icon sends Qt (WM_APP+101 with
+        WM_LBUTTONDBLCLK) — the legacy ``_activate_qt_tray_icon``."""
+        raise NotImplementedError
+
 
 class Win32WindowMessageSystem(WindowMessageSystem):
     """The real thing.  Not exercised by the test suite (see the module doc)."""
@@ -124,3 +139,25 @@ class Win32WindowMessageSystem(WindowMessageSystem):
     def sleep(self, seconds: float) -> None:
         import time
         time.sleep(seconds)
+
+    def tray_icon_windows(self) -> list:
+        import win32gui
+        found: list = []
+
+        def _cb(hwnd, _):
+            try:
+                if "TrayIcon" in win32gui.GetClassName(hwnd):
+                    found.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        try:
+            win32gui.EnumWindows(_cb, None)
+        except Exception:
+            pass
+        return found
+
+    def post_tray_double_click(self, hwnd) -> None:
+        import win32gui
+        win32gui.PostMessage(hwnd, _QT_TRAY_CALLBACK, 0, _WM_LBUTTONDBLCLK)

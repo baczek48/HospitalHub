@@ -240,7 +240,8 @@ def autofill_login_password(
                 if msaa is None:
                     from .msaa_system import Win32MsaaSystem
                     msaa = Win32MsaaSystem()
-                reader = _ProfileReader(target, msaa, win, profile, tunnels)
+                reader = _ProfileReader(target, msaa, win, profile, tunnels,
+                                        sleep=inp.sleep)
                 check_profile = reader.still_selected
 
             # --- navigation (no secret): render wait, profile, tabs --------- #
@@ -482,6 +483,10 @@ def _locate_text_field(win, inp, guard, state_holder) -> tuple[bool, str]:
     return False, "no-text-field-found"
 
 
+#: How long the ``VPN Name`` combo may take to appear after the window did.
+_CONTROL_APPEARS_WITHIN_S = 6.0
+_CONTROL_POLL_S = 0.25
+
 #: MSAA names of the two credential fields (FortiClient VPN 7.4.3, measured
 #: 2026-10-19).
 FIELD_USERNAME = "Username"
@@ -643,11 +648,22 @@ class _ProfileReader:
     owner, but against the trusted image, not against ``win.pid``.
     """
 
-    def __init__(self, target, msaa, win, profile, tunnels):
+    def __init__(self, target, msaa, win, profile, tunnels, sleep=None):
+        self._sleep = sleep
         self._target, self._msaa, self._win = target, msaa, win
         self._profile, self._tunnels = profile, tunnels
         #: Why the last :meth:`act` withheld its key, or ``""``.
         self.refusal = ""
+
+    def _combo_names(self) -> str:
+        """``":<n>:<name>|<name>"`` of the window's combo boxes — their labels,
+        never their values — for the log."""
+        try:
+            scan = self._msaa.combo_boxes(self._win.hwnd)
+            names = [str(n.name or "?")[:24] for n in scan.combos][:4]
+        except Exception:
+            return ":?"
+        return f":{len(names)}:" + "|".join(names)
 
     def read(self):
         """``(reading, match, refusal)`` — `refusal` is ``""`` when usable."""
@@ -662,8 +678,23 @@ class _ProfileReader:
                                             self._tunnels), ""
 
     def initial(self) -> tuple[str, bool]:
-        """Before any key: ``(refusal, already_selected)``."""
+        """Before any key: ``(refusal, already_selected)``.
+
+        2026-10-20 (owner's other machine): read two seconds after the click,
+        straight after the client started, the combo was not there yet.  A
+        missing combo is waited for (it is a reading, no key); if it never
+        comes, the refusal names the combos that are there, so the next log
+        tells a slow start from a differently named list.
+        """
         reading, match, refusal = self.read()
+        waited = 0.0
+        while (refusal == fprof.REASON_CONTROL_MISSING and self._sleep is not None
+               and waited < _CONTROL_APPEARS_WITHIN_S):
+            self._sleep(_CONTROL_POLL_S)
+            waited += _CONTROL_POLL_S
+            reading, match, refusal = self.read()
+        if refusal == fprof.REASON_CONTROL_MISSING:
+            return refusal + self._combo_names(), False
         if refusal:
             return refusal, False
         if match.matched:
