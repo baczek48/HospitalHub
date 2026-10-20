@@ -32,16 +32,28 @@ _MAX_CHARS = 60000
 #: Longest the tool server waits for the UI thread to answer a read.
 _READ_TIMEOUT_S = 30
 
-_PANEL_STYLE = """
-QWidget#claudePanel { background: #0d1117; }
-QLabel { color: #c9d1d9; }
-QScrollArea { border: none; background: #0d1117; }
-QPlainTextEdit { background: #161b22; color: #e6edf3; border: 1px solid #30363d;
-                 border-radius: 6px; padding: 6px; font-size: 12px; }
-QPushButton { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
-              border-radius: 6px; padding: 5px 12px; font-size: 11px; }
-QPushButton:hover { background: #30363d; }
-QPushButton:disabled { color: #484f58; }
+#: Claude's orange — the panel's frame and the SSH window's button share it.
+ACCENT = "#d97757"
+ACCENT_HOVER = "#e88a6b"
+ACCENT_DIM = "#5c3322"
+
+_PANEL_STYLE = f"""
+QWidget#claudePanel {{ background: #0d1117; border: 1px solid {ACCENT};
+                       border-radius: 10px; }}
+QLabel {{ color: #c9d1d9; }}
+QLabel#claudeTitle {{ color: {ACCENT}; font-weight: bold; font-size: 13px; }}
+QScrollArea {{ border: none; background: #0d1117; }}
+QPlainTextEdit {{ background: #161b22; color: #e6edf3; border: 1px solid #30363d;
+                 border-radius: 6px; padding: 6px; font-size: 12px; }}
+QPlainTextEdit:focus {{ border: 1px solid {ACCENT}; }}
+QPushButton {{ background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+              border-radius: 6px; padding: 5px 12px; font-size: 11px; }}
+QPushButton:hover {{ background: #30363d; border-color: {ACCENT}; }}
+QPushButton:disabled {{ color: #484f58; border-color: #30363d; }}
+QPushButton#claudeSend {{ background: {ACCENT}; color: #ffffff; border: none;
+                          font-weight: bold; }}
+QPushButton#claudeSend:hover {{ background: {ACCENT_HOVER}; }}
+QPushButton#claudeSend:disabled {{ background: {ACCENT_DIM}; color: #a8806f; }}
 """
 
 
@@ -117,6 +129,8 @@ class ClaudeSupportPanel(QWidget):
                  server_factory=None, find_claude=None):
         super().__init__(parent)
         self.setObjectName("claudePanel")
+        # A plain QWidget paints a style-sheet border only with this.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(_PANEL_STYLE)
         self.setMinimumWidth(320)
         self._target = target
@@ -137,12 +151,12 @@ class ClaudeSupportPanel(QWidget):
 
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 6, 8, 8)
+        root.setContentsMargins(10, 8, 10, 10)
         root.setSpacing(6)
 
         head = QHBoxLayout()
         title = QLabel("Wsparcie Claude")
-        title.setStyleSheet("color: #e6edf3; font-weight: bold; font-size: 13px;")
+        title.setObjectName("claudeTitle")
         head.addWidget(title)
         head.addStretch()
         self._btn_end = QPushButton("Zakończ")
@@ -179,6 +193,7 @@ class ClaudeSupportPanel(QWidget):
         self._input.installEventFilter(self)
         row.addWidget(self._input, 1)
         self._btn_send = QPushButton("Wyślij")
+        self._btn_send.setObjectName("claudeSend")
         self._btn_send.clicked.connect(self._send)
         row.addWidget(self._btn_send)
         root.addLayout(row)

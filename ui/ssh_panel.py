@@ -8189,17 +8189,18 @@ class SshDialog(QDialog):
 
         # Wsparcie Claude (2026-10-20): a conversation about the current tab.
         self._btn_claude = QPushButton("Wsparcie Claude")
-        set_icon(self._btn_claude, "chat", "#d2a8ff", on="#ffffff", size=14)
+        set_icon(self._btn_claude, "chat", "#d97757", on="#ffffff", size=14)
         self._btn_claude.setCheckable(True)
         self._btn_claude.setToolTip(
             "Rozmowa z Claude o bieżącej karcie terminala — Claude tylko czyta "
             "ekran i podpowiada komendy, wpisujesz je sam")
+        # Claude's orange, as the panel's frame (ui.claude_panel.ACCENT).
         self._btn_claude.setStyleSheet(
-            "QPushButton{background:#1d1530;color:#d2a8ff;"
-            "border:1px solid #3b2a5c;border-radius:6px;padding:4px 12px;"
+            "QPushButton{background:#24150f;color:#e88a6b;"
+            "border:1px solid #5c3322;border-radius:6px;padding:4px 12px;"
             "font-size:11px;}"
-            "QPushButton:checked{background:#8957e5;color:#fff;border-color:#8957e5;}"
-            "QPushButton:hover{background:#2a1f45;}")
+            "QPushButton:checked{background:#d97757;color:#fff;border-color:#d97757;}"
+            "QPushButton:hover{background:#33200f;border-color:#d97757;}")
         self._btn_claude.toggled.connect(self._toggle_claude_support)
         self._claude_panel = None
         self._claude_session = None
