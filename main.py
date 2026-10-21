@@ -408,8 +408,27 @@ class AppManager:
         if window in self._windows:
             self._windows.remove(window)
         if not self._windows:
+            self._hide_all_windows()
             self._close_all_ssh_dialogs()
             self._app.quit()
+
+    @staticmethod
+    def _hide_all_windows():
+        """Take every window off the screen at once, before the clean-up.
+
+        2026-10-21 (owner): after "Zamknij wszystko" a window — the VPN
+        vault's — sometimes stayed on top until its X was clicked.  Nothing
+        hid the windows: they stayed, frozen, through the closing of the SSH
+        windows and the wait for running threads after the event loop ended
+        (up to a few seconds with a VPN session still waiting for its
+        client).  Never raises."""
+        try:
+            for w in QApplication.topLevelWidgets():
+                if w.isVisible():
+                    w.hide()
+            QApplication.processEvents()
+        except Exception:
+            pass
 
     @staticmethod
     def _close_all_ssh_dialogs():
@@ -532,6 +551,7 @@ class AppManager:
                     pass
                 else:
                     return  # Cancel — abort quit
+        self._hide_all_windows()
         self._close_all_ssh_dialogs()
         for w in self._windows:
             # One window's failing cleanup must never keep the application
@@ -700,14 +720,10 @@ def main():
     # Force-terminate: Qt threads or blocked I/O (paramiko/pysftp) can
     # keep the interpreter alive after app.quit(). Best-effort cleanup
     # already ran via tray/close handlers, so exit hard here.
-    _cleanup_sftp_temp()
-    try:
-        from ui.thread_retire import wait_for_retired
-        wait_for_retired(3000)
-    except Exception:
-        pass
+    AppManager._hide_all_windows()
     # os._exit skips the 30 s RDP credential timers and atexit: remove the
-    # TERMSRV entries and a copied secret now (C2-04, C3-01).
+    # TERMSRV entries and a copied secret now (C2-04, C3-01) — first, before
+    # anything that waits, so the watchdog below never skips them.
     try:
         from ui import rdp
         rdp.cleanup_pending_credentials()
@@ -716,6 +732,18 @@ def main():
     try:
         from ui.dialogs import clear_secret_from_clipboard
         clear_secret_from_clipboard()
+    except Exception:
+        pass
+    # The rest is bounded, but should any step ever hang, the process still
+    # ends — a frozen window must not wait for a click on its X (2026-10-21).
+    import threading
+    _watchdog = threading.Timer(10.0, lambda: os._exit(exit_code))
+    _watchdog.daemon = True
+    _watchdog.start()
+    _cleanup_sftp_temp()
+    try:
+        from ui.thread_retire import wait_for_retired
+        wait_for_retired(3000)
     except Exception:
         pass
     os._exit(exit_code)
