@@ -639,3 +639,75 @@ def test_nothing_reaches_claude_without_the_mask():
 def test_claude_is_told_about_the_mask():
     import ui.claude_panel as cp
     assert cs.PESEL_MASK in cp.system_prompt("x")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-21: an ended panel — an error included — can be closed
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_without_claude_code_the_panel_offers_zamknij(app):
+    from ui.claude_panel import ClaudeSupportPanel
+    panel = ClaudeSupportPanel(Target(), process_factory=FakeProcess,
+                               find_claude=lambda: None)
+    assert panel.start() is False
+    gone = []
+    panel.dismissed.connect(lambda: gone.append(True))
+    assert panel.ended()
+    assert panel._btn_end.isEnabled() and panel._btn_end.text() == "Zamknij"
+    panel._btn_end.click()
+    assert gone == [True]
+
+
+def test_no_connection_to_the_terminal_ends_the_conversation(app):
+    panel, proc = make_panel(app)
+    proc.on_event("ready", {"connected": False})
+    pump()
+    assert panel.ended() and proc.stopped
+    assert panel._btn_end.text() == "Zamknij"
+
+
+def test_zakoncz_first_ends_then_zamknij_closes(app):
+    panel, proc = make_panel(app)
+    gone = []
+    panel.dismissed.connect(lambda: gone.append(True))
+    assert panel._btn_end.text() == "Zakończ"
+    panel._btn_end.click()
+    assert panel.ended() and gone == []
+    panel._btn_end.click()
+    assert gone == [True]
+
+
+def test_zamknij_removes_the_panel_from_its_tab(app, tmp_path, monkeypatch):
+    sys.path.insert(0, _HERE)
+    import time
+    import models
+    from ssh_fake_server import FakeServer
+    from ui import ssh_panel as sp
+    import ui.claude_panel as cp
+    srv = FakeServer(str(tmp_path))
+    monkeypatch.setattr(sp, "_make_client", srv.make_client_patch())
+    monkeypatch.setattr(sp.QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(cp.cs, "ClaudeProcess", FakeProcess)
+    monkeypatch.setattr(cp.cs, "find_claude", lambda: None)   # not installed
+    m = models.Machine(ip="10.0.0.5", credentials=[
+        models.Credential(login="u", password=srv.password)])
+    dlg = sp.SshDialog(m)
+    dlg.resize(1300, 700)
+    dlg.show()
+    end = time.monotonic() + 8
+    while time.monotonic() < end and not dlg._sessions:
+        pump()
+    try:
+        dlg._btn_claude.setChecked(True)
+        pump()
+        panel = dlg._sessions[0].claude_panel
+        assert panel is not None and panel.ended()     # the error is shown
+        assert not dlg._claude_stack.isHidden()
+        panel._btn_end.click()                          # "Zamknij"
+        pump()
+        assert dlg._sessions[0].claude_panel is None
+        assert dlg._claude_stack.isHidden() and dlg._claude_stack.count() == 0
+        assert not dlg._btn_claude.isChecked()
+    finally:
+        dlg.close_without_asking()
+        srv.drop()

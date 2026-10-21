@@ -93,7 +93,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; runasoriginaluser (2026-10-20): started elevated by the UAC-elevated
 ; installer, the app failed on two machines (permissions and more); started
 ; from the desktop it worked.  Start it as the signed-in user instead.
-Filename: "{app}\{#MyAppExeName}"; Description: "Uruchom {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+; shellexec (2026-10-21): on the "test" machine the start failed with
+; CreateProcess error 740 "requires elevation" — the exe itself is asInvoker,
+; so a compatibility setting there ("Uruchom jako administrator", likely left
+; from 1.x at the same path) asks for it.  CreateProcess cannot elevate;
+; ShellExecute starts it the way a double-click does and shows the UAC prompt.
+Filename: "{app}\{#MyAppExeName}"; Description: "Uruchom {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser shellexec
 
 [Code]
 const

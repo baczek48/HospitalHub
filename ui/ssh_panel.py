@@ -9213,6 +9213,9 @@ class SshDialog(QDialog):
         panel = ClaudeSupportPanel(_SupportTarget(self, s), self)
         panel.closed.connect(
             lambda s=s, p=panel: self._on_claude_support_closed(s, p))
+        panel.dismissed.connect(
+            lambda s=s, p=panel: self._drop_claude_panel(s)
+            if s.claude_panel is p else None)
         s.claude_panel = panel
         self._claude_stack.addWidget(panel)
         panel.start()

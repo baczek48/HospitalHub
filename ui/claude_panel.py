@@ -215,6 +215,8 @@ class ClaudeSupportPanel(QWidget):
     """The conversation and the Claude Code process behind it."""
 
     closed = pyqtSignal()
+    #: "Zamknij" after the end: the owner wants the panel gone (2026-10-21).
+    dismissed = pyqtSignal()
     _tool_request = pyqtSignal(object)
     _process_event = pyqtSignal(str, object)
 
@@ -272,7 +274,7 @@ class ClaudeSupportPanel(QWidget):
         head.addWidget(self._btn_live)
         self._btn_end = QPushButton("Zakończ")
         self._btn_end.setToolTip("Zakończ wsparcie — Claude traci dostęp do terminala")
-        self._btn_end.clicked.connect(self.end)
+        self._btn_end.clicked.connect(self._end_or_dismiss)
         head.addWidget(self._btn_end)
         root.addLayout(head)
 
@@ -462,8 +464,19 @@ class ClaudeSupportPanel(QWidget):
         self._btn_live.setEnabled(False)
         self._input.setEnabled(False)
         self._btn_send.setEnabled(False)
-        self._btn_end.setEnabled(False)
+        # The panel stays for reading — an error included ("Claude Code not
+        # found", no connection) — and "Zakończ" becomes "Zamknij": before,
+        # it was disabled and nothing closed the panel short of closing the
+        # tab (owner, 2026-10-21).
+        self._btn_end.setText("Zamknij")
+        self._btn_end.setToolTip("Zamknij panel wsparcia")
         self._state.setText("Wsparcie zakończone.")
+
+    def _end_or_dismiss(self) -> None:
+        if self._ended:
+            self.dismissed.emit()
+        else:
+            self.end()
 
     def target_gone(self) -> None:
         self._bubble("Karta terminala została zamknięta.", "info")
@@ -506,7 +519,11 @@ class ClaudeSupportPanel(QWidget):
         if self._ended:
             return
         if kind == "ready" and not payload.get("connected", False):
-            self._bubble("Claude Code nie połączył się z terminalem HospitalHub.", "error")
+            # Without the terminal there is nothing to talk about: ended at
+            # once, so "Zamknij" is one click away (2026-10-21).
+            self._bubble("Claude Code nie połączył się z terminalem HospitalHub. "
+                         "Zamknij panel i spróbuj ponownie.", "error")
+            self.end()
         elif kind == "text":
             if self._live_turn and str(payload).strip().rstrip(".") == LIVE_SILENT:
                 pass                      # nothing worth saying about the news
