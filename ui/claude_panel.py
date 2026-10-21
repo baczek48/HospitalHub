@@ -430,6 +430,10 @@ class ClaudeSupportPanel(QWidget):
         self._input.setFocus()
         return True
 
+    def ended(self) -> bool:
+        """The conversation is over (the panel stays for reading)."""
+        return self._ended
+
     def end(self) -> None:
         """Stop Claude Code and the tool server."""
         if self._ended:

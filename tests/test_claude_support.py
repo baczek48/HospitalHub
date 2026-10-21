@@ -416,16 +416,14 @@ def test_support_can_be_opened_again_in_the_same_window(app, tmp_path, monkeypat
         for _round in range(2):
             dlg._btn_claude.setChecked(True)
             pump()
-            panel = dlg._claude_panel
-            assert panel is not None
-            assert dlg._main_splitter.sizes()[-1] > 200, dlg._main_splitter.sizes()
+            panel = dlg._sessions[0].claude_panel
+            assert panel is not None and not panel.ended()
+            assert dlg._term_splitter.sizes()[1] > 200, dlg._term_splitter.sizes()
             panel.end()
             pump()
-            assert dlg._claude_panel is None and not dlg._btn_claude.isChecked()
-        panels = [w for w in (dlg._main_splitter.widget(i)
-                              for i in range(dlg._main_splitter.count()))
-                  if isinstance(w, cp.ClaudeSupportPanel)]
-        assert len(panels) <= 1, "stare panele nie zostają w oknie"
+            assert panel.ended() and not dlg._btn_claude.isChecked()
+            assert dlg._claude_stack.currentWidget() is panel,                 "zakończona rozmowa zostaje do przeczytania"
+        assert dlg._claude_stack.count() == 1, "stare panele nie zostają w oknie"
     finally:
         dlg.close_without_asking()
         srv.drop()
@@ -446,3 +444,90 @@ def test_the_typing_bubble_shows_while_claude_works_and_follows_new_messages(app
     pump()
     assert not panel._typing.running() and not panel._typing_row.isVisible()
     panel.end()
+
+
+def test_each_tab_has_its_own_support_shown_only_on_that_tab(app, tmp_path,
+                                                             monkeypatch):
+    """2026-10-21 (owner): three tabs — support on the first, only the
+    terminal on the second, another conversation on the third."""
+    sys.path.insert(0, _HERE)
+    import time
+    import models
+    from ssh_fake_server import FakeServer
+    from ui import ssh_panel as sp
+    import ui.claude_panel as cp
+    srv = FakeServer(str(tmp_path))
+    monkeypatch.setattr(sp, "_make_client", srv.make_client_patch())
+    monkeypatch.setattr(sp.QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(cp.cs, "ClaudeProcess", FakeProcess)
+    monkeypatch.setattr(cp.cs, "find_claude", lambda: "claude.exe")
+    FakeProcess.instances.clear()
+    m = models.Machine(ip="10.0.0.5", credentials=[
+        models.Credential(login="u", password=srv.password)])
+    dlg = sp.SshDialog(m)
+    dlg.resize(1300, 700)
+    dlg.show()
+    end = time.monotonic() + 8
+    while time.monotonic() < end and not dlg._sessions:
+        pump()
+    for label in ("druga", "trzecia"):
+        dlg._add_session(label=label, ip="10.0.0.5", user="u",
+                         password=srv.password)
+    end = time.monotonic() + 8
+    while time.monotonic() < end and len(dlg._sessions) < 3:
+        pump()
+    tabs, stack, btn = dlg._tab_widget, dlg._claude_stack, dlg._btn_claude
+    s1, s2, s3 = dlg._sessions
+    try:
+        tabs.setCurrentIndex(0)
+        btn.setChecked(True)
+        pump()
+        p1 = s1.claude_panel
+        assert p1 is not None and not stack.isHidden()
+        # The handle has the window's colour — the grey one was a white
+        # stripe beside the dark terminal in the light themes.
+        assert isinstance(dlg._term_splitter.handle(1), sp._TermSupportHandle)
+        assert dlg._term_splitter.widget(1) is stack
+        assert stack.currentWidget() is p1 and btn.isChecked()
+        assert tabs.tabText(0).startswith("● ")
+
+        tabs.setCurrentIndex(1)                 # only the terminal
+        pump()
+        assert stack.isHidden() and not btn.isChecked()
+        assert s2.claude_panel is None
+
+        tabs.setCurrentIndex(2)
+        btn.setChecked(True)                    # another conversation
+        pump()
+        p3 = s3.claude_panel
+        assert p3 is not None and p3 is not p1
+        assert stack.currentWidget() is p3 and not stack.isHidden()
+        assert len(FakeProcess.instances) == 2
+        assert "trzecia" in FakeProcess.instances[1].prompt
+
+        tabs.setCurrentIndex(0)                 # the first one is still there
+        pump()
+        assert stack.currentWidget() is p1 and btn.isChecked()
+        assert not p1.ended() and not p3.ended()
+
+        btn.setChecked(False)                   # ends only the first
+        pump()
+        assert p1.ended() and not p3.ended()
+        assert stack.currentWidget() is p1, "zostaje do przeczytania"
+        assert not tabs.tabText(0).startswith("● ")
+        assert tabs.tabText(2).startswith("● ")
+
+        tabs.setCurrentIndex(2)
+        pump()
+        assert stack.currentWidget() is p3 and btn.isChecked()
+
+        dlg._close_session(2)                   # its panel goes with the tab
+        pump()
+        assert p3.ended() and stack.indexOf(p3) < 0
+        tabs.setCurrentIndex(0)
+        pump()
+        assert stack.currentWidget() is p1 and not btn.isChecked()
+    finally:
+        dlg.close_without_asking()
+        srv.drop()
+

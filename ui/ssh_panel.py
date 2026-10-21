@@ -210,11 +210,11 @@ from PyQt6.QtWidgets import (
     QFileDialog, QProgressBar, QMenu, QInputDialog, QMessageBox,
     QLineEdit, QTabWidget, QStackedWidget, QScrollArea,
     QCheckBox, QGroupBox, QGridLayout, QFrame, QFormLayout, QSizePolicy,
-    QScrollBar, QToolButton, QToolTip,
+    QScrollBar, QToolButton, QToolTip, QSplitterHandle,
 )
 from PyQt6.QtCore import (
     Qt, QThread, QTimer, QSize, QEvent, QObject, pyqtSignal, QMimeData, QUrl,
-    QBuffer, QByteArray, QIODevice,
+    QBuffer, QByteArray, QIODevice, QPoint,
 )
 from PyQt6.QtGui import (
     QFont, QFontInfo, QFontMetricsF, QColor, QPainter, QKeySequence,
@@ -7956,7 +7956,7 @@ class _Session:
     __slots__ = ('pane', 'worker', 'label', 'sftp', 'sftp_client', 'sftp_path',
                  'sftp_history', 'stats_worker', 'last_stats', 'has_unread',
                  'reconnecting', 'reconnect_attempts', 'reconnect_exhausted',
-                 'reconnect_line', 'dropped_at', 'machine')
+                 'reconnect_line', 'dropped_at', 'machine', 'claude_panel')
 
     def __init__(self, pane: _TerminalPane, worker: '_SshWorker', label: str,
                  machine=None):
@@ -7978,6 +7978,9 @@ class _Session:
         self.reconnect_exhausted = False       # gave up after _AUTO_RECONNECT_TRIES; R restarts
         self.reconnect_line = False            # the one-line attempt status is on screen
         self.dropped_at = ''                   # HH:MM:SS of the drop, for the banner
+        #: This tab's "Wsparcie Claude" panel (running, or ended and kept for
+        #: reading) — shown only while this tab is on screen (2026-10-21).
+        self.claude_panel = None
 
     @property
     def term(self) -> 'TerminalWidget':
@@ -8242,6 +8245,38 @@ def _make_ssh_window_icon() -> QIcon:
     return QIcon(pix)
 
 
+class _TermSupportHandle(QSplitterHandle):
+    """The handle between the terminal and "Wsparcie Claude" (2026-10-21).
+
+    The splitter's grey handle was a white stripe beside the dark terminal in
+    the light themes (owner: "biała linia").  This one has the window's
+    colour beside the toolbar and the tab bar, and the terminal's own
+    background from the terminal's top down — the terminal reaches the
+    panel's frame in every theme."""
+
+    def __init__(self, orientation, parent, terminal_top):
+        super().__init__(orientation, parent)
+        self._terminal_top = terminal_top     # -> y in the splitter, or None
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(theme.paint('#010409')))
+        top = self._terminal_top()
+        if top is not None:
+            y = max(0, top - self.y())
+            p.fillRect(0, y, self.width(), self.height() - y, QColor(_DEFAULT_BG))
+        p.end()
+
+
+class _TermSupportSplitter(QSplitter):
+    def __init__(self, terminal_top):
+        super().__init__(Qt.Orientation.Horizontal)
+        self._terminal_top = terminal_top
+
+    def createHandle(self):
+        return _TermSupportHandle(self.orientation(), self, self._terminal_top)
+
+
 class _SupportTarget:
     """One SSH tab as "Wsparcie Claude" sees it (ui.claude_panel): its screen
     and scrollback, read only.  It cannot type, and sees nothing else."""
@@ -8450,8 +8485,6 @@ class SshDialog(QDialog):
             "QPushButton:checked{background:#d97757;color:#fff;border-color:#d97757;}"
             "QPushButton:hover{background:#33200f;border-color:#d97757;}")
         self._btn_claude.toggled.connect(self._toggle_claude_support)
-        self._claude_panel = None
-        self._claude_session = None
 
         tb.addWidget(self._btn_multiexec)
         tb.addWidget(btn_new)
@@ -8487,7 +8520,24 @@ class SshDialog(QDialog):
         self._mode_stack.addWidget(self._grid_container)
 
         tlay.addWidget(self._mode_stack, 1)
-        splitter.addWidget(term_area)
+        # The terminal and "Wsparcie Claude" share an inner splitter with a
+        # handle of its own (_TermSupportHandle): the outer splitter's grey
+        # handle was a white stripe beside the dark terminal in the light
+        # themes (owner, 2026-10-21: "biała linia"), and one handle of a
+        # QSplitter cannot be styled apart from the others.
+        self._term_splitter = _TermSupportSplitter(self._terminal_top)
+        self._term_splitter.setHandleWidth(6)
+        self._term_splitter.setChildrenCollapsible(False)
+        self._term_splitter.addWidget(term_area)
+        # One "Wsparcie Claude" panel per tab: the stack shows the one of the
+        # tab on screen and is hidden for a tab without it (2026-10-21).
+        self._claude_stack = QStackedWidget()
+        self._term_splitter.addWidget(self._claude_stack)
+        self._term_splitter.setStretchFactor(0, 1)
+        self._term_splitter.setStretchFactor(1, 0)
+        self._claude_stack.hide()
+        self._claude_width = 380
+        splitter.addWidget(self._term_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([250, 950])
@@ -8827,6 +8877,7 @@ class SshDialog(QDialog):
             self._sessions.insert(to_idx, s)
             # Update last_tab_idx to follow the moved tab
             self._last_tab_idx = self._tab_widget.currentIndex()
+            self._sync_claude_panel()   # the index now names another session
 
     def _on_tab_context_menu(self, pos):
         """Right-click on a tab — show actions for that tab."""
@@ -8959,6 +9010,7 @@ class SshDialog(QDialog):
             if s_new.has_unread:
                 s_new.has_unread = False
                 self._tab_widget.setTabIcon(idx, QIcon())
+        self._sync_claude_panel()
         if self._multiexec:
             return
         # Save SFTP state of the tab we're leaving
@@ -9073,73 +9125,121 @@ class SshDialog(QDialog):
         s.sftp_history.clear()
         s.last_stats = None
 
-    def _toggle_claude_support(self, on: bool) -> None:
-        if not on:
-            if self._claude_panel is not None:
-                self._claude_panel.end()
-            return
-        if self._multiexec or self._claude_panel is not None:
-            self._btn_claude.setChecked(self._claude_panel is not None)
-            return
-        idx = self._tab_widget.currentIndex()
-        if idx < 0 or idx >= len(self._sessions):
-            self._status("Otwórz kartę terminala, której ma dotyczyć wsparcie.", err=True)
-            self._btn_claude.setChecked(False)
-            return
-        from ui.claude_panel import ClaudeSupportPanel
-        # The last conversation stayed on screen after it ended; it goes now —
-        # left in the splitter it took the new panel's width, and "Wsparcie
-        # Claude" seemed to do nothing the second time (owner, 2026-10-20).
-        old = getattr(self, "_claude_old_panel", None)
-        if old is not None:
-            old.setParent(None)
-            old.deleteLater()
-            self._claude_old_panel = None
-        session = self._sessions[idx]
-        panel = ClaudeSupportPanel(_SupportTarget(self, session), self)
-        panel.closed.connect(self._on_claude_support_closed)
-        self._claude_panel = panel
-        self._claude_session = session
-        self._main_splitter.addWidget(panel)
-        sizes = self._main_splitter.sizes()
-        left, term = sizes[0], sum(sizes[1:])
-        self._main_splitter.setSizes([left, max(400, term - 380), 380])
-        tab = self._tab_widget.indexOf(session.pane)
-        if tab >= 0:
-            self._tab_widget.setTabText(tab, "● " + session.label)
-        panel.start()
+    # ── Wsparcie Claude: one conversation per tab (2026-10-21) ────────────
+    #
+    # Owner: "the support window appears in the terminal where I switched it
+    # on" — with three tabs, support on the first, nothing on the second and
+    # another conversation on the third.  Each tab keeps its own panel
+    # (session.claude_panel); the stack beside the terminal shows the one of
+    # the tab on screen.  An ended conversation stays for reading until the
+    # button is clicked again on that tab, or the tab closes.
 
-    def _on_claude_support_closed(self) -> None:
-        panel, session = self._claude_panel, self._claude_session
-        self._claude_panel = None
-        self._claude_session = None
-        if session is not None:
-            tab = self._tab_widget.indexOf(session.pane)
-            if tab >= 0:
-                self._tab_widget.setTabText(tab, session.label)
+    def _terminal_top(self):
+        """Where the terminal of the tab on screen starts, in the inner
+        splitter's coordinates (None: no terminal)."""
+        pane = self._tab_widget.currentWidget()
+        splitter = getattr(self, '_term_splitter', None)
+        if pane is None or splitter is None or not pane.isVisible():
+            return None
+        return pane.mapTo(splitter, QPoint(0, 0)).y()
+
+    def _current_session(self):
+        """The tab on screen, or None (no tab, or Multi-exec)."""
+        idx = self._tab_widget.currentIndex()
+        if self._multiexec or not 0 <= idx < len(self._sessions):
+            return None
+        return self._sessions[idx]
+
+    @staticmethod
+    def _claude_live(s) -> bool:
+        p = getattr(s, 'claude_panel', None)
+        return p is not None and not p.ended()
+
+    def _tab_title(self, s) -> str:
+        """A tab's text: "●" marks a running conversation."""
+        return ("● " + s.label) if self._claude_live(s) else s.label
+
+    def _refresh_tab_title(self, s) -> None:
+        tab = self._tab_widget.indexOf(s.pane)
+        if tab >= 0:
+            self._tab_widget.setTabText(tab, self._tab_title(s))
+
+    def _sync_claude_panel(self) -> None:
+        """Show the panel of the tab on screen (or none) and set the button."""
+        s = self._current_session()
+        panel = s.claude_panel if s is not None else None
+        stack = self._claude_stack
         if panel is not None:
-            # Kept on screen until the button is clicked again, so the last
-            # answer can still be read; the next toggle removes it.
-            QTimer.singleShot(0, lambda p=panel: self._retire_claude_panel(p))
+            stack.setCurrentWidget(panel)
+            if stack.isHidden():
+                stack.show()
+                total = sum(self._term_splitter.sizes())
+                w = self._claude_width
+                self._term_splitter.setSizes([max(400, total - w), w])
+        elif not stack.isHidden():
+            # The width the user dragged it to comes back with the next panel.
+            width = self._term_splitter.sizes()[1]
+            if width > 0:
+                self._claude_width = max(260, width)
+            stack.hide()
         self._btn_claude.blockSignals(True)
-        self._btn_claude.setChecked(False)
+        self._btn_claude.setChecked(s is not None and self._claude_live(s))
         self._btn_claude.blockSignals(False)
 
-    def _retire_claude_panel(self, panel) -> None:
-        self._claude_old_panel = getattr(self, "_claude_old_panel", None)
-        if self._claude_old_panel is not None and self._claude_old_panel is not panel:
-            self._claude_old_panel.setParent(None)
-            self._claude_old_panel.deleteLater()
-        self._claude_old_panel = panel
+    def _toggle_claude_support(self, on: bool) -> None:
+        s = self._current_session()
+        if not on:
+            if s is not None and s.claude_panel is not None:
+                s.claude_panel.end()
+            self._sync_claude_panel()
+            return
+        if s is None:
+            self._status("Wsparcie Claude dotyczy jednej karty — wyłącz Multi-exec."
+                         if self._multiexec else
+                         "Otwórz kartę terminala, której ma dotyczyć wsparcie.",
+                         err=True)
+            self._sync_claude_panel()
+            return
+        if self._claude_live(s):
+            self._sync_claude_panel()
+            return
+        from ui.claude_panel import ClaudeSupportPanel
+        # This tab's last conversation, kept for reading, goes now.
+        self._drop_claude_panel(s)
+        panel = ClaudeSupportPanel(_SupportTarget(self, s), self)
+        panel.closed.connect(
+            lambda s=s, p=panel: self._on_claude_support_closed(s, p))
+        s.claude_panel = panel
+        self._claude_stack.addWidget(panel)
+        panel.start()
+        self._refresh_tab_title(s)
+        self._sync_claude_panel()
+
+    def _on_claude_support_closed(self, s, panel) -> None:
+        # The panel stays in its tab, so the last answer can still be read.
+        if s.claude_panel is panel:
+            self._refresh_tab_title(s)
+        self._sync_claude_panel()
+
+    def _drop_claude_panel(self, s) -> None:
+        """Remove a tab's panel for good (ending the conversation first)."""
+        panel, s.claude_panel = s.claude_panel, None
+        if panel is None:
+            return
+        panel.end()
+        self._claude_stack.removeWidget(panel)
+        panel.setParent(None)
+        panel.deleteLater()
+        self._sync_claude_panel()
 
     def _close_session(self, idx: int):
         """Stop and remove one terminal session tab."""
         if idx < 0 or idx >= len(self._sessions):
             return
         s = self._sessions.pop(idx)
-        panel = getattr(self, "_claude_panel", None)
-        if panel is not None and s is getattr(self, "_claude_session", None):
-            panel.target_gone()
+        if s.claude_panel is not None:
+            s.claude_panel.target_gone()
+            self._drop_claude_panel(s)
         # Push edits still waiting in temp while this session's SFTP is open
         # (C1-04): the teardown below closes it, and a flush after that met a
         # closed transport — the last ~2 s of edits were lost.
@@ -9176,6 +9276,7 @@ class SshDialog(QDialog):
         # sam przeliczy pozycje trafień w _emit_resize (po debounce). UI
         # synchronizujemy do nowej aktywnej sesji.
         QTimer.singleShot(0, self._sync_search_ui_to_active)
+        self._sync_claude_panel()    # Multi-exec: no panel; back: the tab's
 
     def _rebuild_grid(self):
         # Pull panes out of tab widget — removeTab hides them, so we must
@@ -9215,7 +9316,7 @@ class SshDialog(QDialog):
         while self._tab_widget.count():
             self._tab_widget.removeTab(0)
         for s in self._sessions:
-            self._tab_widget.addTab(s.pane, s.label)
+            self._tab_widget.addTab(s.pane, self._tab_title(s))
             s.pane.show()
 
     # ── Input ─────────────────────────────────────────────────────────────
@@ -9915,8 +10016,9 @@ class SshDialog(QDialog):
         if not self._confirm_close():
             event.ignore()
             return
-        if getattr(self, "_claude_panel", None) is not None:
-            self._claude_panel.end()
+        for s in self._sessions:
+            if s.claude_panel is not None:
+                s.claude_panel.end()
         # The SFTP panel first: its last flush needs the connections the loop
         # below closes (C1-04).
         self._sftp_panel.stop()

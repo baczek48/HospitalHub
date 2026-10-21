@@ -300,7 +300,7 @@ def test_c104_closing_a_tab_flushes_its_edits_before_the_teardown(sp):
     order = []
     sftp_client = object()
     session = SimpleNamespace(
-        sftp_client=sftp_client,
+        sftp_client=sftp_client, claude_panel=None,
         worker=SimpleNamespace(stop=lambda: order.append("worker-stop"),
                                wait=lambda ms: None),
         pane=SimpleNamespace(setParent=lambda p: None, deleteLater=lambda: None))
