@@ -173,7 +173,7 @@ def fake_panel(sp, client):
     events = []
     btn = SimpleNamespace(setEnabled=lambda on: None)
     panel = SimpleNamespace(
-        _flush_pending_edits=lambda: events.append("flush"),
+        _flush_pending_edits=lambda final=False: events.append("flush"),
         _watch_poll=SimpleNamespace(stop=lambda: events.append("poll-stop"),
                                     start=lambda: events.append("poll-start")),
         _watched_files={}, _upload_active=set(), _download_active=set(),
@@ -306,7 +306,7 @@ def test_c104_closing_a_tab_flushes_its_edits_before_the_teardown(sp):
         pane=SimpleNamespace(setParent=lambda p: None, deleteLater=lambda: None))
     panel = SimpleNamespace(
         bound_to=lambda c: c is sftp_client,
-        _flush_pending_edits=lambda: order.append("flush"),
+        _flush_pending_edits=lambda final=False: order.append("flush"),
         forget_connection=lambda c: order.append("forget"))
     dialog = SimpleNamespace(
         _sessions=[session], _sftp_panel=panel, _multiexec=False,

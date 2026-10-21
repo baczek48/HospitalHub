@@ -249,6 +249,19 @@ def env(sp, monkeypatch, tmp_path):
     monkeypatch.setattr(sp, "QDesktopServices",
                         SimpleNamespace(openUrl=lambda url: opened.append(url)))
     monkeypatch.setattr(sp, "open_sftp_bounded", lambda c, *a, **k: c.open_sftp())
+    # The "changed on the server" question: recorded, answered by the test
+    # (default "Nie wgrywaj") — a real modal would block the run.
+    asked = []
+    answer = ["skip"]
+
+    def ask(self, name, info, err, allow_show=True):
+        asked.append((name, err))
+        return answer[0]
+    monkeypatch.setattr(sp.SftpPanel, "_ask_remote_changed", ask)
+    unsent = []
+    monkeypatch.setattr(sp.SftpPanel, "_notify_unsent",
+                        lambda self, lines: unsent.extend(lines))
+    monkeypatch.setattr(sp, "unsent_copies_dir", lambda: str(tmp_path / "unsent"))
     panels = []
 
     def panel(name="p"):
@@ -261,7 +274,8 @@ def env(sp, monkeypatch, tmp_path):
         panels.append(p)
         return p
 
-    yield SimpleNamespace(panel=panel, opened=opened)
+    yield SimpleNamespace(panel=panel, opened=opened, asked=asked,
+                          answer=answer, unsent=unsent)
     for p in panels:
         p._watch_poll.stop()
         p.deleteLater()
@@ -905,7 +919,9 @@ def test_m2_open_remote_keeps_the_watch_when_the_redownload_fails(env):
     p._open_remote("/opt/x/config.xml", "config.xml")
 
     assert local in p._watched_files and not p._download_active
+    env.answer[0] = "overwrite"
     p._poll_watched_files()
+    assert len(env.asked) == 1, "serwer się zmienił: najpierw pytanie (2026-10-21)"
     assert a.data("/opt/x/config.xml") == b"saved meanwhile" * 9
 
 
@@ -921,7 +937,9 @@ def test_m2_open_remote_refused_large_file_keeps_the_watch(env, monkeypatch):
 
     p._open_remote("/opt/x/config.xml", "config.xml")
     save_in_editor(local, b"still mine" * 9)
+    env.answer[0] = "overwrite"
     p._poll_watched_files()
+    assert len(env.asked) == 1, "serwer się zmienił: najpierw pytanie (2026-10-21)"
     assert a.data("/opt/x/config.xml") == b"still mine" * 9
 
 
@@ -1002,3 +1020,300 @@ def test_closing_the_tab_still_forgets_its_watches(env):
     save_in_editor(local, b"lost on purpose" * 9)
     p._poll_watched_files()
     assert a.data("/opt/x/config.xml") == b"A-x" * 40
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-21: the server file changed under an open edit ("jak MobaXterm")
+# ══════════════════════════════════════════════════════════════════════════
+
+def change_on_server(server, path, data):
+    """Someone else writes the file: new content, newer mtime."""
+    server.mtime += 10
+    server.add(path, data)
+
+
+def test_one_file_in_two_windows_the_second_save_asks_and_keeps_the_first(env):
+    a, _ = servers()
+    p1, p2 = env.panel("w1"), env.panel("w2")
+    connect(p1, FakeClient(a))
+    connect(p2, FakeClient(a))
+    l1 = open_file(p1, "/opt/x/config.xml")
+    l2 = open_file(p2, "/opt/x/config.xml")
+
+    save_in_editor(l1, b"edit from window 1" * 5)
+    p1._poll_watched_files()
+    assert a.data("/opt/x/config.xml") == b"edit from window 1" * 5
+    assert env.asked == []
+
+    save_in_editor(l2, b"edit from window 2" * 5)
+    p2._poll_watched_files()
+
+    assert len(env.asked) == 1 and not env.asked[0][1].deleted
+    assert a.data("/opt/x/config.xml") == b"edit from window 1" * 5, \
+        "zmiana z okna 1 nie może zniknąć bez pytania"
+    assert p2._watched_files[l2]["dirty"] is True
+    with open(l2, "rb") as fh:
+        assert fh.read() == b"edit from window 2" * 5, "moja wersja zostaje"
+
+
+def test_one_file_in_two_tabs_of_one_window(env):
+    a, _ = servers()
+    c1, c2 = FakeClient(a), FakeClient(a)
+    p = env.panel()
+    connect(p, c1)
+    l1 = open_file(p, "/opt/x/config.xml")
+    connect(p, c2)
+    l2 = open_file(p, "/opt/x/config.xml")
+
+    save_in_editor(l2, b"tab 2" * 20)
+    p._poll_watched_files()
+    connect(p, c1)
+    save_in_editor(l1, b"tab 1" * 20)
+    p._poll_watched_files()
+
+    assert len(env.asked) == 1
+    assert a.data("/opt/x/config.xml") == b"tab 2" * 20
+
+
+def test_a_change_from_the_terminal_is_not_overwritten_unasked(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    change_on_server(a, "/opt/x/config.xml", b"vim in the terminal" * 4)
+
+    save_in_editor(local, b"editor" * 30)
+    p._poll_watched_files()
+    assert len(env.asked) == 1
+    assert a.data("/opt/x/config.xml") == b"vim in the terminal" * 4
+
+    env.answer[0] = "overwrite"            # the next save: user overwrites
+    save_in_editor(local, b"editor 2" * 30)
+    p._poll_watched_files()
+    assert len(env.asked) == 2
+    assert a.data("/opt/x/config.xml") == b"editor 2" * 30
+    assert p._watched_files[local]["dirty"] is False
+
+    save_in_editor(local, b"editor 3" * 30)  # nothing new on the server
+    p._poll_watched_files()
+    assert len(env.asked) == 2, "po własnym zapisie bez fałszywych alarmów"
+    assert a.data("/opt/x/config.xml") == b"editor 3" * 30
+
+
+def test_overwrite_right_away_from_the_question(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    change_on_server(a, "/opt/x/config.xml", b"theirs" * 9)
+    env.answer[0] = "overwrite"
+
+    save_in_editor(local, b"mine" * 9)
+    p._poll_watched_files()
+
+    assert len(env.asked) == 1
+    assert a.data("/opt/x/config.xml") == b"mine" * 9
+
+
+def test_many_saves_of_my_own_never_ask(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    for i in range(5):
+        save_in_editor(local, f"save {i}".encode() * 20)
+        p._poll_watched_files()
+    assert env.asked == []
+    assert a.data("/opt/x/config.xml") == b"save 4" * 20
+
+
+def test_show_server_version_opens_a_separate_unwatched_copy(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    change_on_server(a, "/opt/x/config.xml", b"theirs" * 9)
+    env.answer[0] = "show"
+    env.opened.clear()
+
+    save_in_editor(local, b"mine" * 9)
+    p._poll_watched_files()
+
+    assert a.data("/opt/x/config.xml") == b"theirs" * 9
+    shown = [x for x in env.opened if isinstance(x, str)]
+    assert len(shown) == 1 and shown[0] != local
+    assert "wersja z serwera" in os.path.basename(shown[0])
+    assert shown[0].endswith(".xml")
+    with open(shown[0], "rb") as fh:
+        assert fh.read() == b"theirs" * 9
+    assert shown[0] not in p._watched_files, "zapis podglądu niczego nie wgrywa"
+    with open(local, "rb") as fh:
+        assert fh.read() == b"mine" * 9
+
+
+def test_a_file_deleted_on_the_server_is_not_recreated_unasked(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    del a.files["/opt/x/config.xml"]
+
+    save_in_editor(local, b"mine" * 9)
+    p._poll_watched_files()
+    assert len(env.asked) == 1 and env.asked[0][1].deleted
+    assert "/opt/x/config.xml" not in a.files
+
+    env.answer[0] = "overwrite"
+    save_in_editor(local, b"mine again" * 9)
+    p._poll_watched_files()
+    assert a.data("/opt/x/config.xml") == b"mine again" * 9
+
+
+def test_my_own_broken_write_is_not_reported_as_someone_elses(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    a.disk_full_after = 50
+    save_in_editor(local, b"new content" * 20)
+    p._poll_watched_files()                 # half-written by us, then refused
+    a.disk_full_after = None
+    save_in_editor(local, b"new content 2" * 20)
+    p._poll_watched_files()
+    assert env.asked == []
+    assert a.data("/opt/x/config.xml") == b"new content 2" * 20
+
+
+def test_a_tab_switch_never_overwrites_and_asks_on_return(env):
+    a, b = servers()
+    ca, cb = FakeClient(a), FakeClient(b)
+    p = env.panel()
+    connect(p, ca)
+    local = open_file(p, "/opt/x/config.xml")
+    change_on_server(a, "/opt/x/config.xml", b"theirs" * 9)
+    save_in_editor(local, b"mine" * 9)
+
+    connect(p, cb)                          # flush on the way out
+    assert env.asked == [], "przełączenie karty nie pyta"
+    assert a.data("/opt/x/config.xml") == b"theirs" * 9
+
+    env.answer[0] = "overwrite"
+    connect(p, ca)
+    p._poll_watched_files()
+    assert len(env.asked) == 1
+    assert a.data("/opt/x/config.xml") == b"mine" * 9
+
+
+def test_closing_with_a_conflict_asks_and_keeps_my_version(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    change_on_server(a, "/opt/x/config.xml", b"theirs" * 9)
+    save_in_editor(local, b"mine" * 9)
+
+    p._flush_pending_edits(final=True)
+
+    assert len(env.asked) == 1
+    assert a.data("/opt/x/config.xml") == b"theirs" * 9
+    assert len(env.unsent) == 1
+    kept = env.unsent[0].split("zachowana: ", 1)[1]
+    with open(kept, "rb") as fh:
+        assert fh.read() == b"mine" * 9
+
+
+def test_closing_with_a_conflict_can_overwrite(env):
+    a, _ = servers()
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    change_on_server(a, "/opt/x/config.xml", b"theirs" * 9)
+    save_in_editor(local, b"mine" * 9)
+    env.answer[0] = "overwrite"
+
+    p._flush_pending_edits(final=True)
+
+    assert a.data("/opt/x/config.xml") == b"mine" * 9
+    assert env.unsent == []
+
+
+def test_closing_with_a_dead_link_keeps_my_version(env):
+    a, _ = servers()
+    c = FakeClient(a)
+    p = env.panel()
+    connect(p, c)
+    local = open_file(p, "/opt/x/config.xml")
+    save_in_editor(local, b"mine" * 9)
+
+    def dead():
+        raise OSError("Socket is closed")
+    c.open_sftp = dead
+    p._flush_pending_edits(final=True)
+
+    assert len(env.unsent) == 1 and "zachowana: " in env.unsent[0]
+    kept = env.unsent[0].split("zachowana: ", 1)[1]
+    with open(kept, "rb") as fh:
+        assert fh.read() == b"mine" * 9
+
+
+def test_a_flush_refreshes_the_baseline(env):
+    """After a flush on a tab switch, the next save from the same copy is
+    not mistaken for a conflict."""
+    a, b = servers()
+    ca, cb = FakeClient(a), FakeClient(b)
+    p = env.panel()
+    connect(p, ca)
+    local = open_file(p, "/opt/x/config.xml")
+    save_in_editor(local, b"first" * 9)
+    connect(p, cb)                          # uploaded by the flush
+    connect(p, ca)
+    save_in_editor(local, b"second" * 9)
+    p._poll_watched_files()
+    assert env.asked == []
+    assert a.data("/opt/x/config.xml") == b"second" * 9
+
+
+def test_check_remote_unchanged_unknown_baseline_is_not_a_conflict(sp):
+    s = FakeServer("A")
+    s.add("/f", b"x")
+    sp.check_remote_unchanged(FakeSftp(s), "/f", 0, 0)       # nothing raised
+    with pytest.raises(sp.RemoteChangedError):
+        sp.check_remote_unchanged(FakeSftp(s), "/f", 999, 1)
+    with pytest.raises(sp.RemoteChangedError):
+        sp.check_remote_unchanged(FakeSftp(s), "/f", s.mtime, 2)
+    sp.check_remote_unchanged(FakeSftp(s), "/f", s.mtime, 1)
+
+
+def test_downloading_several_files_asks_before_replacing_local_files(
+        env, sp, monkeypatch, tmp_path):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QTableWidgetItem
+    a, _ = servers()
+    a.add("/opt/x/other.xml", b"other" * 9)
+    p = env.panel()
+    connect(p, FakeClient(a))
+    p._path = "/opt/x"
+    folder = tmp_path / "down"
+    folder.mkdir()
+    (folder / "config.xml").write_bytes(b"my local file")
+    monkeypatch.setattr(sp.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(folder)))
+    p._table.setRowCount(2)
+    for row, name in enumerate(("config.xml", "other.xml")):
+        it = QTableWidgetItem(name)
+        it.setData(Qt.ItemDataRole.UserRole,
+                   (name, False, len(a.data(f"/opt/x/{name}"))))
+        p._table.setItem(row, 0, it)
+        it.setSelected(True)
+    asked = []
+    queued = []
+    monkeypatch.setattr(p, "_ask_overwrite",
+                        lambda paths, where="": asked.append((paths, where)) or "skip")
+    monkeypatch.setattr(p, "_enqueue_transfers", queued.extend)
+
+    p._download()
+
+    assert len(asked) == 1 and asked[0][1] == "w wybranym folderze"
+    assert [os.path.basename(x) for x in asked[0][0]] == ["config.xml"]
+    assert [os.path.basename(q[2]) for q in queued] == ["other.xml"]
+    assert (folder / "config.xml").read_bytes() == b"my local file"

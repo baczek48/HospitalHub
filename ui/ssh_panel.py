@@ -10,6 +10,7 @@ import os
 import posixpath
 import queue as _queue
 import re
+import shutil
 import stat
 import struct
 import sys
@@ -4082,6 +4083,28 @@ def local_part_path(local: str) -> str:
     return f"{local}.{os.urandom(4).hex()}.part"
 
 
+def unsent_copies_dir() -> str:
+    """Where edits that could not reach the server are kept at a close."""
+    return os.path.join(os.path.expanduser('~'), 'Documents',
+                        'HospitalHub - niewysłane zmiany')
+
+
+def preserve_unsent_copy(local: str) -> str | None:
+    """Copy `local` out of the panel's temp directory, which the window's
+    close deletes (2026-10-21): an edit the close could not upload — the
+    server file changed, the link was gone — used to vanish with it.
+    Returns the copy's path, or None."""
+    try:
+        folder = unsent_copies_dir()
+        os.makedirs(folder, exist_ok=True)
+        target = os.path.join(
+            folder, f"{datetime.now():%Y%m%d-%H%M%S} {os.path.basename(local)}")
+        shutil.copy2(local, target)
+        return target
+    except OSError:
+        return None
+
+
 def _mtime_or_none(path: str):
     try:
         return os.path.getmtime(path)
@@ -4221,11 +4244,51 @@ def _remote_state(sftp, path: str):
         return None
 
 
+class RemoteChangedError(IOError):
+    """The server file is no longer the one the edit started from; nothing
+    was written.  `mtime`/`size` describe it now; `deleted` = it is gone."""
+
+    def __init__(self, remote: str, mtime: int = 0, size: int = 0,
+                 deleted: bool = False):
+        self.remote, self.mtime, self.size, self.deleted = remote, mtime, size, deleted
+        what = ("został usunięty z serwera" if deleted
+                else "zmienił się na serwerze od chwili otwarcia")
+        super().__init__(f"'{posixpath.basename(remote)}' {what} — "
+                         "nic nie wgrano")
+
+
+def check_remote_unchanged(sftp, remote: str, server_mtime: int,
+                           server_size: int) -> None:
+    """Raise RemoteChangedError when `remote` differs from what was downloaded.
+
+    2026-10-21 (owner: "as safe as MobaXterm"): a save in the editor wrote the
+    whole local copy over the server file without looking at it, so a change
+    made meanwhile — the same file saved from a second tab or window, ``vim``
+    in the terminal, a colleague, a program — was lost without a word.  Now
+    the file's mtime and size are compared with the ones recorded at the
+    download first.  An unknown baseline (mtime 0) or a server that cannot be
+    asked is not a conflict: the write goes as before.
+    """
+    if not server_mtime:
+        return
+    try:
+        st = sftp.stat(remote)
+    except FileNotFoundError:
+        raise RemoteChangedError(remote, deleted=True) from None
+    except Exception:
+        return
+    mtime, size = int(st.st_mtime or 0), st.st_size or 0
+    if mtime != int(server_mtime) or size != (server_size or 0):
+        raise RemoteChangedError(remote, mtime, size)
+
+
 def upload_edit(sftp, local: str, remote: str, callback=None,
                 safe_replace: bool | None = None, before_commit=None,
                 leftovers: list | None = None):
     """Send an edited local copy back to `remote`; return the final stat
     (None when the server cannot be asked after a successful write).
+    The callers check first that the server file is still the one the edit
+    started from (:func:`check_remote_unchanged`, 2026-10-21).
 
     Direct mode (``safe_replace`` False, the default) writes over the file in
     place — every block acknowledged by the server (no pipelining, so a
@@ -5405,6 +5468,15 @@ class SftpPanel(QWidget):
                     "Tych plików nie da się bezpiecznie zapisać pod tą nazwą "
                     "w Windows i zostały pominięte:\n\n"
                     + "\n".join(repr(n) for n in skipped[:20]))
+            # Files already in the folder are not replaced unasked
+            # (2026-10-21) — a single download asks through the save dialog.
+            existing = [q[2] for q in queue if os.path.exists(q[2])]
+            if existing:
+                action = self._ask_overwrite(existing, "w wybranym folderze")
+                if action == 'cancel':
+                    return
+                if action == 'skip':
+                    queue = [q for q in queue if q[2] not in existing]
             if not queue:
                 return
             self._enqueue_transfers(queue)
@@ -5639,7 +5711,8 @@ class SftpPanel(QWidget):
         base = self._path.rstrip('/') + '/'
         return remote[len(base):] if remote.startswith(base) else os.path.basename(remote)
 
-    def _ask_overwrite(self, conflict_paths: list[str]) -> str:
+    def _ask_overwrite(self, conflict_paths: list[str],
+                       where: str = "na serwerze") -> str:
         """Modal for name conflicts (upload or move). Returns
         'overwrite'/'skip'/'cancel'. Shared by uploads, drag-moves and
         any future op that lands on an existing remote path."""
@@ -5662,7 +5735,7 @@ class SftpPanel(QWidget):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Pliki już istnieją")
-        box.setText(f"{n} {word} już istnieje na serwerze:")
+        box.setText(f"{n} {word} już istnieje {where}:")
         box.setInformativeText(names + "\n\nCo zrobić?")
         btn_ow = box.addButton("Nadpisz wszystkie", QMessageBox.ButtonRole.AcceptRole)
         btn_sk = box.addButton("Pomiń istniejące", QMessageBox.ButtonRole.DestructiveRole)
@@ -6640,7 +6713,8 @@ class SftpPanel(QWidget):
             return
         for local_path, info in list(self._watched_files.items()):
             if (local_path in self._upload_active
-                    or local_path in self._download_active):
+                    or local_path in self._download_active
+                    or info.get('conflict_open')):
                 continue
             if not os.path.exists(local_path):
                 continue
@@ -6731,6 +6805,17 @@ class SftpPanel(QWidget):
         final_stat = [None]
         leftovers: list[str] = []
         unknown = [None]     # "stan NIEZNANY" must survive a cancel
+        changed = [None]     # RemoteChangedError: the user decides
+        started = [False]    # the write began: the server file may be ours now
+        safe = SFTP_SAFE_REPLACE_ENABLED
+
+        def forget_baseline_if_written():
+            # A direct write that broke (or an unknown safe replace) has
+            # already changed the server file itself: the next save must not
+            # call our own half-write "changed by someone else".
+            if started[0] and (not safe or unknown[0]):
+                info['server_mtime'] = 0
+                info['server_size'] = 0
 
         def do_upload():
             with lock:
@@ -6747,6 +6832,14 @@ class SftpPanel(QWidget):
                         raise _CancelledError()
                 # Size re-verified after the write so a quota/permission quirk
                 # that silently drops bytes can't masquerade as success.
+                try:
+                    check_remote_unchanged(sftp, remote,
+                                           info.get('server_mtime', 0),
+                                           info.get('server_size', 0))
+                except RemoteChangedError as e:
+                    changed[0] = e
+                    raise
+                started[0] = True
                 try:
                     final_stat[0] = upload_edit(sftp, local, remote, callback=cb,
                                                 before_commit=before_commit,
@@ -6781,9 +6874,10 @@ class SftpPanel(QWidget):
             # be on another server by now (F3).
             info['dirty'] = False
             st = final_stat[0]
-            if st is not None:
-                info['server_mtime'] = int(st.st_mtime or 0)
-                info['server_size']  = st.st_size or 0
+            # Without a stat the baseline is unknown (0): the next save is
+            # not checked, rather than reported as someone else's change.
+            info['server_mtime'] = int(st.st_mtime or 0) if st is not None else 0
+            info['server_size']  = (st.st_size or 0) if st is not None else 0
             self.status_msg.emit(f"Zapisano na SFTP: {os.path.basename(remote)}", False)
             self._list(self._path)
 
@@ -6791,6 +6885,7 @@ class SftpPanel(QWidget):
             self._upload_active.discard(local)
             self._transfer_finished_cleanup()
             self.status_msg.emit("Auto-upload anulowany", False)
+            forget_baseline_if_written()
             if unknown[0]:
                 info['dirty'] = True
                 self.status_msg.emit(f"Błąd zapisu: {unknown[0]}", True)
@@ -6805,6 +6900,10 @@ class SftpPanel(QWidget):
             # The listing's server-side mtime tells the user whether the
             # save took, replacing the dirty-reopen prompt we removed.
             info['dirty'] = True
+            if changed[0] is not None:
+                self._resolve_remote_change(local, remote, info, changed[0])
+                return
+            forget_baseline_if_written()
             self.status_msg.emit(f"Błąd zapisu: {e}", True)
             self._report_leftovers(leftovers)
             self._list(self._path)
@@ -6820,7 +6919,114 @@ class SftpPanel(QWidget):
         w.start()
         self._workers.append(w)
 
-    def _flush_pending_edits(self):
+    # ── A server file changed under an open edit (2026-10-21) ─────────────
+
+    def _ask_remote_changed(self, name: str, info: dict, err: 'RemoteChangedError',
+                            allow_show: bool = True) -> str:
+        """'overwrite' / 'show' / 'skip' — what to do with an edit whose
+        server file is no longer the one it was opened from."""
+        def when(t):
+            try:
+                return datetime.fromtimestamp(int(t)).strftime('%d.%m %H:%M:%S')
+            except (OverflowError, OSError, ValueError):
+                return "?"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        if err.deleted:
+            box.setWindowTitle("Plik usunięty na serwerze")
+            box.setText(f"'{name}' został usunięty z serwera, odkąd go otworzono.")
+            box.setInformativeText(
+                f"Ścieżka: {err.remote}\n\nWgranie Twojej wersji utworzy go ponownie.")
+            btn_ow = box.addButton("Utwórz ponownie moją wersją",
+                                   QMessageBox.ButtonRole.AcceptRole)
+            btn_show = None
+        else:
+            box.setWindowTitle("Plik zmienił się na serwerze")
+            box.setText(f"'{name}' na serwerze jest inny niż w chwili otwarcia.")
+            box.setInformativeText(
+                f"Ścieżka: {err.remote}\n"
+                f"Przy otwarciu: {when(info.get('server_mtime', 0))}, "
+                f"{info.get('server_size', 0)} B\n"
+                f"Teraz na serwerze: {when(err.mtime)}, {err.size} B\n\n"
+                "Ktoś go zmienił — inna karta lub okno, terminal, inna osoba "
+                "albo program. Wgranie Twojej wersji usunie tamte zmiany.\n"
+                "Twoja wersja nie została jeszcze wgrana.")
+            btn_ow = box.addButton("Nadpisz moją wersją",
+                                   QMessageBox.ButtonRole.DestructiveRole)
+            btn_show = (box.addButton("Pokaż wersję z serwera",
+                                      QMessageBox.ButtonRole.ActionRole)
+                        if allow_show else None)
+        btn_skip = box.addButton("Nie wgrywaj", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_skip)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_ow:
+            return 'overwrite'
+        if btn_show is not None and clicked is btn_show:
+            return 'show'
+        return 'skip'
+
+    def _resolve_remote_change(self, local: str, remote: str, info: dict,
+                               err: 'RemoteChangedError') -> None:
+        """The upload found the server file changed: nothing was written,
+        the user chooses.  The local copy is never touched here."""
+        name = os.path.basename(local)
+        info['conflict_open'] = True
+        try:
+            choice = self._ask_remote_changed(name, info, err)
+        finally:
+            info['conflict_open'] = False
+        if choice == 'overwrite':
+            # The server file as it is now becomes the baseline; if it changes
+            # again before the write, the user is asked again.
+            info['server_mtime'] = 0 if err.deleted else err.mtime
+            info['server_size']  = 0 if err.deleted else err.size
+            self._upload_changed_file(local, remote)
+            return
+        if choice == 'show':
+            self._show_server_version(local, remote, info)
+        self.status_msg.emit(
+            f"NIE wgrano '{name}' — plik zmienił się na serwerze. Twoja wersja "
+            "jest w edytorze; przy następnym zapisie zapytam ponownie.", True)
+
+    def _show_server_version(self, local: str, remote: str, info: dict) -> None:
+        """Download the server's version next to the local copy, under its
+        own name, and open it — for comparing.  It is not watched: saving it
+        uploads nothing."""
+        ref = info.get('owner')
+        client = ref() if ref is not None else None
+        if client is None:
+            return
+        stem, ext = os.path.splitext(os.path.basename(local))
+        target = os.path.join(
+            os.path.dirname(local),
+            f"{stem} (wersja z serwera {datetime.now():%H-%M-%S}){ext}")
+        lock = self._sftp_open_lock
+
+        def do_get():
+            with lock:
+                sftp = client.open_sftp()
+            try:
+                sftp.get(remote, target)
+            finally:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+        def on_done(_=None):
+            self._open_local.emit(target)
+
+        def on_error(e):
+            self.status_msg.emit(f"Nie można pobrać wersji z serwera: {e}", True)
+
+        w = _SimpleWorker(do_get)
+        w.done.connect(on_done)
+        w.error.connect(on_error)
+        w.start()
+        self._workers.append(w)
+
+    def _flush_pending_edits(self, final: bool = False):
         """Synchronously upload any watched temp file whose local copy is newer
         than what we last sent to the server — BEFORE the watch list is torn
         down (tab switch / reconnect / panel close).
@@ -6841,6 +7047,7 @@ class SftpPanel(QWidget):
         client = self._ssh_client
         if not client or not self._watched_files:
             return
+        unsent: list[str] = []
         for local_path, info in list(self._watched_files.items()):
             if (info.get('readonly') or local_path in self._upload_active
                     or local_path in self._download_active
@@ -6858,17 +7065,31 @@ class SftpPanel(QWidget):
             remote = info['remote']
             name = os.path.basename(local_path)
             if size > self._SYNC_FLUSH_MAX_BYTES:
-                self.status_msg.emit(
+                unsent.append(
                     f"Niewysłane zmiany w '{name}' ({size} B) — plik za duży "
-                    "na zapis przy przełączeniu; wgraj ponownie ręcznie.", True)
+                    "na zapis przy przełączeniu; wgraj ponownie ręcznie."
+                    + self._keep_unsent(local_path, final))
+                self.status_msg.emit(unsent[-1], True)
                 continue
+            started = False
             try:
                 # Synchronous, on the UI thread, often while closing: bounded
                 # so a dead connection fails instead of freezing (C1-11).
                 sftp = open_sftp_bounded(client)
                 leftovers: list[str] = []
                 try:
-                    upload_edit(sftp, local_path, remote, leftovers=leftovers)
+                    try:
+                        check_remote_unchanged(sftp, remote,
+                                               info.get('server_mtime', 0),
+                                               info.get('server_size', 0))
+                    except RemoteChangedError as e:
+                        # A tab switch leaves the question for the return to
+                        # the tab (the poll asks); a close asks now.
+                        if not final or self._ask_remote_changed(
+                                name, info, e, allow_show=False) != 'overwrite':
+                            raise
+                    started = True
+                    st = upload_edit(sftp, local_path, remote, leftovers=leftovers)
                 finally:
                     self._report_leftovers(leftovers)
                     try:
@@ -6876,12 +7097,39 @@ class SftpPanel(QWidget):
                     except Exception:
                         pass
                 info['mtime'] = mtime
+                info['dirty'] = False
+                info['server_mtime'] = int(st.st_mtime or 0) if st is not None else 0
+                info['server_size']  = (st.st_size or 0) if st is not None else 0
                 self.status_msg.emit(
                     f"Zapisano na SFTP przed przełączeniem: "
                     f"{os.path.basename(remote)}", False)
             except Exception as e:
-                self.status_msg.emit(
-                    f"Niewysłane zmiany w '{name}': {e}", True)
+                if started and (not SFTP_SAFE_REPLACE_ENABLED
+                                or 'NIEZNANY' in str(e)):
+                    # Our own broken write changed the server file (see
+                    # _upload_changed_file): not someone else's change.
+                    info['server_mtime'] = 0
+                    info['server_size'] = 0
+                unsent.append(f"Niewysłane zmiany w '{name}': {e}"
+                              + self._keep_unsent(local_path, final))
+                self.status_msg.emit(unsent[-1], True)
+        if final and unsent:
+            # The window is closing: a status line would never be read.
+            self._notify_unsent(unsent)
+
+    def _notify_unsent(self, lines: list) -> None:
+        QMessageBox.warning(self, "Zmiany niewgrane na serwer", "\n\n".join(lines))
+
+    def _keep_unsent(self, local_path: str, final: bool) -> str:
+        """On a close, copy an edit that did not reach the server out of the
+        temp directory (which the close deletes) — the sentence to append to
+        the message.  On a tab switch the copy stays where it is."""
+        if not final:
+            return ""
+        kept = preserve_unsent_copy(local_path)
+        if kept:
+            return f"  Twoja wersja zachowana: {kept}"
+        return "  Nie udało się zachować kopii — zmiany przepadną."
 
     # Above this size, _flush_pending_edits refuses the synchronous put so the
     # teardown path can't block the UI thread. Edited config files are tiny;
@@ -7121,7 +7369,7 @@ class SftpPanel(QWidget):
     def stop(self):
         self._close_rename_editor()
         # Last chance to push edits still sitting in temp before teardown.
-        self._flush_pending_edits()
+        self._flush_pending_edits(final=True)
         self._watch_poll.stop()
         self._watched_files.clear()
         self._upload_active.clear()
@@ -8897,7 +9145,7 @@ class SshDialog(QDialog):
         # closed transport — the last ~2 s of edits were lost.
         if getattr(s, 'sftp_client', None) is not None:
             if self._sftp_panel.bound_to(s.sftp_client):
-                self._sftp_panel._flush_pending_edits()
+                self._sftp_panel._flush_pending_edits(final=True)
             self._sftp_panel.forget_connection(s.sftp_client)
         s.worker.stop()
         self._teardown_session(s)
