@@ -437,15 +437,17 @@ class _VpnStatusProbe(QThread):
 
     result = pyqtSignal(object, object)          # key, status (or None)
 
-    def __init__(self, key, provider, app_path, profile_name, parent=None):
+    def __init__(self, key, provider, app_path, profile_name, parent=None,
+                 sole=False):
         super().__init__(parent)
         self._key = key
         self._args = (provider, app_path, profile_name)
+        self._sole = sole
 
     def run(self):
         try:
             from ui.vpn_panel import vpn_status
-            status = vpn_status(*self._args)
+            status = vpn_status(*self._args, sole=self._sole)
         except Exception:
             status = None
         self.result.emit(self._key, status)
@@ -453,6 +455,17 @@ class _VpnStatusProbe(QThread):
 
 def _vpn_status_key(profile) -> tuple:
     return (profile.provider, profile.app_path, profile.profile_name)
+
+
+def _sole_vpn_profile(profile) -> bool:
+    """Is `profile` the only one of its provider among the loaded VPN
+    profiles?  (A tunnel connected before HospitalHub started is then its,
+    see ui.vpn_panel.vpn_status.)"""
+    from ui.vpn_panel import sole_providers
+    try:
+        return profile.provider in sole_providers(_session_vpn_profiles())
+    except Exception:
+        return False
 
 
 class _VpnUnlockDialog(FormStyled, QDialog):
@@ -1571,7 +1584,8 @@ class DetailPanel(QWidget):
         except RuntimeError:
             pass
         probe = _VpnStatusProbe(_vpn_status_key(profile), profile.provider,
-                                profile.app_path, profile.profile_name, self)
+                                profile.app_path, profile.profile_name, self,
+                                sole=_sole_vpn_profile(profile))
         probe.result.connect(self._on_vpn_status)
         # One probe every 2 s: each must be freed when done (review 69/N2).
         probe.finished.connect(probe.deleteLater)
@@ -1682,7 +1696,8 @@ class DetailPanel(QWidget):
 
         # Toggle: disconnect if connected, connect if not
         from ui import vpn_panel as _vp
-        status = _vp.vpn_status(profile.provider, profile.app_path, profile.profile_name)
+        status = _vp.vpn_status(profile.provider, profile.app_path, profile.profile_name,
+                                sole=_sole_vpn_profile(profile))
         if status == "Connected":
             vpn_connect.disconnect(profile.provider, profile.server, profile.app_path, profile.profile_name)
             self._update_vpn_btn()

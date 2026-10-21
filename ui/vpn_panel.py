@@ -536,18 +536,20 @@ class StatusWorker(QThread):
 
     def __init__(self, profiles, resolve_app_path=None, parent=None):
         super().__init__(parent)
+        sole = sole_providers(profiles)
         self._profiles = [
             (i, p.provider,
              resolve_app_path(p) if resolve_app_path else p.app_path,
-             p.profile_name, p.server)
+             p.profile_name, p.server, p.provider in sole)
             for i, p in enumerate(profiles)
         ]
 
     def run(self):
         results = {}
-        for idx, provider, app_path, profile_name, server in self._profiles:
+        for idx, provider, app_path, profile_name, server, sole in self._profiles:
             try:
-                status = vpn_status(provider, app_path, profile_name, server)
+                status = vpn_status(provider, app_path, profile_name, server,
+                                    sole=sole)
                 if status:
                     results[idx] = status
             except Exception:
@@ -731,8 +733,13 @@ def barracuda_status() -> str | None:
 
 
 def vpn_status(provider: str, app_path: str = "", profile_name: str = "",
-               server=None):
-    """The status a card shows: the legacy's, except Barracuda's (above)."""
+               server=None, sole: bool = False):
+    """The status a card shows: the legacy's, except Barracuda's (above).
+
+    `sole`: this is the only profile of `provider` in the vault.  A tunnel
+    connected before HospitalHub started cannot always be pinned to a
+    profile (FortiClient without a server match, Stormshield); with one
+    profile of the provider it is that one's (2026-10-21)."""
     if provider == "Barracuda":
         try:
             status = barracuda_status()
@@ -741,8 +748,21 @@ def vpn_status(provider: str, app_path: str = "", profile_name: str = "",
         if status is not None:
             return status
     if server is None:
-        return vpn_connect.get_status(provider, app_path, profile_name)
-    return vpn_connect.get_status(provider, app_path, profile_name, server)
+        status = vpn_connect.get_status(provider, app_path, profile_name)
+    else:
+        status = vpn_connect.get_status(provider, app_path, profile_name, server)
+    if (sole and status != "Connected"
+            and vpn_connect.unpinned_tunnel_up(provider, profile_name)):
+        return "Connected"
+    return status
+
+
+def sole_providers(profiles) -> set:
+    """The providers that have exactly one profile among `profiles`."""
+    counts: dict = {}
+    for p in profiles:
+        counts[p.provider] = counts.get(p.provider, 0) + 1
+    return {name for name, n in counts.items() if n == 1}
 
 
 def _find_program(name: str) -> str:

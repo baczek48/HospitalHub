@@ -510,6 +510,95 @@ def _resolve_server(host: str) -> str:
             _server_ip_cache[host] = host
         return host
 
+
+#: tunnel name -> (time read, IPs of its server) — FortiClient's own
+#: configuration changes rarely; 60 s keeps the 2-5 s polling off the
+#: registry and DNS.
+_forti_tunnel_ip_cache: dict[str, tuple[float, set]] = {}
+_FORTI_TUNNEL_IP_TTL_S = 60.0
+
+
+def _forti_tunnel_server_ips(tunnel_name: str) -> set:
+    """Every IP of the server FortiClient has configured for `tunnel_name`
+    (HKLM Sslvpn\\Tunnels\\<name>\\Server — one host, or several separated
+    by ';' or ','), or an empty set."""
+    if not tunnel_name:
+        return set()
+    now = time.monotonic()
+    with _state_lock:
+        hit = _forti_tunnel_ip_cache.get(tunnel_name)
+    if hit is not None and now - hit[0] < _FORTI_TUNNEL_IP_TTL_S:
+        return hit[1]
+    import socket
+    ips = set()
+    for t in get_forti_tunnels_from_registry():
+        if t.get("name") != tunnel_name:
+            continue
+        for host in re.split(r"[;,]", t.get("server") or ""):
+            host = host.strip().rsplit(":", 1)[0] if host.count(":") == 1 else host.strip()
+            if not host:
+                continue
+            try:
+                ips.update(info[4][0] for info in socket.getaddrinfo(
+                    host, None, socket.AF_INET, socket.SOCK_STREAM))
+            except Exception:
+                pass
+    with _state_lock:
+        _forti_tunnel_ip_cache[tunnel_name] = (now, ips)
+    return ips
+
+
+def unpinned_tunnel_up(provider: str, profile_name: str = "") -> bool:
+    """Is a tunnel of `provider` up that get_status cannot pin to a profile —
+    connected before HospitalHub started, so no _last_connected — while
+    nothing says it belongs to a profile other than `profile_name`?
+
+    The caller decides what to make of it: a vault with one profile of the
+    provider knows whose tunnel it is (2026-10-21, owner: "a VPN connected
+    before HospitalHub started is not noticed — for every provider").  Only
+    the providers whose status needs that record answer; the others read
+    the adapter and see a tunnel without it.
+    """
+    if provider == "FortiClient":
+        if _last_connected.get("FortiClient"):
+            return False                   # HospitalHub knows whose it is
+        ip = _get_vpn_connected_server_ip("FortiSSLVPNdaemon.exe")
+        if not (ip or _is_forti_tunnel_active()):
+            return False
+        if ip:
+            for t in get_forti_tunnels_from_registry():
+                name = t.get("name") or ""
+                if name != profile_name and ip in _forti_tunnel_server_ips(name):
+                    return False           # FortiClient's own tunnel of another
+        return True
+    if provider == "Stormshield":
+        if _last_connected.get("Stormshield"):
+            return False
+        status = _check_adapter_status("stormshield-tap")
+        if status != "Connected":
+            status = _check_adapter_status("stormshield ssl vpn")
+        return status == "Connected"
+    return False
+
+
+def _forti_unrecorded_tunnel_is(profile_name: str, server: str,
+                                connected_ip: str | None) -> bool:
+    """A Forti tunnel is up that this HospitalHub did not connect (no
+    _last_connected — e.g. it was connected before HospitalHub started):
+    is it this profile's?
+
+    By the profile's own server when it has one (as before); otherwise by
+    the server FortiClient has configured for the tunnel the profile names
+    (2026-10-21, owner: "connected to Forti, start HH — it does not notice";
+    the Forti profiles carry no server, so the answer was always
+    'Disconnected').
+    """
+    if not connected_ip:
+        return False
+    if server:
+        return _resolve_server(server.split(":")[0]) == connected_ip
+    return connected_ip in _forti_tunnel_server_ips(profile_name)
+
 def _servers_match(a: str, b: str) -> bool:
     """Check if two server addresses refer to the same host (handles hostname vs IP)."""
     if a == b:
@@ -3617,16 +3706,12 @@ def _get_status_impl(provider: str, app_path: str = "",
                 if profile_name and profile_name != last:
                     return "Disconnected"
                 return "Connected"
-            # No record which profile is connected — require IP match.
-            # Without server data we can't verify → safer to show Disconnected
-            # than to light up every profile row during disconnect grace window.
-            if not server:
-                return "Disconnected"
+            # No record which profile is connected — require IP match (the
+            # profile's server, or the server FortiClient has for its tunnel).
+            # Without that we can't verify → safer to show Disconnected than
+            # to light up every profile row during disconnect grace window.
             connected_ip = _get_vpn_connected_server_ip("FortiSSLVPNdaemon.exe")
-            if not connected_ip:
-                return "Disconnected"
-            profile_ip = _resolve_server(server.split(":")[0])
-            if connected_ip != profile_ip:
+            if not _forti_unrecorded_tunnel_is(profile_name, server, connected_ip):
                 return "Disconnected"
             return "Connected"
 
@@ -3639,10 +3724,7 @@ def _get_status_impl(provider: str, app_path: str = "",
                 if profile_name and profile_name != last:
                     return "Disconnected"
                 return "Connected"
-            if not server:
-                return "Disconnected"
-            profile_ip = _resolve_server(server.split(":")[0])
-            if connected_ip != profile_ip:
+            if not _forti_unrecorded_tunnel_is(profile_name, server, connected_ip):
                 return "Disconnected"
             return "Connected"
 
