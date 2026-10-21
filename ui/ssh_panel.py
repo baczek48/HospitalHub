@@ -7812,10 +7812,14 @@ class _TerminalPane(QWidget):
 
         self._scrollbar = QScrollBar(Qt.Orientation.Vertical)
         self._scrollbar.setFixedWidth(10)
+        # rgb(), not #hex: theme.remap swaps #hex colours, and this bar is
+        # part of the terminal, which stays dark in every theme — remapped,
+        # it was a light stripe inside the terminal and, beside "Wsparcie
+        # Claude", made the dark handle look like a line (2026-10-21).
         self._scrollbar.setStyleSheet(
-            "QScrollBar:vertical{background:#0d1117;width:10px;margin:0;}"
-            "QScrollBar::handle:vertical{background:#30363d;border-radius:4px;min-height:20px;}"
-            "QScrollBar::handle:vertical:hover{background:#484f58;}"
+            "QScrollBar:vertical{background:rgb(13,17,23);width:10px;margin:0;}"
+            "QScrollBar::handle:vertical{background:rgb(48,54,61);border-radius:4px;min-height:20px;}"
+            "QScrollBar::handle:vertical:hover{background:rgb(72,79,88);}"
             "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
             "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:none;}")
         self._scrollbar.setRange(0, 0)

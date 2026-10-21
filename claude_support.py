@@ -25,15 +25,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import tempfile
 import threading
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 __all__ = ["ToolServer", "ClaudeProcess", "find_claude", "TOOLS", "SERVER_NAME",
-           "TOOL_READ", "allowed_tool_names"]
+           "TOOL_READ", "allowed_tool_names", "mask_pesel", "PESEL_MASK"]
 
 SERVER_NAME = "hospitalhub"
 TOOL_READ = "terminal_read"
@@ -59,6 +61,68 @@ TOOLS = [
 
 def allowed_tool_names() -> list[str]:
     return [f"mcp__{SERVER_NAME}__{t['name']}" for t in TOOLS]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PESEL masking — nothing leaves for Claude unmasked
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 2026-10-21 (owner): PESEL numbers are replaced before anything is sent —
+# the terminal read, the live-mode news and the owner's own messages.
+#   * anywhere: 11 digits standing alone whose first six are a PESEL birth
+#     date (month + 20/40/60/80 for the other centuries).  No checksum: a
+#     mistyped PESEL is still a patient's number, and the date alone already
+#     spares most technical numbers (timestamps, counters, ports);
+#   * inside an HL7 PID segment (the patient): every 11 digits standing
+#     alone, date or not.
+
+PESEL_MASK = "[PESEL]"
+
+_ELEVEN = re.compile(r"(?<!\d)\d{11}(?!\d)")
+#: "PID|" up to the end of the line or the next segment of the message.
+_PID_SEGMENT = re.compile(
+    r"(?<![A-Za-z0-9])PID\|.*?(?=(?<![A-Za-z0-9])(?:MSH|EVN|PD1|NK1|PV1|PV2|"
+    r"ORC|OBR|OBX|NTE|AL1|DG1|PR1|IN1|IN2|GT1|MRG|ROL|SPM|TQ1|TXA|ZPI)\||$)",
+    re.M)
+#: PESEL month field → century.
+_CENTURY = {0: 1900, 20: 2000, 40: 2100, 60: 2200, 80: 1800}
+
+
+def _pesel_date(digits: str) -> bool:
+    """Do the first six digits make a PESEL birth date?"""
+    yy, mm, dd = int(digits[0:2]), int(digits[2:4]), int(digits[4:6])
+    offset = (mm - 1) // 20 * 20 if mm > 0 else -1
+    century = _CENTURY.get(offset)
+    if century is None:
+        return False
+    try:
+        date(century + yy, mm - offset, dd)
+    except ValueError:
+        return False
+    return True
+
+
+def mask_pesel(text: str) -> tuple[str, int]:
+    """`text` with PESEL numbers replaced by ``[PESEL]``, and how many."""
+    count = 0
+
+    def in_pid(m):
+        nonlocal count
+        masked, n = _ELEVEN.subn(PESEL_MASK, m.group(0))
+        count += n
+        return masked
+
+    text = _PID_SEGMENT.sub(in_pid, text)
+
+    def loose(m):
+        nonlocal count
+        if not _pesel_date(m.group(0)):
+            return m.group(0)
+        count += 1
+        return PESEL_MASK
+
+    text = _ELEVEN.sub(loose, text)
+    return text, count
 
 
 # ══════════════════════════════════════════════════════════════════════════

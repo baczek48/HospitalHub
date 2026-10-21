@@ -87,7 +87,9 @@ def system_prompt(label: str) -> str:
         "compose up/down, kill, zmiana uprawnień), wyraźnie to zaznacz i opisz "
         "skutki. Unikaj komend bez końca (top, less, tail -f) — podawaj wersje z "
         "limitem. Nigdy nie proś o hasła. Logi mogą zawierać dane osobowe "
-        "pacjentów — nie powtarzaj ich bez potrzeby.\n"
+        "pacjentów — nie powtarzaj ich bez potrzeby. Numery PESEL są przed "
+        "wysłaniem do Ciebie zamieniane przez HospitalHub na "
+        f"{cs.PESEL_MASK} — nie proś o nie i nie próbuj ich odtworzyć.\n"
         "Zanim odpowiesz na pierwsze pytanie, przeczytaj terminal (terminal_read).\n"
         "Tryb „na żywo”: wiadomości zaczynające się od [NA ŻYWO] zawierają nowe "
         "wyjście terminala, wysłane automatycznie. Odpowiedz na nie tylko wtedy, "
@@ -274,7 +276,8 @@ class ClaudeSupportPanel(QWidget):
         head.addWidget(self._btn_end)
         root.addLayout(head)
 
-        self._scope = QLabel(f"Terminal: {self._target.label()} · tylko odczyt")
+        self._masked = 0
+        self._scope = QLabel(self._scope_text())
         self._scope.setWordWrap(True)
         self._scope.setStyleSheet("color: #8b949e; font-size: 11px;")
         root.addWidget(self._scope)
@@ -425,7 +428,8 @@ class ClaudeSupportPanel(QWidget):
             return False
         self._bubble("Claude widzi tę jedną kartę terminala (ekran i historię) i "
                      "podpowiada komendy — wpisujesz je sam. Treść terminala trafia "
-                     "do Claude'a: pamiętaj o danych pacjentów.", "info")
+                     "do Claude'a; numery PESEL są przed wysłaniem zamieniane na "
+                     f"{cs.PESEL_MASK}, inne dane pacjentów — nie.", "info")
         self._set_busy(False, "Gotowy.")
         self._input.setFocus()
         return True
@@ -465,6 +469,23 @@ class ClaudeSupportPanel(QWidget):
         self._bubble("Karta terminala została zamknięta.", "info")
         self.end()
 
+    # -- PESEL masking (2026-10-21) ------------------------------------------ #
+
+    def _scope_text(self) -> str:
+        text = f"Terminal: {self._target.label()} · tylko odczyt"
+        if self._masked:
+            text += f" · zamaskowane PESEL: {self._masked}"
+        return text
+
+    def _mask(self, text: str) -> str:
+        """Every text for Claude passes here (cs.mask_pesel); the header
+        counts what was masked."""
+        text, n = cs.mask_pesel(text)
+        if n:
+            self._masked += n
+            self._scope.setText(self._scope_text())
+        return text
+
     # -- talking ------------------------------------------------------------- #
 
     def _send(self) -> None:
@@ -472,6 +493,7 @@ class ClaudeSupportPanel(QWidget):
         if not text or self._busy or self._ended or self._process is None:
             return
         self._input.clear()
+        text = self._mask(text)          # the bubble shows what was sent
         self._bubble(text, "user")
         try:
             self._process.send(text)
@@ -544,7 +566,7 @@ class ClaudeSupportPanel(QWidget):
             return
         self._live_seen = current
         self._live_sent_at = now
-        chunk = "\n".join(added[-_LIVE_MAX_LINES:]).strip()
+        chunk = self._mask("\n".join(added[-_LIVE_MAX_LINES:]).strip())
         try:
             self._process.send(f"[NA ŻYWO] Nowe wyjście w terminalu:\n```\n{chunk}\n```")
         except Exception:
@@ -574,7 +596,8 @@ class ClaudeSupportPanel(QWidget):
         except (TypeError, ValueError):
             lines = 150
         lines = max(10, min(lines, 2000))
-        job.finish(_trim(self._target.read(lines)) or "(terminal jest pusty)")
+        job.finish(_trim(self._mask(self._target.read(lines)))
+                   or "(terminal jest pusty)")
 
 
 def _login_hint(text: str) -> str:

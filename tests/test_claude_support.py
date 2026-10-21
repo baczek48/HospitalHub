@@ -531,3 +531,111 @@ def test_each_tab_has_its_own_support_shown_only_on_that_tab(app, tmp_path,
         dlg.close_without_asking()
         srv.drop()
 
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-21: PESEL numbers never leave for Claude
+# ══════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("text, expected, count", [
+    ("pacjent 85010112345 przyjęty", "pacjent [PESEL] przyjęty", 1),       # 1985
+    ("PESEL:02270803628;", "PESEL:[PESEL];", 1),                           # 2002 (+20)
+    ("ur. 1850 r.: 50820112345", "ur. 1850 r.: [PESEL]", 1),               # 1850 (+80)
+    ("00222912345", "[PESEL]", 1),                                         # 29.02.2000
+    ("01222912345", "01222912345", 0),                                     # 29.02.2001: no
+    ("85013212345", "85013212345", 0),                                     # day 32
+    ("12345678901", "12345678901", 0),                                     # month 34
+    ("ts 1697543210123 ms", "ts 1697543210123 ms", 0),                     # 13 digits
+    ("850101123456", "850101123456", 0),                                   # 12 digits
+    ("port 8443 pid 1212 rss 410280", "port 8443 pid 1212 rss 410280", 0),
+    ("a=85010112345,b=90122412345", "a=[PESEL],b=[PESEL]", 2),
+])
+def test_mask_pesel(text, expected, count):
+    assert cs.mask_pesel(text) == (expected, count)
+
+
+def test_inside_a_pid_segment_every_eleven_digits_are_masked():
+    msg = ("MSH|^~\\&|HIS|SZP|||20261021||ADT^A01|MSG1|P|2.5\n"
+           "PID|1||99999999999^^^SZP^PESEL||KOWALSKI^JAN||19850101|M\n"
+           "PV1|1|I|OIOM^12^1||||99999999999")
+    out, n = cs.mask_pesel(msg)
+    assert n == 1
+    assert "PID|1||[PESEL]^^^SZP^PESEL" in out
+    assert out.endswith("PV1|1|I|OIOM^12^1||||99999999999"), "poza PID tylko z datą"
+
+
+def test_a_pid_segment_on_one_line_with_the_others_ends_at_the_next_segment():
+    msg = ("MSH|^~\\&|HIS|SZP|||x||ADT^A01|1|P|2.5 PID|1||99999999999^^^PESEL "
+           "PV1|1|I|99999999999")
+    out, n = cs.mask_pesel(msg)
+    assert n == 1 and "PID|1||[PESEL]" in out and out.endswith("PV1|1|I|99999999999")
+
+
+class PeselTarget(Target):
+    def __init__(self):
+        super().__init__()
+        self.text = ("$ grep 'PID|' adt.log\n"
+                     "PID|1||85010112345^^^SZP^PESEL||NOWAK^ANNA\n"
+                     "$ grep -c x f\n90122412345")
+
+    def read(self, lines):
+        return self.text
+
+
+def test_the_terminal_read_is_masked_and_counted(app):
+    import ui.claude_panel as cp
+    panel, proc = make_panel(app, PeselTarget())
+    job = cp._Job(cs.TOOL_READ, {"lines": 50})
+    panel._on_tool_request(job)
+    text, is_error = job.result
+    assert not is_error
+    assert "85010112345" not in text and "90122412345" not in text
+    assert text.count(cs.PESEL_MASK) == 2
+    assert "zamaskowane PESEL: 2" in panel._scope.text()
+    panel.end()
+
+
+def test_my_own_message_is_masked_before_sending(app):
+    panel, proc = make_panel(app)
+    panel._input.setPlainText("co z pacjentem 85010112345?")
+    panel._send()
+    assert proc.sent == ["co z pacjentem [PESEL]?"]
+    assert "zamaskowane PESEL: 1" in panel._scope.text()
+    panel.end()
+
+
+def test_live_mode_news_is_masked(app, monkeypatch):
+    import ui.claude_panel as cp
+    clock = [1000.0]
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    target = LiveTarget()
+    panel, proc = make_panel(app, target)
+    panel._btn_live.setChecked(True)
+    target.text += "\nERROR: pacjent 85010112345 nie znaleziony"
+    panel._live_tick()
+    clock[0] += cp._LIVE_QUIET_S + 0.1
+    panel._live_tick()
+    assert len(proc.sent) == 1
+    assert "85010112345" not in proc.sent[0] and cs.PESEL_MASK in proc.sent[0]
+    panel.end()
+
+
+def test_nothing_reaches_claude_without_the_mask():
+    """Every send to Claude Code and the read tool's answer go through
+    _mask — a new path that skips it fails here."""
+    with open(os.path.join(_PARENT, "ui", "claude_panel.py"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    senders = {name for name, fn in funcs.items()
+               for n in ast.walk(fn) if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Attribute) and n.func.attr == "send"}
+    assert senders == {"_send", "_live_tick"}, senders
+    for name in ("_send", "_live_tick", "_on_tool_request"):
+        calls = {n.func.attr for n in ast.walk(funcs[name]) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)}
+        assert "_mask" in calls, name
+
+
+def test_claude_is_told_about_the_mask():
+    import ui.claude_panel as cp
+    assert cs.PESEL_MASK in cp.system_prompt("x")
