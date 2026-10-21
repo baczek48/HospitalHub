@@ -114,7 +114,9 @@ def make_server_class(root, faults):
         def open(self, path, flags, attr):
             faults.ops.append(("open", path, flags))
             real = self._real(path)
-            if (flags & os.O_CREAT
+            # As on POSIX: a new file needs write access to the directory,
+            # an existing one opened with O_CREAT does not.
+            if (flags & os.O_CREAT and not os.path.exists(real)
                     and os.path.dirname(path) in faults.deny_create_in):
                 return SFTPServer.convert_errno(13)
             try:
@@ -364,24 +366,72 @@ def test_a_directory_is_refused(sp, files):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# The default (flag off) — for comparison
+# Direct mode — for comparison — and the fallback to it
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_direct_mode_truncates_the_original_on_a_drop(sp, files):
-    """What V2 does while SFTP_SAFE_REPLACE_ENABLED is False — the reason
-    the safe mode exists."""
+    """What V2 did while SFTP_SAFE_REPLACE_ENABLED was False (and still does
+    where the server does not allow the safe replace) — the reason the safe
+    mode exists."""
     client, root, faults, local = files
-    assert sp.SFTP_SAFE_REPLACE_ENABLED is False
     faults.drop_after_bytes = 50_000
     with pytest.raises(Exception):
-        sp.upload_edit(client, local, "/data/config.xml")
+        sp.upload_edit(client, local, "/data/config.xml", safe_replace=False)
     damaged = (root / "data" / "config.xml").read_bytes()
     assert damaged != ORIGINAL and len(damaged) <= 50_000
 
 
+def test_by_default_a_drop_keeps_the_original(sp, files):
+    client, root, faults, local = files
+    faults.drop_after_bytes = 50_000
+    with pytest.raises(sp.SafeReplaceError):
+        sp.upload_edit(client, local, "/data/config.xml", fallback_direct=True)
+    assert (root / "data" / "config.xml").read_bytes() == ORIGINAL
+
+
+@pytest.mark.parametrize("mode", ["unsupported", "denied"])
+def test_a_refused_rename_falls_back_to_the_in_place_write(sp, files, mode):
+    client, root, faults, local = files
+    faults.posix_rename = mode
+    in_place = []
+    sp.upload_edit(client, local, "/data/config.xml", fallback_direct=True,
+                   in_place=in_place)
+    assert (root / "data" / "config.xml").read_bytes() == EDITED
+    assert leftovers(root) == []
+    assert len(in_place) == 1 and "posix-rename" in in_place[0]
+
+
+def test_no_create_permission_falls_back_to_the_in_place_write(sp, files):
+    client, root, faults, local = files
+    faults.deny_create_in.add("/data")
+    in_place = []
+    sp.upload_edit(client, local, "/data/config.xml", fallback_direct=True,
+                   in_place=in_place)
+    assert (root / "data" / "config.xml").read_bytes() == EDITED
+    assert len(in_place) == 1 and "tymczasowego" in in_place[0]
+
+
+def test_a_full_disk_never_falls_back(sp, files):
+    client, root, faults, local = files
+    faults.write_fails_after = 30_000
+    with pytest.raises(sp.SafeReplaceError, match="nie został zmieniony"):
+        sp.upload_edit(client, local, "/data/config.xml", fallback_direct=True)
+    assert (root / "data" / "config.xml").read_bytes() == ORIGINAL
+    assert not any(op[0] == "open" and op[1] == "/data/config.xml"
+                   for op in faults.ops)
+
+
+def test_a_deleted_file_is_written_again_with_the_fallback(sp, files):
+    """As before the safe mode: the conflict check asks first; after an
+    'overwrite' the file is created again."""
+    client, root, faults, local = files
+    sp.upload_edit(client, local, "/data/other.xml", fallback_direct=True)
+    assert (root / "data" / "other.xml").read_bytes() == EDITED
+
+
 def test_direct_mode_replaces_in_place_when_nothing_fails(sp, files):
     client, root, faults, local = files
-    sp.upload_edit(client, local, "/data/config.xml")
+    sp.upload_edit(client, local, "/data/config.xml", safe_replace=False)
     assert (root / "data" / "config.xml").read_bytes() == EDITED
     assert [op[1] for op in faults.ops if op[0] == "open"] == ["/data/config.xml"]
 

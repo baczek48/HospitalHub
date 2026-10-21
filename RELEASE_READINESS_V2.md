@@ -51,7 +51,7 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 | G7 | Inno Setup | **rozstrzygnięte:** zainstalowany, skrypt zweryfikowany |
 | G8 | X11 | **rozstrzygnięte:** domyślnie włączony, bez zmian w kodzie, testy regresji |
 | G9 | redesign UI | **rozstrzygnięte:** odłożony do końca stabilizacji |
-| G10 | włączenie bezpiecznej podmiany SFTP | test bezpieczeństwa i zgodności zapisu wykonany — decyzja o fladze, niżej |
+| G10 | włączenie bezpiecznej podmiany SFTP | **rozstrzygnięte 2026-10-21:** włączona, z zapisem bezpośrednim tam, gdzie serwer jej nie pozwala — niżej |
 
 ## Ryzyka wdrożenia
 
@@ -63,11 +63,11 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
    nadpisania istniejącego pliku przy tworzeniu, blokada edycji listy VPN w trakcie łączenia,
    ostrzeżenie TOFU przy zmianie typu klucza hosta, okno „tylko do odczytu” przy plikach z ACL.
 
-5. **Auto-upload edycji SFTP domyślnie nadal nie jest atomowy:** `put` najpierw obcina plik na
-   serwerze — przy zerwaniu połączenia plik może zostać ucięty (test protokołowy to pokazuje).
-   Bezpieczna podmiana jest zaimplementowana i przetestowana (fake + prawdziwy protokół SFTP),
-   ale wyłączona do decyzji G10, bo podmieniony plik jest nowym plikiem (właściciel, tryb, ACL —
-   niżej).
+5. **Auto-upload edycji SFTP (od 2026-10-21 bezpieczna podmiana włączona):** podmieniony plik
+   jest nowym plikiem — POSIX ACL, xattr, etykiety SELinux i hardlinki oryginału nie przechodzą
+   (z klienta SFTP niewykrywalne). Tam, gdzie serwer podmiany nie pozwala (cudzy właściciel,
+   katalog bez prawa zapisu, brak `posix-rename`, plik zniknął), zapis idzie w miejscu jak
+   dawniej — i tylko wtedy zerwanie w trakcie może uciąć plik.
 6. IPsec w FortiClient V2 zawsze BLOCKED (L10); zawieszony FortiClient = „Trwa inne łączenie”
    dla wszystkich kart do restartu (N2).
 7. V2 ma lokalne repo Git (bez remote) + migawki `.tgz` z `SHA256SUMS`; brak kopii poza tym dyskiem.
@@ -85,7 +85,7 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 
 | ID | Opis | Waga |
 |---|---|---|
-| Etap 68/70 | auto-upload edycji SFTP nieatomowy, dopóki G10 nie włączy bezpiecznej podmiany | MEDIUM |
+| Etap 68/70 | auto-upload edycji SFTP nieatomowy tylko tam, gdzie serwer nie pozwala na bezpieczną podmianę (zapis w miejscu) | LOW |
 | Etap 70 L8 | pobranie zakończone po zamknięciu karty odkłada obserwację martwego połączenia — zapisy tej kopii cicho ignorowane (nic nie idzie w złe miejsce) | LOW |
 | Etap 68 | fałszywe „tylko do odczytu” przy ACL dających więcej niż bity trybu | LOW |
 | Etap 68 | alarm „klucz zmieniony”, gdy serwer doda nowy typ klucza hosta | LOW |
@@ -119,7 +119,14 @@ potwierdzenia scenariuszami ręcznymi z `TEST_MATRIX_V2.md`.
 `.nazwa.hhv2-xxxx.part` w tym samym katalogu, tworzony z `O_EXCL` i od razu 0600 → zapis z
 potwierdzeniem każdego bloku → kontrola rozmiaru → właściciel i tryb oryginału → `posix-rename`.
 Każda porażka = `SafeReplaceError`, oryginał nietknięty, **bez powrotu do zapisu bezpośredniego**.
-Flaga **pozostaje `False`** (nie włączana automatycznie).
+
+**2026-10-21 (decyzja właściciela): flaga `True`**, a panel zapisuje z `fallback_direct=True`:
+odmowa wynikająca z serwera (`SafeReplaceUnsupported` — brak prawa tworzenia pliku w katalogu,
+właściciel, którego nie da się ustawić, tryb, którego nie da się odtworzyć, brak/odmowa
+`posix-rename`, plik zniknął, nie zwykły plik) → zapis w miejscu jak przed G10, w pasku stanu
+dopisek „zapis bezpośredni”. **Nigdy** po zapisie pliku tymczasowego, który się nie udał (pełny
+dysk, zerwanie), po anulowaniu ani po rename bez potwierdzenia — wtedy oryginał zostaje cały.
+Anulowanie tuż przed zapisem w miejscu nie dotyka oryginału.
 
 **Jak testowano** — bez prawdziwych serwerów i danych produkcyjnych, zwykłe pliki XML:
 - `tests/test_sftp_safe_replace_protocol.py` (15): prawdziwy serwer SFTP paramiko w procesie

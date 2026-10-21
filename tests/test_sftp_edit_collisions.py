@@ -22,6 +22,7 @@ No network: every server is an in-memory ``FakeServer``.
 """
 
 import os
+import re
 import stat as st_mod
 import sys
 from types import SimpleNamespace
@@ -369,8 +370,10 @@ def test_saves_in_any_order_reach_only_their_own_server_and_path(env):
     assert a.data("/opt/y/config.xml") == b"edit A /opt/y" * 10
     assert b.data("/opt/x/config.xml") == b"edit B /opt/x" * 10
     assert b.data("/opt/y/config.xml") == b"edit B /opt/y" * 10
-    assert {e[1] for e in a.log if e[0] == "open"} <= {"/opt/x/config.xml",
-                                                       "/opt/y/config.xml"}
+    # The file itself, or the safe replace's temp file next to it.
+    assert {re.sub(r"/\.(.+)\.hhv2-[0-9a-f]{8}\.part$", r"/\1", e[1])
+            for e in a.log if e[0] == "open"} <= {"/opt/x/config.xml",
+                                                  "/opt/y/config.xml"}
 
 
 def test_two_windows_on_two_servers_never_write_to_each_other(env):
@@ -545,8 +548,87 @@ def xmlfile(tmp_path):
     return server, FakeSftp(server), str(local)
 
 
-def test_the_flag_is_off_until_receivers_are_checked(sp):
-    assert sp.SFTP_SAFE_REPLACE_ENABLED is False
+def test_the_safe_replace_is_on(sp):
+    """2026-10-21 (owner): on, with the in-place write where the server does
+    not allow it (``fallback_direct``)."""
+    assert sp.SFTP_SAFE_REPLACE_ENABLED is True
+
+
+@pytest.mark.parametrize("setup, why", [
+    (lambda s: s.files["/data/out/config.xml"].update(uid=2000), "właściciela"),
+    (lambda s: setattr(s, "posix_rename_supported", False), "posix-rename"),
+    (lambda s: s.readonly_dirs.add("/data/out"), "tymczasowego"),
+])
+def test_where_the_server_does_not_allow_it_the_edit_is_written_in_place(
+        sp, xmlfile, setup, why):
+    server, sftp, local = xmlfile
+    setup(server)
+    in_place = []
+    sp.upload_edit(sftp, local, "/data/out/config.xml", fallback_direct=True,
+                   in_place=in_place)
+    f = server.files["/data/out/config.xml"]
+    assert f["data"] == open(local, "rb").read()
+    assert st_mod.S_IMODE(f["mode"]) == 0o640, "zapis w miejscu: tryb bez zmian"
+    assert len(in_place) == 1 and why in in_place[0]
+    assert server.leftovers() == []
+
+
+def test_a_broken_temp_write_never_falls_back_to_the_original(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.break_put_after = 100
+    in_place = []
+    with pytest.raises(sp.SafeReplaceError):
+        sp.upload_edit(sftp, local, "/data/out/config.xml", fallback_direct=True,
+                       in_place=in_place)
+    assert server.data("/data/out/config.xml") == ORIGINAL
+    assert in_place == [] and not opened_for_write(server, "/data/out/config.xml")
+
+
+def test_a_cancel_before_the_fallback_write_leaves_the_original(sp, xmlfile):
+    server, sftp, local = xmlfile
+    server.posix_rename_supported = False
+
+    def before_commit():
+        if any(e[0] == "posix_rename" for e in server.log):
+            raise sp._CancelledError()      # hit Cancel after the refusal
+    with pytest.raises(sp._CancelledError):
+        sp.upload_edit(sftp, local, "/data/out/config.xml", fallback_direct=True,
+                       before_commit=before_commit)
+    assert server.data("/data/out/config.xml") == ORIGINAL
+    assert not opened_for_write(server, "/data/out/config.xml")
+
+
+def test_the_panel_saves_a_file_owned_by_someone_else_in_place(env):
+    a, _ = servers()
+    a.files["/opt/x/config.xml"]["uid"] = 2000      # group-writable, not ours
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    messages = []
+    p.status_msg.connect(lambda text, err: messages.append((text, err)))
+    save_in_editor(local, b"edited" * 30)
+
+    p._poll_watched_files()
+
+    assert a.data("/opt/x/config.xml") == b"edited" * 30
+    assert a.files["/opt/x/config.xml"]["uid"] == 2000
+    assert p._watched_files[local]["dirty"] is False
+    assert any(not err and "zapis bezpośredni" in text for text, err in messages)
+
+
+def test_the_panel_by_default_keeps_the_server_file_on_a_drop(env):
+    a, _ = servers()
+    original = a.data("/opt/x/config.xml")
+    p = env.panel()
+    connect(p, FakeClient(a))
+    local = open_file(p, "/opt/x/config.xml")
+    a.break_put_after = 10
+    save_in_editor(local, b"new content" * 20)
+
+    p._poll_watched_files()
+
+    assert a.data("/opt/x/config.xml") == original
+    assert p._watched_files[local]["dirty"] is True
 
 
 def test_safe_replace_swaps_the_file_and_keeps_mode_and_owner(sp, xmlfile):

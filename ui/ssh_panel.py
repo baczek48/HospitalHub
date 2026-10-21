@@ -4145,11 +4145,21 @@ def replace_local_copy(part: str, local: str, expect_mtime=None) -> None:
 #: test (gate G10): the replace is a new file — owner, mode bits and ACLs
 #: are not all carried over, and a temp file briefly appears in the
 #: directory.  Off = the old direct put.
-SFTP_SAFE_REPLACE_ENABLED = False
+#: 2026-10-21 (owner): ON.  Where the server does not allow it (no write
+#: access to the directory, a file owned by someone else, no posix-rename,
+#: the file gone) the edit is written in place as before instead of being
+#: refused — see ``upload_edit(fallback_direct=True)``.
+SFTP_SAFE_REPLACE_ENABLED = True
 
 
 class SafeReplaceError(IOError):
     """The safe replace cannot be done; the server file is untouched."""
+
+
+class SafeReplaceUnsupported(SafeReplaceError):
+    """The server does not allow the safe replace for this file (directory
+    permissions, owner, posix-rename, ...).  Nothing has been written that
+    could fail the same way in place, so the direct write may still go."""
 
 
 def remote_part_path(target: str) -> str:
@@ -4204,14 +4214,6 @@ def _write_acknowledged(sftp, local: str, remote: str, mode: str, total: int,
                 pass                        # the first error is the one to report
             raise
         f.close()
-
-
-def _write_private_temp(sftp, local: str, tmp: str, total: int, callback):
-    """Create `tmp` (never an existing file) readable by its owner only, then
-    write `local` into it — the edited content is never readable by other
-    users, not even for the length of the transfer (review 2026-10-15 L5)."""
-    _write_acknowledged(sftp, local, tmp, 'wbx', total, callback,
-                        before_data=lambda f: f.chmod(0o600))
 
 
 def upload_direct(sftp, local: str, remote: str, callback=None):
@@ -4284,33 +4286,69 @@ def check_remote_unchanged(sftp, remote: str, server_mtime: int,
 
 def upload_edit(sftp, local: str, remote: str, callback=None,
                 safe_replace: bool | None = None, before_commit=None,
-                leftovers: list | None = None):
+                leftovers: list | None = None, fallback_direct: bool = False,
+                in_place: list | None = None):
     """Send an edited local copy back to `remote`; return the final stat
     (None when the server cannot be asked after a successful write).
     The callers check first that the server file is still the one the edit
     started from (:func:`check_remote_unchanged`, 2026-10-21).
 
-    Direct mode (``safe_replace`` False, the default) writes over the file in
+    Direct mode (``safe_replace`` False) writes over the file in
     place — every block acknowledged by the server (no pipelining, so a
     refused write is reported, not hidden), then the size is compared.  It
     does NOT protect the original: a transfer that breaks or is cancelled
     leaves the server file truncated.  Safe mode writes a
     new, owner-only temp file in the same directory, checks its size, gives
     it the original's owner and permissions, and posix-renames it over the
-    original.  Anything it cannot do — no posix-rename on the server, no
-    write access to the directory, an owner it may not set, a target that is
-    not a regular file or no longer exists — raises SafeReplaceError with the
-    original untouched; it never falls back to the direct put.
-    `before_commit` runs just before the rename (the last point where a
-    cancel still leaves the original as it was).  A temp file that could not
-    be removed afterwards (the link is gone) is appended to `leftovers`.
+    original.  Anything it cannot do raises SafeReplaceError with the
+    original untouched.
+
+    `fallback_direct` (2026-10-21, the panel's saves): when the server does
+    not allow the safe replace for this file (SafeReplaceUnsupported — no
+    write access to the directory, an owner it may not set, no posix-rename,
+    not a regular file, the file gone) the edit is written in place, as
+    before the safe mode existed, instead of being refused.  A temp write
+    that broke (disk full, the link dropped), a cancel or an unconfirmed
+    rename never fall back — the original stays as it was.
+    `in_place`, when given, gets one entry as an in-place write starts: ''
+    in direct mode, the reason the safe replace was not possible otherwise.
+    `before_commit` runs just before the rename or the fallback write (the
+    last point where a cancel still leaves the original as it was).  A temp
+    file that could not be removed afterwards (the link is gone) is appended
+    to `leftovers`.
     """
     if safe_replace is None:
         safe_replace = SFTP_SAFE_REPLACE_ENABLED
-    local_size = os.path.getsize(local)
     if not safe_replace:
+        if in_place is not None:
+            in_place.append('')
         return upload_direct(sftp, local, remote, callback)
+    try:
+        return _replace_via_temp(sftp, local, remote, callback,
+                                 before_commit, leftovers)
+    except SafeReplaceUnsupported as e:
+        if not fallback_direct:
+            raise
+        reason = str(e)
+    if before_commit is not None:
+        before_commit()
+    if in_place is not None:
+        in_place.append(reason)
+    return upload_direct(sftp, local, remote, callback)
 
+
+def _in_place_note(in_place: list) -> str:
+    """Status-line suffix when a save had to be written in place although the
+    safe replace is on."""
+    if not in_place or not in_place[0]:
+        return ''
+    return " (zapis bezpośredni — serwer nie pozwala tu na bezpieczną podmianę)"
+
+
+def _replace_via_temp(sftp, local: str, remote: str, callback, before_commit,
+                      leftovers: list | None):
+    """The safe mode of :func:`upload_edit`."""
+    local_size = os.path.getsize(local)
     untouched = "plik na serwerze nie został zmieniony."
     try:
         target = remote
@@ -4320,14 +4358,14 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
             target = sftp.normalize(remote)
             orig = sftp.lstat(target)
     except FileNotFoundError as e:
-        raise SafeReplaceError(
+        raise SafeReplaceUnsupported(
             f"'{remote}' nie istnieje już na serwerze — bezpieczna podmiana "
             "nie tworzy pliku od nowa.") from e
     except Exception as e:
-        raise SafeReplaceError(
+        raise SafeReplaceUnsupported(
             f"Nie można odczytać '{remote}' ({e}) — {untouched}") from e
     if not stat.S_ISREG(orig.st_mode or 0):
-        raise SafeReplaceError(
+        raise SafeReplaceUnsupported(
             f"'{remote}' nie jest zwykłym plikiem — bezpieczna podmiana "
             f"niemożliwa, {untouched}")
     want_mode = (orig.st_mode or 0) & 0o7777
@@ -4335,9 +4373,31 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
 
     tmp = remote_part_path(target)
     committed = False
+    opened = [False]        # the temp exists and is private: data goes next
+
+    def private(f):
+        f.chmod(0o600)
+        opened[0] = True
     try:
         try:
-            _write_private_temp(sftp, local, tmp, local_size, callback)
+            # Created (never an existing file) readable by its owner only,
+            # so the edited content is never readable by other users, not
+            # even for the length of the transfer (review 2026-10-15 L5).
+            _write_acknowledged(sftp, local, tmp, 'wbx', local_size, callback,
+                                before_data=private)
+        except _CancelledError:
+            raise
+        except Exception as e:
+            if not opened[0]:
+                # No temp file allowed here (directory permissions, a quota
+                # on new files, an extension the server lacks).
+                raise SafeReplaceUnsupported(
+                    f"Nie można utworzyć pliku tymczasowego obok '{target}' "
+                    f"({e}) — {untouched}") from e
+            raise SafeReplaceError(
+                f"Nie można przygotować pliku tymczasowego obok '{target}' ({e}) "
+                f"— {untouched}") from e
+        try:
             st = sftp.stat(tmp)
             if (st.st_size or 0) != local_size:
                 raise SafeReplaceError(
@@ -4347,7 +4407,7 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
                 try:
                     sftp.chown(tmp, *want_owner)
                 except Exception as e:
-                    raise SafeReplaceError(
+                    raise SafeReplaceUnsupported(
                         f"Podmiana zmieniłaby właściciela '{target}' "
                         f"({want_owner[0]}:{want_owner[1]}) — przerwano, "
                         f"{untouched}") from e
@@ -4355,7 +4415,7 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
             st = sftp.stat(tmp)
             if (((st.st_mode or 0) & 0o7777) != want_mode
                     or (st.st_uid, st.st_gid) != want_owner):
-                raise SafeReplaceError(
+                raise SafeReplaceUnsupported(
                     f"Nie udało się odtworzyć uprawnień '{target}' — przerwano, "
                     f"{untouched}")
         except (_CancelledError, SafeReplaceError):
@@ -4370,7 +4430,7 @@ def upload_edit(sftp, local: str, remote: str, callback=None,
             sftp.posix_rename(tmp, target)
         except Exception as e:
             if _remote_state(sftp, tmp) is True:
-                raise SafeReplaceError(
+                raise SafeReplaceUnsupported(
                     f"Serwer nie wykonał bezpiecznej podmiany (posix-rename): "
                     f"{e} — {untouched}") from e
             # The reply is lost (link down, cancel): the rename may have run.
@@ -6807,13 +6867,13 @@ class SftpPanel(QWidget):
         unknown = [None]     # "stan NIEZNANY" must survive a cancel
         changed = [None]     # RemoteChangedError: the user decides
         started = [False]    # the write began: the server file may be ours now
-        safe = SFTP_SAFE_REPLACE_ENABLED
+        in_place: list[str] = []   # an in-place write began (and why)
 
         def forget_baseline_if_written():
             # A direct write that broke (or an unknown safe replace) has
             # already changed the server file itself: the next save must not
             # call our own half-write "changed by someone else".
-            if started[0] and (not safe or unknown[0]):
+            if started[0] and (in_place or unknown[0]):
                 info['server_mtime'] = 0
                 info['server_size'] = 0
 
@@ -6843,7 +6903,9 @@ class SftpPanel(QWidget):
                 try:
                     final_stat[0] = upload_edit(sftp, local, remote, callback=cb,
                                                 before_commit=before_commit,
-                                                leftovers=leftovers)
+                                                leftovers=leftovers,
+                                                fallback_direct=True,
+                                                in_place=in_place)
                 except SafeReplaceError as e:
                     if 'NIEZNANY' in str(e):
                         unknown[0] = str(e)
@@ -6878,7 +6940,8 @@ class SftpPanel(QWidget):
             # not checked, rather than reported as someone else's change.
             info['server_mtime'] = int(st.st_mtime or 0) if st is not None else 0
             info['server_size']  = (st.st_size or 0) if st is not None else 0
-            self.status_msg.emit(f"Zapisano na SFTP: {os.path.basename(remote)}", False)
+            self.status_msg.emit(f"Zapisano na SFTP: {os.path.basename(remote)}"
+                                 + _in_place_note(in_place), False)
             self._list(self._path)
 
         def on_cancelled():
@@ -7072,6 +7135,7 @@ class SftpPanel(QWidget):
                 self.status_msg.emit(unsent[-1], True)
                 continue
             started = False
+            in_place: list[str] = []
             try:
                 # Synchronous, on the UI thread, often while closing: bounded
                 # so a dead connection fails instead of freezing (C1-11).
@@ -7089,7 +7153,8 @@ class SftpPanel(QWidget):
                                 name, info, e, allow_show=False) != 'overwrite':
                             raise
                     started = True
-                    st = upload_edit(sftp, local_path, remote, leftovers=leftovers)
+                    st = upload_edit(sftp, local_path, remote, leftovers=leftovers,
+                                     fallback_direct=True, in_place=in_place)
                 finally:
                     self._report_leftovers(leftovers)
                     try:
@@ -7102,10 +7167,9 @@ class SftpPanel(QWidget):
                 info['server_size']  = (st.st_size or 0) if st is not None else 0
                 self.status_msg.emit(
                     f"Zapisano na SFTP przed przełączeniem: "
-                    f"{os.path.basename(remote)}", False)
+                    f"{os.path.basename(remote)}" + _in_place_note(in_place), False)
             except Exception as e:
-                if started and (not SFTP_SAFE_REPLACE_ENABLED
-                                or 'NIEZNANY' in str(e)):
+                if started and (in_place or 'NIEZNANY' in str(e)):
                     # Our own broken write changed the server file (see
                     # _upload_changed_file): not someone else's change.
                     info['server_mtime'] = 0
