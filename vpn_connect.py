@@ -511,41 +511,132 @@ def _resolve_server(host: str) -> str:
         return host
 
 
-#: tunnel name -> (time read, IPs of its server) — FortiClient's own
-#: configuration changes rarely; 60 s keeps the 2-5 s polling off the
-#: registry and DNS.
-_forti_tunnel_ip_cache: dict[str, tuple[float, set]] = {}
+#: Status checks never wait for DNS (2026-10-21): with a tunnel up, a lookup
+#: of a VPN server's name took 11 s here and held every status with it
+#: (owner: "it takes ~10 s before HH shows the statuses").  A name is looked
+#: up in a background thread; until the answer is in, it has no addresses.
+#: host -> (time, IPs); a failed lookup is kept shorter than a good one.
+_dns_cache: dict[str, tuple[float, frozenset]] = {}
+_dns_inflight: set = set()
+_DNS_OK_TTL_S = 600.0
+_DNS_FAIL_TTL_S = 60.0
+
+
+def _resolve_nowait(host: str):
+    """The IPv4 addresses of `host` if known — else None, and a lookup is
+    started in the background (one per name at a time).  An IP is itself."""
+    host = (host or "").strip()
+    if not host:
+        return frozenset()
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):
+        return frozenset([host])
+    now = time.monotonic()
+    with _state_lock:
+        hit = _dns_cache.get(host)
+        if hit is not None and now - hit[0] < (_DNS_OK_TTL_S if hit[1] else _DNS_FAIL_TTL_S):
+            return hit[1]
+        if host in _dns_inflight:
+            return hit[1] if hit is not None else None
+        _dns_inflight.add(host)
+
+    def lookup():
+        import socket
+        try:
+            ips = frozenset(info[4][0] for info in socket.getaddrinfo(
+                host, None, socket.AF_INET, socket.SOCK_STREAM))
+        except Exception:
+            ips = frozenset()
+        with _state_lock:
+            _dns_cache[host] = (time.monotonic(), ips)
+            _dns_inflight.discard(host)
+
+    threading.Thread(target=lookup, name="vpn-dns", daemon=True).start()
+    with _state_lock:                       # an answer already in
+        done = _dns_cache.get(host)
+        if host not in _dns_inflight and done is not None:
+            return done[1]
+    return hit[1] if hit is not None else None
+
+
+def dns_pending() -> bool:
+    """Is a lookup for a status still running?  (Worth asking again soon.)"""
+    with _state_lock:
+        return bool(_dns_inflight)
+
+
+def _host_of(entry: str) -> str:
+    entry = entry.strip()
+    return entry.rsplit(":", 1)[0] if entry.count(":") == 1 else entry
+
+
+#: (time read, FortiClient's tunnels) — its configuration changes rarely;
+#: 60 s keeps the 2-5 s polling off the registry.
+_forti_registry_cache: tuple[float, list] = (0.0, [])
 _FORTI_TUNNEL_IP_TTL_S = 60.0
 
 
-def _forti_tunnel_server_ips(tunnel_name: str) -> set:
-    """Every IP of the server FortiClient has configured for `tunnel_name`
-    (HKLM Sslvpn\\Tunnels\\<name>\\Server — one host, or several separated
-    by ';' or ','), or an empty set."""
-    if not tunnel_name:
-        return set()
+def _forti_registry_tunnels() -> list:
+    global _forti_registry_cache
     now = time.monotonic()
     with _state_lock:
-        hit = _forti_tunnel_ip_cache.get(tunnel_name)
-    if hit is not None and now - hit[0] < _FORTI_TUNNEL_IP_TTL_S:
-        return hit[1]
-    import socket
-    ips = set()
-    for t in get_forti_tunnels_from_registry():
-        if t.get("name") != tunnel_name:
-            continue
-        for host in re.split(r"[;,]", t.get("server") or ""):
-            host = host.strip().rsplit(":", 1)[0] if host.count(":") == 1 else host.strip()
-            if not host:
-                continue
-            try:
-                ips.update(info[4][0] for info in socket.getaddrinfo(
-                    host, None, socket.AF_INET, socket.SOCK_STREAM))
-            except Exception:
-                pass
+        read_at, tunnels = _forti_registry_cache
+    if tunnels and now - read_at < _FORTI_TUNNEL_IP_TTL_S:
+        return tunnels
+    tunnels = get_forti_tunnels_from_registry()
     with _state_lock:
-        _forti_tunnel_ip_cache[tunnel_name] = (now, ips)
+        _forti_registry_cache = (now, tunnels)
+    return tunnels
+
+
+def _forti_tunnel_hosts(tunnel_name: str) -> list:
+    """The host(s) FortiClient has configured for `tunnel_name` (HKLM
+    Sslvpn\\Tunnels\\<name>\\Server — one, or several separated by ';' or
+    ',')."""
+    hosts = []
+    for t in _forti_registry_tunnels():
+        if tunnel_name and t.get("name") == tunnel_name:
+            hosts += [h for h in (_host_of(x) for x in
+                                  re.split(r"[;,]", t.get("server") or "")) if h]
+    return hosts
+
+
+def _forti_tunnel_server_ips(tunnel_name: str) -> set:
+    """Every IP known so far of the server FortiClient has configured for
+    `tunnel_name`, or an empty set (names still being looked up add theirs
+    on a later check)."""
+    ips = set()
+    for host in _forti_tunnel_hosts(tunnel_name):
+        ips.update(_resolve_nowait(host) or ())
     return ips
+
+
+def prefetch_forti_dns() -> None:
+    """Start the lookups of every FortiClient tunnel's server now, so the
+    first status check already has them.  Never blocks, never raises."""
+    try:
+        for t in _forti_registry_tunnels():
+            for host in _forti_tunnel_hosts(t.get("name") or ""):
+                _resolve_nowait(host)
+    except Exception:
+        pass
+
+
+#: process name -> (time, IP) — one netstat per status pass instead of one
+#: per profile (~0.1 s each).
+_connected_ip_cache: dict[str, tuple[float, object]] = {}
+_CONNECTED_IP_TTL_S = 2.0
+
+
+def _connected_server_ip_cached(process_name: str):
+    now = time.monotonic()
+    with _state_lock:
+        hit = _connected_ip_cache.get(process_name)
+    if hit is not None and now - hit[0] < _CONNECTED_IP_TTL_S:
+        return hit[1]
+    ip = _get_vpn_connected_server_ip(process_name)
+    with _state_lock:
+        _connected_ip_cache[process_name] = (now, ip)
+    return ip
 
 
 def unpinned_tunnel_up(provider: str, profile_name: str = "") -> bool:
@@ -562,11 +653,11 @@ def unpinned_tunnel_up(provider: str, profile_name: str = "") -> bool:
     if provider == "FortiClient":
         if _last_connected.get("FortiClient"):
             return False                   # HospitalHub knows whose it is
-        ip = _get_vpn_connected_server_ip("FortiSSLVPNdaemon.exe")
+        ip = _connected_server_ip_cached("FortiSSLVPNdaemon.exe")
         if not (ip or _is_forti_tunnel_active()):
             return False
         if ip:
-            for t in get_forti_tunnels_from_registry():
+            for t in _forti_registry_tunnels():
                 name = t.get("name") or ""
                 if name != profile_name and ip in _forti_tunnel_server_ips(name):
                     return False           # FortiClient's own tunnel of another
@@ -596,7 +687,11 @@ def _forti_unrecorded_tunnel_is(profile_name: str, server: str,
     if not connected_ip:
         return False
     if server:
-        return _resolve_server(server.split(":")[0]) == connected_ip
+        ips = _resolve_nowait(_host_of(server))
+        if ips:                      # known: the profile's server decides
+            return connected_ip in ips
+        # still being looked up, or a name that does not resolve: fall back
+        # to the server FortiClient has for the tunnel
     return connected_ip in _forti_tunnel_server_ips(profile_name)
 
 def _servers_match(a: str, b: str) -> bool:
@@ -3710,14 +3805,14 @@ def _get_status_impl(provider: str, app_path: str = "",
             # profile's server, or the server FortiClient has for its tunnel).
             # Without that we can't verify → safer to show Disconnected than
             # to light up every profile row during disconnect grace window.
-            connected_ip = _get_vpn_connected_server_ip("FortiSSLVPNdaemon.exe")
+            connected_ip = _connected_server_ip_cached("FortiSSLVPNdaemon.exe")
             if not _forti_unrecorded_tunnel_is(profile_name, server, connected_ip):
                 return "Disconnected"
             return "Connected"
 
         # Secondary: FortiSSLVPNdaemon.exe ESTABLISHED connection = tunnel up
         # (EMS/ZTNA editions may not create a named adapter in ipconfig)
-        connected_ip = _get_vpn_connected_server_ip("FortiSSLVPNdaemon.exe")
+        connected_ip = _connected_server_ip_cached("FortiSSLVPNdaemon.exe")
         if connected_ip:
             last = _last_connected.get("FortiClient", "")
             if last:

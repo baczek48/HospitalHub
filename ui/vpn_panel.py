@@ -988,6 +988,11 @@ class VpnPanel(QWidget):
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_status)
         self._status_timer.start(5000)
+        # The first statuses at once, not after the first 5 s tick, with the
+        # VPN servers' names already being looked up (2026-10-21, owner: "it
+        # takes ~10 s before HH shows the statuses").
+        vpn_connect.prefetch_forti_dns()
+        QTimer.singleShot(0, self._poll_status)
 
     def cleanup(self):
         """Stop timers and workers — call before discarding this panel."""
@@ -1615,6 +1620,10 @@ class VpnPanel(QWidget):
         return controller is not None and bool(getattr(controller, "active", False))
 
     def _apply_status_results(self, results: dict):
+        # A server name still being looked up: ask again soon rather than at
+        # the next 5 s tick — a tunnel up before the start shows sooner.
+        if vpn_connect.dns_pending():
+            QTimer.singleShot(1000, self._poll_status)
         for idx, status in results.items():
             # Pausing the repeating timer is not enough: a poll scheduled by
             # another card (QTimer.singleShot after its connect) or one already

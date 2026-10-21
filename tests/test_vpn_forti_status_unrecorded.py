@@ -56,9 +56,23 @@ def forti(monkeypatch):
     monkeypatch.setattr(vc, "get_forti_tunnels_from_registry", registry)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(vc, "_last_connected", {})
-    monkeypatch.setattr(vc, "_forti_tunnel_ip_cache", {})
     monkeypatch.setattr(vc, "_server_ip_cache", {})
+    monkeypatch.setattr(vc, "_dns_cache", {})
+    monkeypatch.setattr(vc, "_dns_inflight", set())
+    monkeypatch.setattr(vc, "_forti_registry_cache", (0.0, []))
+    monkeypatch.setattr(vc, "_connected_ip_cache", {})
+    monkeypatch.setattr(vc, "_CONNECTED_IP_TTL_S", 0.0)
+    # The lookups run in a background thread; here they finish at once.
+    monkeypatch.setattr(vc.threading, "Thread", ImmediateThread)
     return state
+
+
+class ImmediateThread:
+    def __init__(self, target=None, name=None, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
 
 
 def status(profile, server=""):
@@ -191,3 +205,57 @@ def test_the_status_worker_passes_sole_per_provider(monkeypatch):
                               ("Stormshield", "Lasowo"))]
     vp.StatusWorker(profiles).run()
     assert seen == {"Betanin": False, "1SZP": False, "Lasowo": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-10-21: a status check never waits for DNS
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_slow_lookup_does_not_hold_the_status(monkeypatch):
+    """A lookup that has not answered yet: the status is given at once
+    (not yet the tunnel's), and the next check, after the answer, is."""
+    import threading
+    monkeypatch.setattr(vc, "_dns_cache", {})
+    monkeypatch.setattr(vc, "_dns_inflight", set())
+    monkeypatch.setattr(vc, "_forti_registry_cache", (0.0, []))
+    monkeypatch.setattr(vc, "_connected_ip_cache", {})
+    monkeypatch.setattr(vc, "_last_connected", {})
+    monkeypatch.setattr(vc, "_is_fortivpn_cli_supported", lambda *a: False)
+    monkeypatch.setattr(vc, "_is_forti_tunnel_active", lambda: True)
+    monkeypatch.setattr(vc, "_get_vpn_connected_server_ip", lambda n: "91.0.0.10")
+    monkeypatch.setattr(vc, "get_forti_tunnels_from_registry", lambda: [
+        {"name": "1SZP", "server": "vpn2.szpital-x.example", "port": "4433"}])
+    release = threading.Event()
+
+    def slow_dns(host, *a, **k):
+        release.wait(5)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("91.0.0.10", 0))]
+    monkeypatch.setattr(socket, "getaddrinfo", slow_dns)
+
+    import time
+    started = time.monotonic()
+    assert status("1SZP") == "Disconnected"
+    assert time.monotonic() - started < 1.0, "status nie czeka na DNS"
+    assert vc.dns_pending()
+    release.set()
+    end = time.monotonic() + 3
+    while vc.dns_pending() and time.monotonic() < end:
+        time.sleep(0.01)
+    assert status("1SZP") == "Connected"
+
+
+def test_an_ip_needs_no_lookup(monkeypatch):
+    monkeypatch.setattr(vc, "_dns_cache", {})
+    monkeypatch.setattr(vc, "_dns_inflight", set())
+    assert vc._resolve_nowait("198.51.100.25") == frozenset(["198.51.100.25"])
+    assert not vc.dns_pending()
+
+
+def test_one_netstat_per_pass_not_per_profile(forti, monkeypatch):
+    calls = []
+    monkeypatch.setattr(vc, "_CONNECTED_IP_TTL_S", 2.0)
+    monkeypatch.setattr(vc, "_get_vpn_connected_server_ip",
+                        lambda n: calls.append(n) or "198.51.100.25")
+    for name in ("Betanin", "1SZP", "DKA", "WIA", "ZLA"):
+        status(name)
+    assert len(calls) == 1
