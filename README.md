@@ -1,129 +1,91 @@
-# HospitalHub
+# HospitalHub 2
 
-> © 2026 Sebastian Bąk. Wszelkie prawa zastrzeżone.
+Narzędzie do zarządzania infrastrukturą IT szpitali. Dane połączeń, poświadczenia i notatki trzyma w zaszyfrowanym vaulcie. Zamiast rozrzuconych plików i karteczek masz jedno okno, z którego łączysz się przez SSH, SFTP, RDP i VPN.
 
-Narzędzie do zarządzania infrastrukturą IT szpitali. Przechowuje dane połączeń, poświadczenia i notatki w zaszyfrowanym vaulcie — jedno okno zamiast rozrzuconych plików i karteczek.
+**Pobierz:** [najnowszy instalator](https://github.com/baczek48/HospitalHub/releases/latest) (Windows 10/11, x64). Instalator aktualizuje HospitalHub 1.x w miejscu: ten sam wpis w „Aplikacjach”, ten sam katalog i skróty. Vaulty i ustawienia zostają nietknięte.
 
 ---
 
 ## Funkcje
 
 ### Zaszyfrowany vault
-- Szyfrowanie **AES-256-GCM** + wyprowadzanie klucza **Argon2id** (64 MB RAM, 3 iteracje)
-- Atomiczny zapis — awaria w trakcie zapisu nie uszkodzi pliku
-- Hasło główne nigdy nie jest przechowywane — weryfikowane przy każdym otwarciu
-- Plik `.vault` można bezpiecznie przesłać e-mailem — jest w całości zaszyfrowany
+- **AES-256-GCM**, klucz wyprowadzany z hasła głównego przez **Argon2id** (64 MB, 3 iteracje).
+- Zapis atomowy: awaria w trakcie zapisu nie uszkodzi pliku. Obok vaulta zostaje kopia poprzedniej wersji (`.vault.bak`).
+- Hasło główne nie jest nigdzie zapisywane.
+- Zmiany zapisujesz ręcznie (`Ctrl+S`). Pasek tytułu pokazuje `[niezapisane]`.
 
-### Maszyny / Hosty
-- Połączenia **SSH** z wbudowanym terminalem i przeglądarką plików **SFTP**
-- Połączenia **RDP** z automatycznym wstrzykiwaniem poświadczeń (ctypes CredWriteW, czyszczone po 30 s)
-- **Mapowanie dysków RDP** — wybór lokalnych dysków udostępnianych w sesji
-- Wiele zestawów login/hasło na maszynę
-- Przeciąganie wierszy, konfigurowalny drag & drop
-- **Szybkie połączenie SSH** — przycisk ⇆ w nagłówku, połącz się z dowolnym hostem bez dodawania do vault
+### Szpitale, maszyny, bazy danych
+- Struktura: szpital → maszyny (SSH/RDP) → bazy danych → notatki o środowisku.
+- Kilka zestawów login/hasło na maszynę i na bazę.
+- Kliknięcie komórki kopiuje jej zawartość. Hasło w schowku jest wykluczone z historii schowka Windows (Win+V) i z synchronizacji w chmurze, a po 15 s znika.
+- Bazy danych: Oracle, MSSQL i inne. Przycisk uruchamia **SQL Developer** i kopiuje hasło.
 
-### Bazy danych
-- Obsługa **Oracle**, **MSSQL** i innych typów
-- Wiele zestawów poświadczeń na bazę
-- Przycisk ⛃ w nagłówku panelu uruchamia **SQL Developer** i kopiuje hasło do schowka
-- Kopiowanie hasła jednym kliknięciem (auto-wyczyszczenie schowka po 15 s)
+### SSH i terminal
+- Wbudowany terminal z wieloma kartami, historią do 250 000 linii, kolorowaniem logów i obsługą X11.
+- Klucze hostów zapamiętywane przy pierwszym połączeniu (**TOFU**). Zmiana klucza hosta daje wyraźne ostrzeżenie.
+- Wysyłanie tej samej komendy do kilku kart naraz.
+- Szybkie połączenie z hostem spoza vaulta.
 
-### Terminal SSH
-- Pełny emulator terminala (VT220/pyte), historia **50 000 linii**
-- Rozszerzone kolorowanie logów:
-  - Błędy, ostrzeżenia, OK/ACCEPT — czerwony / żółty / zielony
-  - Adresy **IPv4** (z portem), **IPv6**, **MAC** — cyjan
-  - Metody HTTP (GET, POST...) — żółte; kody **2xx/4xx/5xx** — zielony/żółty/czerwony
-  - Adresy e-mail — zielone; daty — szare
-  - Słowa odmowy (denied, rejected, down...) — czerwone
-  - Słowa pozytywne (enabled, active, true...) — zielone
-  - Detekcja promptów powłoki
-- Natychmiastowa reakcja na **Ctrl+C** (drain bufora PTY, brak zamrożenia)
-- Wiele zakładek sesji, automatyczny resize PTY
-- Panel sesji SSH z selektorem szpitali i maszyn
+### SFTP
+- Przeglądarka plików z edycją w zewnętrznym edytorze. Każdy zapis w edytorze trafia z powrotem na serwer.
+- **Bezpieczny zapis:** zmieniony plik idzie na serwer najpierw jako plik tymczasowy, a potem w całości podmienia oryginał. Zerwane połączenie nie zostawi uciętego pliku. Gdy serwer nie pozwala na taką podmianę (plik innego właściciela, katalog bez prawa zapisu), zapis idzie bezpośrednio, z informacją w pasku stanu.
+- **Konflikty:** gdy plik zmienił się na serwerze od chwili otwarcia, program pyta, zamiast go nadpisywać. Możesz nadpisać, porównać z wersją z serwera albo nie wgrywać.
+- Niewysłane zmiany nie giną: przy zamknięciu trafiają do `Dokumenty\HospitalHub - niewysłane zmiany`.
+- Każdy wysłany blok potwierdza serwer, więc pełny dysk czy odrzucony zapis dają błąd od razu.
 
-### Przeglądarka SFTP
-- Ikony typów plików (foldery, skrypty, logi, archiwa, obrazy, PDF, konfiguracje)
-- Edytowalna belka ścieżki — kliknij i wpisz ręcznie
-- Historia nawigacji
-- Sortowanie z folderami na górze
-- Ochrona przed path traversal
-- Pliki tymczasowe czyszczone przy zamknięciu aplikacji
+### RDP
+- Połączenia przez podpisany plik `.rdp`. Poświadczenia trafiają do Menedżera poświadczeń Windows (nigdy do argumentów procesu) i są usuwane po 30 s oraz przy zamknięciu programu.
+- Mapowanie lokalnych dysków w sesji.
+
+### VPN
+- **FortiClient, Stormshield, Barracuda:** uruchomienie klienta, wybór profilu z weryfikacją, uzupełnienie loginu i hasła oraz obsługa 2FA.
+- **GlobalProtect, SonicWall NetExtender:** uruchomienie klienta i status.
+- **Windows VPN:** notatka i status.
+- Status połączenia na liście szpitali, także dla tunelu połączonego przed uruchomieniem HospitalHub.
+
+### Asystent w terminalu (opcjonalny)
+- Panel pomocy obok terminala, osobny dla każdej karty. Asystent tylko czyta zawartość terminala i niczego nie wpisuje.
+- Przed wysłaniem treści numery **PESEL** są maskowane, także w segmentach HL7 `PID`.
+- Wymaga zainstalowanego Claude Code. Bez niego reszta programu działa normalnie.
 
 ### Tryb admina
-- Oddzielne hasło admina hashowane **Argon2id**
-- Ukrywanie wrażliwych maszyn, baz danych i poświadczeń (fioletowe oznaczenie + 🔒)
-- Automatyczna blokada po **5 minutach** nieaktywności
-- Ustawianie hasła: **Plik → Ustaw / zmień hasło admina**
+- Osobne hasło admina (Argon2id) ukrywa wybrane maszyny, bazy i poświadczenia.
 
-### Bezpieczeństwo
-- Polityka **TOFU** dla kluczy SSH — ostrzeżenie przy zmianie klucza hosta (możliwy MitM)
-- Sanityzacja błędów — hasła nigdy nie trafiają do komunikatów wyjątków
-- Ochrona przed **path traversal** przy pobieraniu plików przez SFTP
-- Walidacja adresów IP i portów przed uruchomieniem RDP
-- RDP: poświadczenia przez **ctypes CredWriteW** — hasło nie pojawia się w argumentach procesu
-- Działa w pełni **offline** — brak zewnętrznych połączeń
+### Diagnostyka
+- Dziennik zdarzeń i log VPN (włączany ręcznie). Eksport diagnostyki przed zapisaniem sprawdza, czy nie zawiera haseł ani tokenów.
 
 ---
 
-## Obsługa
+## Granice zabezpieczeń
 
-### Pierwsze uruchomienie
-Przy starcie aplikacja pyta o vault:
-- **Utwórz nowy vault** → wybierz lokalizację i ustaw hasło główne (min. 8 znaków)
-- **Otwórz istniejący vault** → wskaż plik `.vault` i podaj hasło
-
-Ścieżka do pliku jest zapamiętywana — przy kolejnym uruchomieniu od razu pojawia się pole hasła.
-
-### Struktura danych
-```
-Szpital
-  ├─ Maszyny / Hosty  (IP, nazwa, opis, poświadczenia, SSH/RDP)
-  ├─ Bazy danych      (host, port, nazwa, typ, poświadczenia, notatka)
-  └─ Notatki o środowisku
-```
-
-### Zapis
-Zmiany **nie są zapisywane automatycznie**. Pasek tytułowy pokazuje `[niezapisane]`.
-
-| Akcja | Skrót |
-|---|---|
-| Zapisz | `Ctrl+S` |
-| Zapisz jako / kopia | `Ctrl+Shift+S` |
-
-### Kopiowanie danych
-Kliknięcie dowolnej komórki tabeli kopiuje jej zawartość do schowka.
-Przycisk z nazwą użytkownika (kolumna Akcje) kopiuje **hasło** — tooltip wskazuje czyje.
-
-### Szerokość kolumn
-Przeciągnij krawędź nagłówka aby zmienić szerokość.
-Prawy przycisk myszy na nagłówku → **Zapisz szerokości kolumn** — układ zapamiętany na stałe.
+- **Tryb admina chroni tylko w interfejsie.** Poświadczenia admina leżą w tym samym pliku vaulta, zaszyfrowanym hasłem głównym. Kto zna hasło główne, może je odczytać poza aplikacją.
+- Vault i tryb admina nie blokują się same po bezczynności.
+- Asystent w terminalu wysyła zawartość terminala do zewnętrznej usługi AI. Maskowane są tylko numery PESEL, więc nie używaj go przy ekranach z innymi danymi pacjentów. Poza asystentem i połączeniami, które sam uruchamiasz, program nie łączy się z niczym.
 
 ---
 
 ## Uruchomienie ze źródeł
 
-```bash
-git clone https://github.com/baczek48/HospitalHub.git
-cd HospitalHub
-pip install -r requirements.txt
-python main.py
-```
-
-Wymagania: **Python 3.11+**, Windows 10/11
-
-### Budowanie exe
+Wymagania: Windows 10/11, **Python 3.13**.
 
 ```bat
-build_exe.bat
+git clone -b v2 https://github.com/baczek48/HospitalHub.git
+cd HospitalHub
+py -3.13 -m pip install -r requirements.txt
+py -3.13 main.py
 ```
 
-lub ręcznie:
-```bash
-pip install pyinstaller
-pyinstaller HospitalHub.spec
-# wynik: dist/HospitalHub.exe
+Testy:
+```bat
+py -3.13 -m pytest tests -q
 ```
+
+Build (PyInstaller, a jeśli jest zainstalowany Inno Setup 6, także instalator):
+```bat
+build_v2.bat
+```
+
+Dane programu: `%APPDATA%\HospitalHubV2\` (konfiguracja, dziennik awarii), klucze hostów SSH w `%USERPROFILE%\.hospitalhub_v2_known_hosts`.
 
 ---
 
@@ -132,6 +94,12 @@ pyinstaller HospitalHub.spec
 | Warstwa | Biblioteka |
 |---|---|
 | UI | PyQt6 |
-| Terminal emulator | pyte (VT220) |
+| Terminal | pyte |
 | SSH / SFTP | paramiko |
 | Szyfrowanie | cryptography (AES-GCM), argon2-cffi |
+| Automatyzacja klientów VPN | pywin32, comtypes (UI Automation) |
+| Instalator | PyInstaller, Inno Setup |
+
+---
+
+© 2026 Sebastian Bąk. Wszelkie prawa zastrzeżone.
