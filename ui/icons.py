@@ -97,6 +97,9 @@ _SHAPES: dict[str, str] = {
     "stop": '<rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="{c}"'
             ' stroke-width="1"/>',
     "chat": '<path d="M4 5h16v11H9l-5 4Z"/><path d="M8 9.5h8M8 12.5h5"/>',
+    "help": '<circle cx="12" cy="12" r="9.5"/>'
+            '<path d="M9.3 9.4a2.8 2.8 0 1 1 3.9 2.6c-.8.4-1.2 1-1.2 1.8v.6"/>'
+            '<circle cx="12" cy="17.2" r="0.6" fill="{c}"/>',
     "shield": '<path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6Z"/>'
               '<rect x="9" y="11" width="6" height="5" rx="1"/>'
               '<path d="M10.5 11V9.5a1.5 1.5 0 0 1 3 0V11"/>',

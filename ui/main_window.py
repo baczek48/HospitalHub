@@ -13,15 +13,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
 from vault_io import discard_backup, write_vault_atomic
-from config import (save_last_vault,
+from config import (save_last_vault, load_vault_list,
                     load_ssh_start_maximized, save_ssh_start_maximized,
                     load_hospital_sort_order, save_hospital_sort_order,
-                    load_theme, save_theme, save_personal_vpn_vault)
+                    load_theme, save_theme, save_personal_vpn_vault,
+                    load_personal_vpn_vault)
 from ui.detail_panel import DetailPanel
 from ui.vpn_panel import VpnPanel
 from ui.dialogs import (
     HospitalDialog, ChangePasswordDialog,
-    AdminSetupDialog, AdminUnlockDialog,
+    AdminSetupDialog, AdminUnlockDialog, ExportHospitalDialog,
 )
 from ui.utils import EmptyHint, confirm
 from ui import theme
@@ -253,6 +254,11 @@ class MainWindow(QMainWindow):
         act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         act_save_as.triggered.connect(self._save_as)
 
+        if self._vault_type != "vpn":
+            act_export = file_menu.addAction("Eksportuj szpital do vaulta...")
+            act_export.setToolTip("Bieżący szpital do osobnego pliku vault, np. dla HH u klienta")
+            act_export.triggered.connect(lambda: self._export_hospital())
+
         file_menu.addSeparator()
 
         act_open_vault = file_menu.addAction("Otwórz vault...")
@@ -296,6 +302,14 @@ class MainWindow(QMainWindow):
             theme_group.addAction(act)
         theme_group.triggered.connect(lambda a: self._choose_theme(a.data()))
 
+        if self._vault_type == "vpn":
+            # Back into the main window, after "Odepnij" (ui/vpn_dock.py).
+            from ui import vpn_dock
+            act_pin = view_menu.addAction("Przypnij do okna głównego")
+            act_pin.triggered.connect(lambda: vpn_dock.redock(self))
+            view_menu.aboutToShow.connect(lambda: act_pin.setEnabled(
+                vpn_dock.dock_of(self) is None and vpn_dock.find_host() is not None))
+
         if self._vault_type == "vpn" and self._vpn_panel:
             sort_menu = menu.addMenu("Sortuj")
             act_sort_name = sort_menu.addAction("Wg nazwy (A-Z)")
@@ -322,6 +336,9 @@ class MainWindow(QMainWindow):
 
     def _close_to_tray(self):
         """Hide window to system tray."""
+        from ui import vpn_dock
+        if vpn_dock.hide_pane(self):       # the VPN pane of the main window
+            return
         self.hide()
 
     def _force_close(self):
@@ -499,6 +516,7 @@ class MainWindow(QMainWindow):
         )
         from ui.icons import icon
         act_rename = menu.addAction(icon("pencil", "#c9d1d9"), "Zmień nazwę")
+        act_export = menu.addAction("Eksportuj do vaulta…")
         menu.addSeparator()
         act_delete = menu.addAction(icon("trash", "#f85149"), "Usuń szpital")
         act_delete.setToolTip(f"Usuwa '{hospital.name}' wraz z maszynami i bazami")
@@ -506,6 +524,8 @@ class MainWindow(QMainWindow):
         chosen = menu.exec(self._hospital_list.viewport().mapToGlobal(pos))
         if chosen is act_rename:
             self._detail_panel.rename_hospital()
+        elif chosen is act_export:
+            self._export_hospital(hospital)
         elif chosen is act_delete:
             self._detail_panel.delete_hospital()
 
@@ -596,6 +616,62 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Błąd zapisu", f"Nie można zapisać pliku:\n{e}")
             return False
 
+    def _export_hospital(self, hospital=None):
+        """One hospital to its own vault file, under its own password —
+        e.g. for HH on a client's remote machine (2026-10-26)."""
+        import vault_export
+        if hospital is None:
+            hospital = self._detail_panel.current_hospital if self._detail_panel else None
+        if hospital is None:
+            QMessageBox.information(self, "Eksport", "Najpierw wybierz szpital z listy.")
+            return
+        dlg = ExportHospitalDialog(self, hospital.name,
+                                   vault_export.admin_item_count(hospital),
+                                   self._admin_unlocked)
+        if not dlg.exec():
+            return
+        password, admin_password = dlg.get_result()
+        start_dir = os.path.dirname(self._vault_path) if self._vault_path else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Eksportuj szpital do vaulta",
+            os.path.join(start_dir, vault_export.export_file_name(hospital.name)),
+            "Vault files (*.vault);;Wszystkie pliki (*)",
+        )
+        if not path:
+            return
+        if not path.endswith(".vault"):
+            path += ".vault"
+        # Never over a vault of this machine: the export is one hospital under
+        # another password, and it would replace the whole vault.
+        own = {os.path.normcase(os.path.abspath(p)) for p in
+               [self._vault_path, load_personal_vpn_vault()]
+               + [v.get("path", "") for v in load_vault_list()] if p}
+        if os.path.normcase(os.path.abspath(path)) in own:
+            QMessageBox.critical(
+                self, "Eksport",
+                "Ten plik to jeden z Twoich vaultów — eksport by go zastąpił.\n"
+                "Wybierz inną nazwę pliku.")
+            return
+        try:
+            if admin_password:
+                admin_hash, admin_salt = hash_admin_password(admin_password)
+                data = vault_export.export_hospital_data(
+                    hospital, include_admin=True,
+                    admin_hash=admin_hash, admin_salt=admin_salt)
+            else:
+                data = vault_export.export_hospital_data(hospital)
+            content = encrypt_off_ui_thread(data, password)
+            write_vault_atomic(path, content, backup=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd eksportu", f"Nie można zapisać pliku:\n{e}")
+            return
+        left_out = 0 if admin_password else vault_export.admin_item_count(hospital)
+        extra = (f"\n\n{left_out} poz. admina zostało poza plikiem." if left_out else "")
+        QMessageBox.information(
+            self, "Eksport",
+            f"Szpital '{hospital.name}' zapisany do:\n{path}{extra}\n\n"
+            "Otwórz go w HH jako vault typu Ogólny, hasłem pliku.")
+
     # ------------------------------------------------------------------ #
     # Password change                                                      #
     # ------------------------------------------------------------------ #
@@ -644,6 +720,26 @@ class MainWindow(QMainWindow):
             self._lock_admin()
         else:
             self._unlock_admin()
+
+    def nativeEvent(self, event_type, message):
+        # The VPN window let go after a drag by its title, with the cursor at
+        # the edge of the main window: it goes back in as the pane there
+        # (ui/vpn_dock.py).  A resize by the frame does not count.
+        if self._vault_type == "vpn" and event_type == b"windows_generic_MSG":
+            from ctypes import wintypes
+            m = wintypes.MSG.from_address(int(message)).message
+            if m == 0x0231:                    # WM_ENTERSIZEMOVE
+                self._dragged = False
+            elif m == 0x0216:                  # WM_MOVING
+                self._dragged = True
+                from ui import vpn_dock
+                vpn_dock.drag_hover(self)      # light up where it would go
+            elif m == 0x0232:                  # WM_EXITSIZEMOVE
+                from ui import vpn_dock
+                vpn_dock.drag_end()
+                if vars(self).pop("_dragged", False):
+                    QTimer.singleShot(0, lambda: vpn_dock.redock_if_dropped(self))
+        return False, 0
 
     def _choose_theme(self, tid: str):
         if tid == load_theme():

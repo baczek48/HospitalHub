@@ -360,6 +360,8 @@ class AppManager:
         self._trays: dict[MainWindow, QSystemTrayIcon] = {}
         self._default_icon = make_icon()
         self._vpn_icon = make_vpn_icon()
+        from ui import vpn_dock
+        vpn_dock.set_host_finder(self._dock_host, self._vpn_icon)
 
         # Don't quit when all windows are hidden
         app.setQuitOnLastWindowClosed(False)
@@ -407,6 +409,14 @@ class AppManager:
             tray.hide()
         if window in self._windows:
             self._windows.remove(window)
+        from ui import vpn_dock
+        # A VPN pane goes out of a main window that goes away — a window of
+        # its own again — and a closing VPN vault leaves its dock.
+        for vpn in vpn_dock.docked_in(window):
+            vpn_dock.undock(vpn, self.icon_for_type("vpn"))
+            if self._windows:
+                self._show_window(vpn)
+        vpn_dock.undock(window)
         if not self._windows:
             self._hide_all_windows()
             self._close_all_ssh_dialogs()
@@ -474,6 +484,13 @@ class AppManager:
         tray.setContextMenu(menu)
 
     def _show_window(self, window: MainWindow):
+        from ui import vpn_dock
+        if vpn_dock.show_pane(window):
+            return
+        # Minimised, show() alone left it on the taskbar only (owner,
+        # 2026-10-26); maximised stays maximised.
+        if window.isMinimized():
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
         window.show()
         window.raise_()
         window.activateWindow()
@@ -489,7 +506,16 @@ class AppManager:
 
     def _on_tray_activated(self, reason, window: MainWindow):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if window.isVisible():
+            from ui import vpn_dock
+            if vpn_dock.dock_of(window) is not None:
+                if vpn_dock.pane_visible(window):
+                    vpn_dock.hide_pane(window)
+                else:
+                    vpn_dock.show_pane(window)
+                return
+            # Minimised counts as "not on the screen": the click brings it up
+            # instead of hiding it from the taskbar.
+            if window.isVisible() and not window.isMinimized():
                 window.hide()
             else:
                 self._show_window(window)
@@ -593,18 +619,22 @@ class AppManager:
         window.setWindowIcon(self.icon_for_type(vault_type))
         self.add_window(window)
         window.show()
-        # After the frame exists: its title bar counts in the layout.
-        QTimer.singleShot(0, self._arrange_vault_pair)
+        self._dock_vpn()
 
-    def _arrange_vault_pair(self):
-        """The main vault and the VPN vault side by side (2026-10-26)."""
+    def _dock_host(self):
+        """The main window a VPN one docks in: the first open non-VPN one."""
+        return next((w for w in self._windows if w._vault_type != "vpn"), None)
+
+    def _dock_vpn(self):
+        """The VPN vault as a pane of the main one (2026-10-26, owner)."""
         main = next((w for w in self._windows if w._vault_type != "vpn"), None)
         vpn = next((w for w in self._windows if w._vault_type == "vpn"), None)
         if main is None or vpn is None:
             return
-        from ui.window_layout import arrange_pair
+        from ui import vpn_dock
         try:
-            arrange_pair(main, vpn)
+            vpn_dock.dock(main, vpn)
+            vpn_dock.show_pane(vpn)
         except RuntimeError:          # a window already deleted
             pass
 

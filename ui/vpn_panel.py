@@ -1048,7 +1048,25 @@ class VpnPanel(QWidget):
     # Window resize helper                                                 #
     # ------------------------------------------------------------------ #
 
+    def _docked_owner(self):
+        """The VPN vault window holding this panel when it is a pane of the
+        main window (ui/vpn_dock.py), else None."""
+        from ui import vpn_dock
+        parent = getattr(self, "parentWidget", None)
+        w = parent() if parent is not None else None
+        while w is not None:
+            if vpn_dock.dock_of(w) is not None:
+                return w
+            w = w.parentWidget()
+        return None
+
     def _resize_window(self, w: int, h: int):
+        owner = VpnPanel._docked_owner(self)
+        if owner is not None:
+            # A pane: only its width changes, never the main window.
+            from ui import vpn_dock
+            vpn_dock.resize_pane(owner, w)
+            return
         win = self.window()
         if win and win is not self:
             screen = win.screen()
@@ -1090,6 +1108,19 @@ class VpnPanel(QWidget):
         lbl_title.setFont(font)
         lbl_title.setStyleSheet("color: #c9d1d9;")
         top_bar.addWidget(lbl_title)
+        # "?" — which clients connect by themselves, which ones are only
+        # started (ui/vpn_help.py, 2026-10-26).
+        btn_help = QPushButton()
+        set_icon(btn_help, "help", "#8b949e", active="#58a6ff", size=16)
+        btn_help.setFixedSize(24, 24)
+        btn_help.setToolTip("Jak to działa: co HH łączy sam, co rozłączasz ręcznie, "
+                            "co tylko uruchamia")
+        btn_help.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0; }"
+            "QPushButton:hover { background: #21262d; border-radius: 12px; }"
+        )
+        btn_help.clicked.connect(self._show_help)
+        top_bar.addWidget(btn_help)
         top_bar.addStretch()
 
         btn_settings = QPushButton()
@@ -2052,6 +2083,21 @@ class VpnPanel(QWidget):
     # VPN Settings                                                         #
     # ------------------------------------------------------------------ #
 
+    def _show_help(self):
+        from ui.vpn_help import VpnHelpDialog
+        dlg = vars(self).get("_help_dlg")
+        try:
+            if dlg is not None and dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+                return
+        except RuntimeError:
+            pass
+        dlg = VpnHelpDialog(self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._help_dlg = dlg
+        dlg.show()
+
     def _open_vpn_settings(self):
         if self._refuse_while_connecting():
             return
@@ -2163,7 +2209,11 @@ class VpnPanel(QWidget):
         # Back on the list, the window returns to this size — it may stand
         # next to the main one (2026-10-26).
         win = self.window()
-        if win is not None and win is not self and "_list_size" not in vars(self):
+        owner = self._docked_owner()
+        if owner is not None and "_list_size" not in vars(self):
+            from ui import vpn_dock
+            self._list_size = (vpn_dock.dock_of(owner).width(), 0)
+        elif win is not None and win is not self and "_list_size" not in vars(self):
             self._list_size = (win.width(), win.height())
         self._resize_window(*_EDIT_SIZE)
         self._name_edit.setFocus()

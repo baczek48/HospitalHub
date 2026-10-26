@@ -819,3 +819,118 @@ class AdminUnlockDialog(FormStyled, QDialog):
 
     def get_password(self) -> str:
         return self._password
+
+
+class ExportHospitalDialog(FormStyled, QDialog):
+    """Passwords for one hospital exported to its own vault (2026-10-26).
+
+    The file opens under a password of its own.  Admin-only items go along
+    only when ticked — possible only with the admin mode unlocked — and then
+    the file gets an admin password of its own as well."""
+    def __init__(self, parent=None, hospital_name: str = "", admin_items: int = 0,
+                 admin_unlocked: bool = False):
+        super().__init__(parent)
+        self._result = None
+        self.setWindowTitle("Eksportuj szpital do vaulta")
+        self.setMinimumWidth(440)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+
+        info = QLabel(f"Szpital <b>{_html_escape(hospital_name)}</b> trafi do osobnego "
+                      "pliku vault — tylko on, bez reszty vaulta.<br>"
+                      "Plik otwiera się własnym hasłem (nie hasłem głównym).")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self._pass = QLineEdit()
+        self._pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pass.setPlaceholderText("Minimum 8 znaków")
+        form.addRow("Hasło pliku:", self._pass)
+        self._pass2 = QLineEdit()
+        self._pass2.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pass2.setPlaceholderText("Powtórz hasło")
+        form.addRow("Potwierdź:", self._pass2)
+        layout.addLayout(form)
+
+        self._admin_check = QCheckBox(f"Dołącz pozycje admina ({admin_items})")
+        self._admin_check.setChecked(False)
+        if admin_items == 0:
+            self._admin_check.setEnabled(False)
+            self._admin_check.setToolTip("Ten szpital nie ma pozycji admina.")
+        elif not admin_unlocked:
+            self._admin_check.setEnabled(False)
+            self._admin_check.setToolTip(
+                "Odblokuj tryb admina, żeby dołączyć pozycje admina.")
+        layout.addWidget(self._admin_check)
+
+        self._admin_box = QWidget()
+        admin_form = QFormLayout(self._admin_box)
+        admin_form.setContentsMargins(0, 0, 0, 0)
+        admin_form.setSpacing(8)
+        self._admin_pass = QLineEdit()
+        self._admin_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self._admin_pass.setPlaceholderText("Minimum 4 znaki")
+        admin_form.addRow("Hasło admina pliku:", self._admin_pass)
+        self._admin_pass2 = QLineEdit()
+        self._admin_pass2.setEchoMode(QLineEdit.EchoMode.Password)
+        self._admin_pass2.setPlaceholderText("Powtórz hasło admina")
+        admin_form.addRow("Potwierdź:", self._admin_pass2)
+        self._admin_box.setVisible(False)
+        layout.addWidget(self._admin_box)
+        self._admin_check.toggled.connect(self._on_admin_toggled)
+
+        if admin_items and not self._admin_check.isChecked():
+            hint = QLabel(f"Bez zaznaczenia {admin_items} poz. admina zostaje poza plikiem.")
+            hint.setStyleSheet("color: #8b949e;")
+            hint.setWordWrap(True)
+            layout.addWidget(hint)
+            self._admin_check.toggled.connect(lambda on: hint.setVisible(not on))
+
+        layout.addStretch()
+        btn_row = QHBoxLayout()
+        btn_cancel = QPushButton("Anuluj")
+        btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(btn_cancel)
+        btn_ok = QPushButton("Eksportuj…")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._accept)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+    def _on_admin_toggled(self, on: bool):
+        self._admin_box.setVisible(on)
+        self.adjustSize()
+
+    def _accept(self):
+        pw = self._pass.text()
+        if len(pw) < 8:
+            QMessageBox.warning(self, "Błąd", "Hasło pliku musi mieć minimum 8 znaków.")
+            return
+        if pw != self._pass2.text():
+            QMessageBox.warning(self, "Błąd", "Hasła pliku nie są identyczne.")
+            return
+        admin_pw = None
+        if self._admin_check.isChecked():
+            admin_pw = self._admin_pass.text()
+            if len(admin_pw) < 4:
+                QMessageBox.warning(self, "Błąd",
+                                    "Hasło admina musi mieć co najmniej 4 znaki.")
+                return
+            if admin_pw != self._admin_pass2.text():
+                QMessageBox.warning(self, "Błąd", "Hasła admina nie są identyczne.")
+                return
+        self._result = (pw, admin_pw)
+        self.accept()
+
+    def get_result(self):
+        """(file password, admin password or None) after accept."""
+        return self._result
+
+
+def _html_escape(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
