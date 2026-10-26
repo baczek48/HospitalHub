@@ -45,6 +45,11 @@ class Hospital:
     machines: List[Machine] = field(default_factory=list)
     databases: List[Database] = field(default_factory=list)
     notes: str = ""
+    # AMMS button in the hospital header (2026-10-26): the web AMMS of this
+    # hospital and the account the button signs in with.
+    amms_url: str = ""
+    amms_login: str = ""
+    amms_password: str = ""
 
 
 VPN_PROVIDERS_BUILTIN = [
@@ -85,6 +90,10 @@ class VpnProfile:
     app_path: str = ""          # custom path to VPN client executable
     profile_name: str = ""      # connection profile name inside VPN client
     requires_2fa: bool = False  # whether this profile needs OTP/SMS/email code
+    # AMMS button on the VPN card (2026-10-26), as in the hospital header.
+    amms_url: str = ""
+    amms_login: str = ""
+    amms_password: str = ""
 
 
 def vpn_to_dict(profiles: List[VpnProfile]) -> dict:
@@ -93,7 +102,9 @@ def vpn_to_dict(profiles: List[VpnProfile]) -> dict:
          "server": p.server, "port": p.port, "login": p.login,
          "password": p.password, "group": p.group, "domain": p.domain,
          "notes": p.notes, "app_path": p.app_path,
-         "profile_name": p.profile_name, "requires_2fa": p.requires_2fa}
+         "profile_name": p.profile_name, "requires_2fa": p.requires_2fa,
+         "amms_url": p.amms_url, "amms_login": p.amms_login,
+         "amms_password": p.amms_password}
         for p in profiles
     ]}
 
@@ -114,6 +125,9 @@ def vpn_from_dict(data: dict) -> List[VpnProfile]:
             app_path=d.get("app_path", ""),
             profile_name=d.get("profile_name", ""),
             requires_2fa=d.get("requires_2fa", False),
+            amms_url=d.get("amms_url", ""),
+            amms_login=d.get("amms_login", ""),
+            amms_password=d.get("amms_password", ""),
         )
         for d in data.get("vpn_profiles", [])
     ]
@@ -134,6 +148,9 @@ def _hospital_to_dict(h: Hospital) -> dict:
         "notes": h.notes,
         "machines": [_machine_to_dict(m) for m in h.machines],
         "databases": [_database_to_dict(d) for d in h.databases],
+        "amms_url": h.amms_url,
+        "amms_login": h.amms_login,
+        "amms_password": h.amms_password,
     }
 
 
@@ -180,6 +197,9 @@ def _hospital_from_dict(d: dict) -> Hospital:
         notes=d.get("notes", ""),
         machines=[_machine_from_dict(m) for m in d.get("machines", [])],
         databases=[_database_from_dict(db) for db in d.get("databases", [])],
+        amms_url=d.get("amms_url", ""),
+        amms_login=d.get("amms_login", ""),
+        amms_password=d.get("amms_password", ""),
     )
 
 

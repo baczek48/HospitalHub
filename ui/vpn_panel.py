@@ -1,4 +1,5 @@
 import locale
+import time
 from types import SimpleNamespace
 import os
 import sys
@@ -7,7 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QTextEdit, QScrollArea, QStackedWidget,
     QMessageBox, QFrame, QApplication, QFileDialog,
-    QCheckBox, QDialog, QDialogButtonBox,
+    QCheckBox, QDialog, QDialogButtonBox, QMenu,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QThread
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QPen
@@ -611,7 +612,7 @@ def _icons():
 
 
 # Compact list window size vs edit window size
-_LIST_SIZE = (420, 700)
+_LIST_SIZE = (420, 720)
 _EDIT_SIZE = (520, 560)
 
 
@@ -955,6 +956,16 @@ def _log_status_change(panel, idx: int, status: str) -> None:
         pass
 
 
+class _MutedLabel:
+    """Takes a status line's text and drops it (an AMMS note is showing)."""
+
+    def setText(self, text):
+        pass
+
+    def setStyleSheet(self, style):
+        pass
+
+
 class VpnPanel(QWidget):
     data_changed = pyqtSignal()
 
@@ -969,6 +980,9 @@ class VpnPanel(QWidget):
         self._toggle_btns = {}     # idx -> QPushButton
         self._card_states = {}     # idx -> "connected" | "disconnected" | "connecting"
         self._card_widgets = {}    # idx -> QFrame (for search filtering)
+        self._amms_btns = {}       # profile id -> AMMS button of its card
+        self._amms_workers = {}    # profile id -> AmmsWorker while it runs
+        self._amms_held = {}       # idx -> monotonic time the AMMS note stays until
         self._monitor_workers = {} # idx -> VpnMonitorWorker
         self._status_worker = None
         #: idx -> V2ConnectController.  Kept alive here for exactly as long as
@@ -1012,6 +1026,9 @@ class VpnPanel(QWidget):
         for w in self._monitor_workers.values():
             retire_thread(w, disconnect=(w.twofa_detected, w.finished))
         self._monitor_workers.clear()
+        for w in vars(self).get("_amms_workers", {}).values():
+            retire_thread(w, disconnect=(w.done, w.progress))
+        vars(self).get("_amms_workers", {}).clear()
 
     def get_profiles(self) -> list:
         return self._profiles
@@ -1024,7 +1041,8 @@ class VpnPanel(QWidget):
         """Passwords and logins of every profile: never written to the log."""
         if actionlog.is_enabled():
             actionlog.register_secrets(
-                v for p in self._profiles for v in (p.password, p.login))
+                v for p in self._profiles
+                for v in (p.password, p.login, p.amms_password))
 
     # ------------------------------------------------------------------ #
     # Window resize helper                                                 #
@@ -1371,6 +1389,8 @@ class VpnPanel(QWidget):
 
     def _rebuild_cards(self):
         self._status_labels.clear()
+        self._amms_btns.clear()
+        self._amms_held.clear()
         self._toggle_btns.clear()
         self._card_states.clear()
         self._card_widgets.clear()
@@ -1469,6 +1489,18 @@ class VpnPanel(QWidget):
             self._status_labels[idx] = status_lbl
 
         lay.addLayout(info, 1)
+
+        # AMMS (2026-10-26), left of Connect: left click opens AMMS and signs
+        # in; right click edits it or copies its password.
+        btn_amms = QPushButton("AMMS")
+        btn_amms.setFixedSize(44, 30)
+        btn_amms.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn_amms.customContextMenuRequested.connect(
+            lambda pos, prof=p, b=btn_amms: self._amms_menu(prof, b, pos))
+        btn_amms.clicked.connect(lambda _, prof=p: self._amms_clicked(prof))
+        self._amms_btns[p.id] = btn_amms
+        self._style_amms_btn(p)
+        lay.addWidget(btn_amms)
 
         # Toggle connect/disconnect button — single button that swaps icon.
         # Skipped for Windows VPN (no reliable headless connect path).
@@ -1586,6 +1618,131 @@ class VpnPanel(QWidget):
                 lbl.setStyleSheet("color: #3fb950; font-size: 10px; font-weight: bold; border: none;")
                 QTimer.singleShot(1500, lambda: (lbl.setText(old_text), lbl.setStyleSheet(old_style)))
 
+    # ------------------------------------------------------------------ #
+    # AMMS                                                                 #
+    # ------------------------------------------------------------------ #
+
+    _AMMS_STYLE = (
+        "QPushButton {{ background: #21262d; color: {color}; border: 1px solid {border};"
+        " border-radius: 6px; font-size: 10px; font-weight: bold; }}"
+        "QPushButton:hover {{ background: #30363d; color: #58a6ff; border-color: #58a6ff; }}"
+    )
+
+    def _amms_source(self, p):
+        """(holder, hospital panel): where this card's AMMS lives.
+
+        A hospital of an open main vault with the card's name wins — set
+        once there, it shows here too (owner, 2026-10-26); otherwise the
+        profile keeps its own.  A profile's own AMMS stays in use while the
+        hospital has none."""
+        from ui import detail_panel as dp
+        h, panel = dp.amms_hospital_for(p.name)
+        if h is not None and (h.amms_url or not p.amms_url):
+            return h, panel
+        return p, None
+
+    def restyle_amms(self):
+        for p in self._profiles:
+            self._style_amms_btn(p)
+
+    def _style_amms_btn(self, p):
+        btn = self._amms_btns.get(p.id)
+        if btn is None:
+            return
+        s, panel = self._amms_source(p)
+        if p.id in self._amms_workers:
+            color, border, tip = "#58a6ff", "#1f6feb", "AMMS: logowanie w toku…"
+        elif s.amms_url:
+            who = f" jako {s.amms_login}" if s.amms_login else ""
+            color, border = "#8b949e", "#30363d"
+            tip = (f"Otwórz AMMS i zaloguj{who}: {s.amms_url}"
+                   "\nPrawy przycisk: edycja, kopiuj hasło")
+            if panel is not None:
+                tip += f"\n(ustawienia szpitala „{s.name}” z głównego vaulta)"
+        else:
+            color, border = "#484f58", "#21262d"
+            tip = "AMMS nie skonfigurowany — kliknij albo prawy przycisk → Edytuj"
+        btn.setStyleSheet(self._AMMS_STYLE.format(color=color, border=border))
+        btn.setToolTip(tip)
+
+    def _amms_menu(self, p, btn, pos):
+        s, _panel = self._amms_source(p)
+        menu = QMenu(self)
+        menu.addAction("Edytuj AMMS…", lambda: self._edit_amms(p))
+        if s.amms_password:
+            menu.addAction("Kopiuj hasło", lambda: _clipboard_copy(s.amms_password))
+        if s.amms_url:
+            menu.addAction("Otwórz bez logowania",
+                           lambda: self._start_amms(p, with_login=False))
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _edit_amms(self, p):
+        from ui.amms import AmmsDialog
+        from ui import detail_panel as dp
+        s, panel = self._amms_source(p)
+        dlg = AmmsDialog(self, s)
+        if dlg.exec():
+            values = dlg.values()
+            if values != (s.amms_url, s.amms_login, s.amms_password):
+                s.amms_url, s.amms_login, s.amms_password = values
+                if panel is not None:
+                    panel.data_changed.emit()      # the main vault saves it
+                else:
+                    self._register_log_secrets()
+                    self.data_changed.emit()
+            dp.amms_changed()
+            self._style_amms_btn(p)
+
+    def _amms_clicked(self, p):
+        s, _panel = self._amms_source(p)
+        if not s.amms_url:
+            self._edit_amms(p)
+            return
+        self._start_amms(p, with_login=True)
+
+    def _start_amms(self, p, with_login: bool):
+        s, _panel = self._amms_source(p)
+        if not s.amms_url or p.id in self._amms_workers:
+            return
+        from ui.amms import AmmsWorker
+        if actionlog.is_enabled() and s.amms_password:
+            actionlog.register_secrets([s.amms_password])
+        worker = AmmsWorker(s.amms_url, s.amms_login if with_login else "",
+                            s.amms_password if with_login else "", parent=self)
+        worker.progress.connect(
+            lambda text, prof=p: self._amms_note(prof, text, "#58a6ff", hold_s=120))
+        worker.done.connect(
+            lambda outcome, detail, prof=p: self._on_amms_done(prof, outcome, detail))
+        worker.finished.connect(worker.deleteLater)
+        self._amms_workers[p.id] = worker
+        self._style_amms_btn(p)
+        worker.start()
+
+    def _amms_note(self, p, text: str, color: str, hold_s: float = 10):
+        """Write an AMMS note in the card's status line; the VPN status
+        poll leaves it there for hold_s seconds."""
+        idx = next((i for i, q in enumerate(self._profiles) if q is p), -1)
+        lbl = self._status_labels.get(idx)
+        if lbl is None:
+            return
+        self._amms_held[idx] = time.monotonic() + hold_s
+        lbl.setText(text)
+        lbl.setToolTip(text)
+        lbl.setStyleSheet(f"color: {color}; font-size: 10px; border: none;")
+
+    def _on_amms_done(self, p, outcome: str, detail: str):
+        from ui.amms import outcome_text
+        self._amms_workers.pop(p.id, None)
+        text, color = outcome_text(outcome)
+        self._amms_note(p, text, color)
+        if detail:
+            # The card is narrow: AMMS's own words go to the tooltip.
+            idx = next((i for i, q in enumerate(self._profiles) if q is p), -1)
+            lbl = self._status_labels.get(idx)
+            if lbl is not None:
+                lbl.setToolTip(f"{text}\n{detail}")
+        self._style_amms_btn(p)
+
     def _toggle_connection(self, idx: int):
         """Connect or disconnect based on current state."""
         if idx >= len(self._profiles):
@@ -1634,6 +1791,8 @@ class VpnPanel(QWidget):
             lbl = self._status_labels.get(idx)
             if not lbl:
                 continue
+            if vars(self).get("_amms_held", {}).get(idx, 0) > time.monotonic():
+                lbl = _MutedLabel()       # the AMMS note stays a moment longer
             _log_status_change(self, idx, status)
             if status == "Connected":
                 lbl.setStyleSheet("color: #3fb950; font-size: 10px; font-weight: bold; border: none;")
@@ -1650,6 +1809,9 @@ class VpnPanel(QWidget):
             else:
                 lbl.setStyleSheet("color: #8b949e; font-size: 10px; border: none;")
                 lbl.setText(status)
+        # The main vault may have been opened, closed or edited meanwhile.
+        if "_amms_btns" in vars(self):
+            self.restyle_amms()
 
     # ------------------------------------------------------------------ #
     # Actions                                                              #
@@ -1998,6 +2160,11 @@ class VpnPanel(QWidget):
         self._load_detail()
         self._edit_title.setText("Edycja profilu")
         self._stack.setCurrentIndex(1)
+        # Back on the list, the window returns to this size — it may stand
+        # next to the main one (2026-10-26).
+        win = self.window()
+        if win is not None and win is not self and "_list_size" not in vars(self):
+            self._list_size = (win.width(), win.height())
         self._resize_window(*_EDIT_SIZE)
         self._name_edit.setFocus()
 
@@ -2015,7 +2182,7 @@ class VpnPanel(QWidget):
         self._edit_idx = -1
         self._rebuild_cards()
         self._stack.setCurrentIndex(0)
-        self._resize_window(*_LIST_SIZE)
+        self._resize_window(*vars(self).pop("_list_size", _LIST_SIZE))
 
     def keyPressEvent(self, event):
         # Escape on the edit page = "Wróć" (E-23).

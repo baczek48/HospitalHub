@@ -113,7 +113,8 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         self.setMinimumSize(700, 450)
         from ui.utils import resize_within_screen
-        resize_within_screen(self, 1050, 680)
+        from ui.window_layout import MAIN_SIZE, VPN_SIZE
+        resize_within_screen(self, *MAIN_SIZE)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -123,7 +124,7 @@ class MainWindow(QMainWindow):
 
         if self._vault_type == "vpn":
             self.setMinimumSize(360, 300)
-            self.resize(420, 700)
+            resize_within_screen(self, *VPN_SIZE)
             self._vpn_panel = VpnPanel(self._hospitals)
             self._vpn_panel.data_changed.connect(self._on_data_changed)
             main_layout.addWidget(self._vpn_panel)

@@ -204,7 +204,7 @@ def cleanup_orphan_temp_dirs(tmp_root: str | None = None, pid_alive=_pid_alive) 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtGui import (QPalette, QColor, QIcon, QPixmap, QPainter,
                           QPainterPath, QPen, QAction)
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, QTimer
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 from ui.login_dialog import LoginDialog
@@ -593,6 +593,20 @@ class AppManager:
         window.setWindowIcon(self.icon_for_type(vault_type))
         self.add_window(window)
         window.show()
+        # After the frame exists: its title bar counts in the layout.
+        QTimer.singleShot(0, self._arrange_vault_pair)
+
+    def _arrange_vault_pair(self):
+        """The main vault and the VPN vault side by side (2026-10-26)."""
+        main = next((w for w in self._windows if w._vault_type != "vpn"), None)
+        vpn = next((w for w in self._windows if w._vault_type == "vpn"), None)
+        if main is None or vpn is None:
+            return
+        from ui.window_layout import arrange_pair
+        try:
+            arrange_pair(main, vpn)
+        except RuntimeError:          # a window already deleted
+            pass
 
     def run_initial_login(self):
         """Run the initial login dialog and open the first window."""

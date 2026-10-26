@@ -174,6 +174,41 @@ def unshare_vpn_window(panel) -> None:
         share_vpn_window(None)
 
 
+def amms_hospital_for(name: str):
+    """(hospital, panel): the hospital of an open main vault named `name` —
+    paired by name like the VPN button — and the panel of its window
+    (2026-10-26: AMMS set once in the main vault shows on the VPN card)."""
+    key = (name or "").strip().lower()
+    if not key:
+        return None, None
+    for panel in list(_vpn_button_panels):
+        try:
+            hospitals = panel._all_hospitals
+            if hospitals is None:
+                hospitals = getattr(panel.window(), "_hospitals", None)
+        except RuntimeError:         # widget already deleted
+            continue
+        for h in hospitals or []:
+            if isinstance(h, models.Hospital) and h.name.strip().lower() == key:
+                return h, panel
+    return None, None
+
+
+def amms_changed() -> None:
+    """Refresh the AMMS buttons of every hospital window and the VPN window."""
+    for p in list(_vpn_button_panels):
+        try:
+            p._update_amms_btn()
+        except RuntimeError:
+            pass
+    src = _vpn_window_source() if _vpn_window_source is not None else None
+    if src is not None:
+        try:
+            src.restyle_amms()
+        except RuntimeError:
+            pass
+
+
 def vpn_profiles_changed() -> None:
     """Refresh the VPN button of every hospital window."""
     for p in list(_vpn_button_panels):
@@ -660,6 +695,26 @@ class DetailPanel(QWidget):
         self._vpn_header = header
         self._vpn_v2_controller = None
         header.addWidget(self._vpn_status_lbl)
+
+        # 2026-10-26: AMMS of this hospital — left click signs in, right
+        # click edits the URL and the account (kept in the hospital, in the
+        # vault).
+        self._amms_btn = QToolButton()
+        self._amms_btn.setText("AMMS")
+        self._amms_btn.setFixedSize(46, 26)
+        self._amms_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._amms_btn.customContextMenuRequested.connect(self._on_amms_menu)
+        self._amms_btn.clicked.connect(self._on_amms_btn_clicked)
+        self._amms_status_lbl = QLabel()
+        self._amms_status_lbl.setMaximumWidth(420)
+        self._amms_status_lbl.setVisible(False)
+        self._amms_worker = None
+        self._amms_hide_timer = QTimer(self)
+        self._amms_hide_timer.setSingleShot(True)
+        self._amms_hide_timer.timeout.connect(
+            lambda: self._amms_status_lbl.setVisible(False))
+        header.addWidget(self._amms_status_lbl)
+        header.addWidget(self._amms_btn)
         header.addWidget(self._vpn_btn)
 
         # Poll VPN status every 2s to keep button state in sync
@@ -868,7 +923,8 @@ class DetailPanel(QWidget):
         # closing (2026-10-17).  Each is looked at only if still there.
         for attr, sig in (('_vpn_status_probe', 'result'),
                           ('_vpn_token_waiter', 'found'),
-                          ('_vpn_monitor_worker', 'twofa_detected')):
+                          ('_vpn_monitor_worker', 'twofa_detected'),
+                          ('_amms_worker', 'done')):
             thread = getattr(self, attr, None)
             if thread is None:
                 continue
@@ -907,6 +963,7 @@ class DetailPanel(QWidget):
         self._refresh_machines()
         self._refresh_databases()
         self._update_vpn_btn()
+        self._update_amms_btn()
 
     # ------------------------------------------------------------------ #
     # Cell click → copy                                                    #
@@ -1553,6 +1610,108 @@ class DetailPanel(QWidget):
     # ------------------------------------------------------------------ #
     # VPN integration                                                      #
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # AMMS                                                                 #
+    # ------------------------------------------------------------------ #
+
+    _AMMS_STYLE = (
+        "QToolButton {{ background: transparent; border: 1px solid {border};"
+        " border-radius: 5px; color: {color}; font-size: 10px; font-weight: bold; }}"
+        "QToolButton:hover {{ background: #21262d; border-color: #58a6ff; color: #58a6ff; }}"
+        "QToolButton:pressed {{ background: #1a3a5c; }}"
+    )
+
+    def _update_amms_btn(self):
+        h = self.current_hospital
+        if self._amms_worker is not None:
+            self._amms_btn.setStyleSheet(self._AMMS_STYLE.format(
+                border="#1f6feb", color="#58a6ff"))
+            self._amms_btn.setToolTip("AMMS: logowanie w toku…")
+        elif h and h.amms_url:
+            self._amms_btn.setStyleSheet(self._AMMS_STYLE.format(
+                border="#30363d", color="#8b949e"))
+            who = f" jako {h.amms_login}" if h.amms_login else ""
+            self._amms_btn.setToolTip(
+                f"Otwórz AMMS i zaloguj{who}: {h.amms_url}"
+                "\nPrawy przycisk: edycja")
+        else:
+            self._amms_btn.setStyleSheet(self._AMMS_STYLE.format(
+                border="#21262d", color="#484f58"))
+            self._amms_btn.setToolTip(
+                "AMMS nie skonfigurowany — kliknij albo prawy przycisk → Edytuj")
+
+    def _on_amms_menu(self, pos):
+        h = self.current_hospital
+        if not h:
+            return
+        menu = QMenu(self)
+        menu.addAction("Edytuj AMMS…", self._edit_amms)
+        if h.amms_password:
+            # Same copy as a machine's password: kept out of the Win+V
+            # history, cleared after 15 s.
+            menu.addAction("Kopiuj hasło", lambda: _clipboard_copy(h.amms_password))
+        if h.amms_url:
+            menu.addAction("Otwórz bez logowania",
+                           lambda: self._start_amms(with_login=False))
+        menu.exec(self._amms_btn.mapToGlobal(pos))
+
+    def _edit_amms(self):
+        h = self.current_hospital
+        if not h:
+            return
+        from ui.amms import AmmsDialog
+        dlg = AmmsDialog(self, h)
+        if dlg.exec():
+            values = dlg.values()
+            if values != (h.amms_url, h.amms_login, h.amms_password):
+                h.amms_url, h.amms_login, h.amms_password = values
+                self.data_changed.emit()
+            amms_changed()
+
+    def _on_amms_btn_clicked(self):
+        h = self.current_hospital
+        if not h:
+            return
+        if not h.amms_url:
+            self._edit_amms()
+            return
+        self._start_amms(with_login=True)
+
+    def _start_amms(self, with_login: bool):
+        h = self.current_hospital
+        if not h or not h.amms_url or self._amms_worker is not None:
+            return
+        from ui.amms import AmmsWorker
+        login = h.amms_login if with_login else ""
+        password = h.amms_password if with_login else ""
+        worker = AmmsWorker(h.amms_url, login, password, parent=self)
+        worker.progress.connect(lambda text: self._show_amms_status(text, "#58a6ff"))
+        worker.done.connect(self._on_amms_done)
+        worker.finished.connect(worker.deleteLater)
+        self._amms_worker = worker
+        self._update_amms_btn()
+        worker.start()
+
+    def _show_amms_status(self, text: str, color: str, hide_after_ms: int = 0):
+        self._amms_hide_timer.stop()
+        self._amms_status_lbl.setText(text)
+        self._amms_status_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+        self._amms_status_lbl.setToolTip(text)
+        self._amms_status_lbl.setVisible(True)
+        if hide_after_ms:
+            self._amms_hide_timer.start(hide_after_ms)
+
+    def _on_amms_done(self, outcome: str, detail: str):
+        from ui.amms import outcome_text
+        self._amms_worker = None
+        text, color = outcome_text(outcome)
+        if outcome == "rejected" and detail:
+            text = f"{text}: {detail}"
+        self._show_amms_status(text, color, hide_after_ms=10000)
+        if detail:
+            self._amms_status_lbl.setToolTip(detail)
+        self._update_amms_btn()
 
     def _vpn_profile_for_current(self):
         """Return matching VPN profile for current hospital (by name, case-insensitive), or None."""
