@@ -3,10 +3,15 @@
 With both vaults open the VPN window stops being a window of its own: it
 stands in a dock at the right of the main one — one window on the taskbar,
 maximised together (the VPN pane keeps its width, the rest grows), restored
-by Windows itself.  The pane is dragged by its title to the other side.
+by Windows itself.
 
-"Odepnij" on the pane's title makes it a window of its own again — its own
-taskbar button, as before.  (Qt's floating dock was a tool window: no taskbar
+Docked, the pane has no title and no menu bar of its own (2026-10-26, owner:
+one screen, not two windows glued): "Odepnij" and X stand in the "Profile
+VPN" header, level with "Szpitale", and the VPN vault's menu is "VPN" in the
+main window's menu bar — save, password, sorting, the other side, Odepnij.
+
+"Odepnij" makes it a window of its own again — its own taskbar button, as
+before.  (Qt's floating dock was a tool window: no taskbar
 button, and its buttons did not take clicks — owner, 2026-10-26.)  The window
 goes back in when it is dropped with the cursor at the right or left edge of
 the main window, or from Widok → "Przypnij do okna głównego".
@@ -20,8 +25,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QColor, QCursor, QPainter, QPen
-from PyQt6.QtWidgets import (QApplication, QDockWidget, QHBoxLayout, QLabel,
-                             QToolButton, QWidget)
+from PyQt6.QtWidgets import QApplication, QDockWidget, QPushButton, QWidget
 
 from ui.window_layout import MAIN_SIZE, VPN_SIZE
 
@@ -38,10 +42,36 @@ _host_finder = [None]               # set by the app manager: () -> main window
 _icon = [None]                      # the VPN window's icon, back when undocked
 
 
-def set_host_finder(finder, vpn_icon=None) -> None:
-    """`finder()` gives the main window a VPN one docks in, or None."""
+_save_layout = [None]               # set by the app manager: (str) -> None
+
+#: What is remembered for the next start (config ``vpn_pane``).
+RIGHT, LEFT, WINDOW = "right", "left", "window"
+
+
+def set_host_finder(finder, vpn_icon=None, save_layout=None) -> None:
+    """`finder()` gives the main window a VPN one docks in, or None;
+    `save_layout(RIGHT|LEFT|WINDOW)` remembers the user's choice."""
     _host_finder[0] = finder
     _icon[0] = vpn_icon
+    _save_layout[0] = save_layout
+
+
+def _remember(layout: str) -> None:
+    f = _save_layout[0]
+    if f is not None:
+        try:
+            f(layout)
+        except Exception:
+            pass
+
+
+def _side(area) -> str:
+    return LEFT if area == Qt.DockWidgetArea.LeftDockWidgetArea else RIGHT
+
+
+def area_of(layout: str):
+    return (Qt.DockWidgetArea.LeftDockWidgetArea if layout == LEFT
+            else Qt.DockWidgetArea.RightDockWidgetArea)
 
 
 def find_host():
@@ -88,38 +118,101 @@ def _fit(window, w: int, h: int) -> None:
         window.move(x, y)
 
 
-class _TitleBar(QWidget):
-    """The pane's title: the vault's name, "Odepnij", and X (hide the pane)."""
-    def __init__(self, dock_widget, vpn_window):
-        super().__init__(dock_widget)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 3, 4, 3)
-        lay.setSpacing(4)
-        self.label = QLabel(dock_widget.windowTitle())
-        f = self.label.font()
-        f.setBold(True)
-        self.label.setFont(f)
-        lay.addWidget(self.label, 1)
-        self.btn_out = QToolButton()
-        self.btn_out.setText("Odepnij")
-        self.btn_out.setToolTip(
-            "Osobne okno VPN (z własną ikoną na pasku zadań).\n"
-            "Z powrotem: upuść je kursorem przy krawędzi okna głównego\n"
-            "albo Widok → Przypnij do okna głównego.")
-        self.btn_out.setAutoRaise(True)
-        # After the click: the button is inside what the undock takes apart.
-        self.btn_out.clicked.connect(lambda: QTimer.singleShot(
-            0, lambda: undock(vpn_window, _icon[0], show=True)))
-        lay.addWidget(self.btn_out)
-        self.btn_hide = QToolButton()
-        from ui.icons import set_icon
-        set_icon(self.btn_hide, "close", "#8b949e", active="#f85149", size=12)
-        set_icon(self.btn_out, "external", "#8b949e", active="#58a6ff", size=12)
-        self.btn_out.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.btn_hide.setToolTip("Schowaj panel VPN (ikona VPN w trayu go przywraca)")
-        self.btn_hide.setAutoRaise(True)
-        self.btn_hide.clicked.connect(dock_widget.hide)
-        lay.addWidget(self.btn_hide)
+_HEADER_BTN = (
+    "QPushButton { background: #21262d; border: 1px solid #30363d;"
+    " border-radius: 4px; padding: 0; }"
+    "QPushButton:hover { background: #30363d; }")
+
+#: The line between the hospitals and the pane, like the left column's border.
+_SEPARATOR_QSS = (
+    "QMainWindow::separator { background: #21262d; width: 2px; }"
+    "QMainWindow::separator:hover { background: #1f6feb; }")
+
+
+def _undock_later(vpn_window):
+    # After the click: the button is inside what the undock takes apart.
+    def go():
+        if undock(vpn_window, _icon[0], show=True):
+            _remember(WINDOW)
+    QTimer.singleShot(0, go)
+
+
+def _add_header_buttons(d, vpn_window) -> None:
+    """"Odepnij" and X at the end of the "Profile VPN" header."""
+    from ui.icons import set_icon
+    bar = vars(vpn_window._vpn_panel).get("_top_bar")
+    if bar is None:
+        return
+    out = QPushButton()
+    set_icon(out, "external", "#8b949e", active="#58a6ff", size=14)
+    out.setFixedSize(30, 26)
+    out.setToolTip("Odepnij — osobne okno VPN z własną ikoną na pasku zadań.\n"
+                   "Z powrotem: upuść je kursorem przy krawędzi okna głównego\n"
+                   "albo Widok → Przypnij do okna głównego.")
+    out.setStyleSheet(_HEADER_BTN)
+    out.clicked.connect(lambda: _undock_later(vpn_window))
+    hide = QPushButton()
+    set_icon(hide, "close", "#8b949e", active="#f85149", size=14)
+    hide.setFixedSize(30, 26)
+    hide.setToolTip("Schowaj panel VPN (ikona VPN w trayu go przywraca)")
+    hide.setStyleSheet(_HEADER_BTN)
+    hide.clicked.connect(d.hide)
+    bar.addWidget(out)
+    bar.addWidget(hide)
+    d.__dict__["_header_buttons"] = (out, hide)
+
+
+def header_buttons(vpn_window):
+    """(Odepnij, X) in the pane's header while docked, else None."""
+    d = dock_of(vpn_window)
+    return vars(d).get("_header_buttons") if d is not None else None
+
+
+def _other_side(d) -> None:
+    host = d.parentWidget()
+    area = host.dockWidgetArea(d)
+    other = (Qt.DockWidgetArea.LeftDockWidgetArea
+             if area == Qt.DockWidgetArea.RightDockWidgetArea
+             else Qt.DockWidgetArea.RightDockWidgetArea)
+    width = d.width()
+    host.addDockWidget(other, d)
+    host.resizeDocks([d], [width], Qt.Orientation.Horizontal)
+    _remember(_side(other))
+
+
+def _vpn_menu_title(vpn_window) -> str:
+    return "VPN (niezapisane)" if getattr(vpn_window, "_unsaved", False) else "VPN"
+
+
+def _add_vpn_menu(d, main_window, vpn_window):
+    """The VPN vault's menu as "VPN" in the main window's menu bar; its
+    own menu bar is hidden while docked."""
+    m = main_window.menuBar().addMenu(_vpn_menu_title(vpn_window))
+    file_menu = vars(vpn_window).get("_file_menu")
+    if file_menu is not None:
+        skip = vars(vpn_window).get("_dock_skip", ())
+        last_sep = True                       # no separator first or twice
+        for act in file_menu.actions():
+            if act in skip or (act.isSeparator() and last_sep):
+                continue
+            m.addAction(act)
+            last_sep = act.isSeparator()
+    sort_menu = vars(vpn_window).get("_sort_menu")
+    if sort_menu is not None:
+        m.addSeparator()
+        m.addMenu(sort_menu)
+    m.addSeparator()
+    m.addAction("Przenieś panel na drugą stronę").triggered.connect(
+        lambda: _other_side(d))
+    m.addAction("Odepnij panel").triggered.connect(lambda: _undock_later(vpn_window))
+    vpn_window.menuBar().hide()
+    d.__dict__["_vpn_menu"] = m
+    return m
+
+
+def vpn_menu(vpn_window):
+    d = dock_of(vpn_window)
+    return vars(d).get("_vpn_menu") if d is not None else None
 
 
 def dock(main_window, vpn_window,
@@ -135,14 +228,19 @@ def dock(main_window, vpn_window,
     d.setObjectName("vpnDock")
     d.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                       | Qt.DockWidgetArea.RightDockWidgetArea)
-    # Movable between the sides; never floating (see the module doc).
-    d.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable
-                  | QDockWidget.DockWidgetFeature.DockWidgetClosable)
-    d.setTitleBarWidget(_TitleBar(d, vpn_window))
+    # No title (an empty widget hides it) and never floating (module doc).
+    d.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+    d.setTitleBarWidget(QWidget(d))
     vpn_window.hide()
     vpn_window.setWindowFlags(Qt.WindowType.Widget)
     vpn_window.setMinimumWidth(PANE_MIN_WIDTH)
     d.setWidget(vpn_window)
+    # Its native window from when it stood on its own outlives the
+    # reparenting, and Qt kept mapping clicks through it: after the pane
+    # moved to the other side every click landed "outside" its button
+    # (2026-10-26, owner).  A pane needs none.
+    if vpn_window.windowHandle() is not None:
+        vpn_window.destroy(True, True)
     vpn_window.show()
     vpn_window.__dict__[_DOCK_ATTR] = d
     sync = lambda d=d, w=vpn_window: _sync_title(d, w)      # noqa: E731
@@ -156,6 +254,11 @@ def dock(main_window, vpn_window,
     main_window.resizeDocks([d], [width], Qt.Orientation.Horizontal)
     _scope_shortcuts(main_window, main_window.centralWidget())
     _scope_shortcuts(vpn_window, vpn_window)
+    _add_header_buttons(d, vpn_window)
+    _add_vpn_menu(d, main_window, vpn_window)
+    if "_qss_before_dock" not in vars(main_window):
+        main_window.__dict__["_qss_before_dock"] = main_window.styleSheet()
+        main_window.setStyleSheet(main_window.styleSheet() + _SEPARATOR_QSS)
     d.show()
     return d
 
@@ -192,9 +295,9 @@ def _scope_shortcuts(window, scope) -> None:
 def _sync_title(d, vpn_window) -> None:
     try:
         d.setWindowTitle(vpn_window.windowTitle())
-        bar = d.titleBarWidget()
-        if isinstance(bar, _TitleBar):
-            bar.label.setText(vpn_window.windowTitle())
+        m = vars(d).get("_vpn_menu")
+        if m is not None:
+            m.setTitle(_vpn_menu_title(vpn_window))
     except RuntimeError:
         pass
 
@@ -213,6 +316,15 @@ def undock(vpn_window, icon=None, show: bool = False) -> bool:
         vpn_window.title_changed.disconnect(vars(d)["_title_sync"])
     except (KeyError, TypeError, RuntimeError):
         pass
+    for b in vars(d).get("_header_buttons") or ():
+        b.hide()
+        b.setParent(None)
+        b.deleteLater()
+    m = vars(d).get("_vpn_menu")
+    if m is not None and host is not None:
+        host.menuBar().removeAction(m.menuAction())
+        m.deleteLater()
+    vpn_window.menuBar().show()
     vpn_window.hide()
     vpn_window.setParent(None)
     vpn_window.setWindowFlags(Qt.WindowType.Window)
@@ -224,6 +336,8 @@ def undock(vpn_window, icon=None, show: bool = False) -> bool:
         host.removeDockWidget(d)
         if len(docked_in(host)) == 0:
             _scope_shortcuts(host, None)
+            if "_qss_before_dock" in vars(host):
+                host.setStyleSheet(host.__dict__.pop("_qss_before_dock"))
     d.deleteLater()
     vpn_window.resize(*VPN_SIZE)
     if origin is not None:
@@ -329,6 +443,7 @@ def redock_if_dropped(vpn_window) -> bool:
     if area is None:
         return False
     dock(host, vpn_window, area)
+    _remember(_side(area))
     show_pane(vpn_window)
     return True
 
@@ -341,6 +456,7 @@ def redock(vpn_window) -> bool:
     if host is None:
         return False
     dock(host, vpn_window)
+    _remember(RIGHT)
     show_pane(vpn_window)
     return True
 

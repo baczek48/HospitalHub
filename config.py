@@ -237,6 +237,24 @@ def save_ssh_start_maximized(enabled: bool) -> None:
     _save_all(data)
 
 
+_VPN_PANES = ("right", "left", "window")
+
+
+def load_vpn_pane() -> str:
+    """Where the VPN vault stands with the main one open (2026-10-26): a pane
+    at the "right" or "left", or a "window" of its own."""
+    v = _load_all().get("vpn_pane", "right")
+    return v if v in _VPN_PANES else "right"
+
+
+def save_vpn_pane(layout: str) -> None:
+    if layout not in _VPN_PANES:
+        return
+    data = _load_all()
+    data["vpn_pane"] = layout
+    _save_all(data)
+
+
 def load_hospital_sort_order() -> str:
     """Returns sort order for hospital list: 'none', 'asc' or 'desc'."""
     order = _load_all().get("hospital_sort_order", "none")

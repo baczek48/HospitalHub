@@ -1100,6 +1100,8 @@ class VpnPanel(QWidget):
         # Top bar
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(12, 8, 12, 6)
+        # Docked in the main window, "Odepnij" and X stand here (ui/vpn_dock.py).
+        self._top_bar = top_bar
 
         lbl_title = QLabel("Profile VPN")
         font = QFont()

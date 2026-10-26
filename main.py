@@ -361,7 +361,8 @@ class AppManager:
         self._default_icon = make_icon()
         self._vpn_icon = make_vpn_icon()
         from ui import vpn_dock
-        vpn_dock.set_host_finder(self._dock_host, self._vpn_icon)
+        from config import save_vpn_pane
+        vpn_dock.set_host_finder(self._dock_host, self._vpn_icon, save_vpn_pane)
 
         # Don't quit when all windows are hidden
         app.setQuitOnLastWindowClosed(False)
@@ -631,9 +632,13 @@ class AppManager:
         vpn = next((w for w in self._windows if w._vault_type == "vpn"), None)
         if main is None or vpn is None:
             return
+        from config import load_vpn_pane
         from ui import vpn_dock
+        layout = load_vpn_pane()             # as the user left it last time
+        if layout == vpn_dock.WINDOW:
+            return
         try:
-            vpn_dock.dock(main, vpn)
+            vpn_dock.dock(main, vpn, vpn_dock.area_of(layout))
             vpn_dock.show_pane(vpn)
         except RuntimeError:          # a window already deleted
             pass

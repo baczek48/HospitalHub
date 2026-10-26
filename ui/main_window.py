@@ -245,6 +245,8 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
 
         file_menu = menu.addMenu("Plik")
+        self._file_menu = file_menu          # shown as the VPN menu when docked
+        self._sort_menu = None
 
         act_save = file_menu.addAction("Zapisz")
         act_save.setShortcut(QKeySequence("Ctrl+S"))
@@ -288,6 +290,9 @@ class MainWindow(QMainWindow):
 
         act_exit = file_menu.addAction("Zamknij całkowicie")
         act_exit.triggered.connect(self._force_close)
+        # Docked, the VPN menu leaves out what the main window's Plik already
+        # has, and "Zamknij okno" (the X in the pane's header does it).
+        self._dock_skip = (act_open_vault, act_ssh_max, act_close)
 
         view_menu = menu.addMenu("Widok")
         theme_menu = view_menu.addMenu("Motyw")
@@ -312,6 +317,7 @@ class MainWindow(QMainWindow):
 
         if self._vault_type == "vpn" and self._vpn_panel:
             sort_menu = menu.addMenu("Sortuj")
+            self._sort_menu = sort_menu
             act_sort_name = sort_menu.addAction("Wg nazwy (A-Z)")
             act_sort_name.triggered.connect(lambda: self._vpn_panel._sort_profiles("name"))
             act_sort_prov = sort_menu.addAction("Wg providera")
