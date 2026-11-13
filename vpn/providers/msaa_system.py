@@ -27,10 +27,11 @@ __all__ = ["MsaaSystem", "Win32MsaaSystem", "MsaaNode", "MsaaScan",
            "ensure_com_apartment",
            "ROLE_SYSTEM_COMBOBOX", "STATE_SYSTEM_FOCUSED",
            "STATE_SYSTEM_EXPANDED", "STATE_SYSTEM_COLLAPSED",
-           "ROLE_SYSTEM_TEXT", "MsaaFocus"]
+           "ROLE_SYSTEM_TEXT", "ROLE_SYSTEM_PUSHBUTTON", "MsaaFocus"]
 
 ROLE_SYSTEM_COMBOBOX = 0x2E
 ROLE_SYSTEM_TEXT = 0x2A
+ROLE_SYSTEM_PUSHBUTTON = 0x2B
 #: IAccessible::accSelect flag: give the object the keyboard focus.
 _SELFLAG_TAKEFOCUS = 0x1
 STATE_SYSTEM_FOCUSED = 0x4

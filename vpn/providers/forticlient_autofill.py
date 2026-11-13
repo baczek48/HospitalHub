@@ -28,7 +28,9 @@ from .input_system import (
     Win32InputSystem,
 )
 from .secure_target import SecureWindowTarget, VerifiedWindow
-from .msaa_system import ROLE_SYSTEM_COMBOBOX, ROLE_SYSTEM_TEXT
+from .msaa_system import (
+    ROLE_SYSTEM_COMBOBOX, ROLE_SYSTEM_PUSHBUTTON, ROLE_SYSTEM_TEXT,
+)
 
 __all__ = ["autofill_login_password", "PHASES"]
 
@@ -285,8 +287,14 @@ def autofill_login_password(
                       already_selected=state["profile_already_selected"])
 
             if focus is not None:
-                moved, reason = _focus_field(win, guard, focus, ROLE_SYSTEM_TEXT,
-                                             FIELD_USERNAME, PHASE_LOCATE)
+                moved, reason = _focus_username(win, inp, guard, focus)
+                if not moved and reason == ELEMENT_MISSING and profile:
+                    # A profile with no login form (SAML/SSO, e.g. the
+                    # gateway's own page and Duo after Connect): only the
+                    # button is pressed — no field touched, no secret sent
+                    # (owner, 2026-10-28).
+                    return _sso_connect(pid, win, inp, guard, focus, state,
+                                        check_profile, tr)
                 if not moved:
                     return _stop(pid, state, inp, tr, PHASE_LOCATE, reason)
 
@@ -491,6 +499,70 @@ _CONTROL_POLL_S = 0.25
 #: 2026-10-19).
 FIELD_USERNAME = "Username"
 FIELD_PASSWORD = "Password"
+
+
+#: What MSAA answers when the window has no element of that role and name.
+ELEMENT_MISSING = "element-missing"
+#: The button of a profile without a login form: "Connect" in FortiClient
+#: 7.4, "SAML Login" in the versions before.  The first one present is used.
+SSO_BUTTONS = ("Connect", "SAML Login")
+#: After the profile changed, FortiClient redraws the form; the Username field
+#: of a normal profile may not be there yet.  Asked this often before the
+#: profile counts as one without a form.
+_USERNAME_ATTEMPTS = 3
+_USERNAME_RETRY_S = 0.3
+PHASE_SSO_CONNECT = "sso-connect"
+REASON_SSO_BUTTON_MISSING = "sso-connect-button-missing"
+
+
+def _focus_username(win, inp, guard, focus) -> tuple[bool, str]:
+    """Focus Username; "missing" only when it stays missing for a moment."""
+    for attempt in range(_USERNAME_ATTEMPTS):
+        moved, reason = _focus_field(win, guard, focus, ROLE_SYSTEM_TEXT,
+                                     FIELD_USERNAME, PHASE_LOCATE)
+        if moved or reason != ELEMENT_MISSING:
+            return moved, reason
+        if attempt < _USERNAME_ATTEMPTS - 1:
+            inp.sleep(_USERNAME_RETRY_S)
+    return False, ELEMENT_MISSING
+
+
+def _sso_connect(pid, win, inp, guard, focus, state, check_profile, tr):
+    """The profile's form has no Username: focus its Connect button by name
+    and press it, under the same guard and profile check as a submit."""
+    reason = REASON_SSO_BUTTON_MISSING
+    for name in SSO_BUTTONS:
+        moved, reason = _focus_field(win, guard, focus, ROLE_SYSTEM_PUSHBUTTON,
+                                     name, PHASE_SSO_CONNECT)
+        if moved:
+            break
+        if reason != ELEMENT_MISSING:
+            return _stop(pid, state, inp, tr, PHASE_SSO_CONNECT, reason)
+    else:
+        return _stop(pid, state, inp, tr, PHASE_SSO_CONNECT,
+                     REASON_SSO_BUTTON_MISSING)
+
+    refused = {"reason": ""}
+
+    def press():
+        inp.sleep(_BEFORE_SUBMIT_S)
+        if check_profile is not None:
+            refused["reason"] = check_profile()
+            if refused["reason"]:
+                return
+        inp.press_key(VK_RETURN)
+
+    performed, reason = guard(win, PHASE_SUBMIT, press)
+    if not performed:
+        return _stop(pid, state, inp, tr, PHASE_SUBMIT, reason)
+    if refused["reason"]:
+        return _stop(pid, state, inp, tr, PHASE_SUBMIT, refused["reason"])
+    _restore_clipboard(inp, state)
+    tr.ok("vpn.autofill", event="autofill-success", route="sso",
+          login_entered=False, password_entered=False)
+    return AutofillResult(provider_id=pid, success=True, status=AutofillStatus.DONE,
+                          login_entered=False, password_entered=False,
+                          metadata={"route": "sso"})
 
 
 def _focus_field(win, guard, focus, role, name, phase) -> tuple[bool, str]:
