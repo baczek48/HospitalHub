@@ -148,6 +148,17 @@ def _validate_port(port: str) -> int:
     return p
 
 
+def machine_with_first(machine, cred):
+    """`machine` with `cred` as its first account (connect as…), or the
+    machine itself when no account is given."""
+    if cred is None:
+        return machine
+    import copy
+    m = copy.copy(machine)
+    m.credentials = [cred] + [c for c in machine.credentials if c is not cred]
+    return m
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 
 def connect_rdp(machine: "models.Machine", parent=None,

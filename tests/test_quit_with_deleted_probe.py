@@ -93,7 +93,10 @@ def test_quit_all_takes_every_window_off_the_screen_first(app, monkeypatch, tmp_
 def test_the_exit_has_a_watchdog():
     import inspect
     import main
-    src = inspect.getsource(main.main)
+    # The end after the event loop is shared with HospitalHub Remote
+    # (2026-10-28): main() hands the exit code to finish_and_exit().
+    assert "finish_and_exit(app.exec())" in inspect.getsource(main.main)
+    src = inspect.getsource(main.finish_and_exit)
     assert "threading.Timer(10.0" in src and "os._exit" in src
     assert src.index("_hide_all_windows") < src.index("_cleanup_sftp_temp()")
     # the watchdog never skips the removal of RDP credentials and a secret

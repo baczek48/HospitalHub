@@ -47,3 +47,6 @@ known_hosts*
 .env
 .env.*
 crash*.txt
+
+# HospitalHub Remote: portable zips (build_remote.bat)
+dist_portable/

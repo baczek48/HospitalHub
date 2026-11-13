@@ -3,9 +3,19 @@ import os
 from pathlib import Path
 
 
-def _config_path() -> Path:
+def app_data_dir() -> Path:
+    """Where the settings and crash.log live: %APPDATA%/HospitalHubV2, or
+    the folder in HH_DATA_DIR — the portable HospitalHub Remote keeps them
+    next to its exe (2026-10-28)."""
+    portable = os.environ.get("HH_DATA_DIR")
+    if portable:
+        return Path(portable)
     app_data = os.environ.get("APPDATA") or Path.home()
-    config_dir = Path(app_data) / "HospitalHubV2"
+    return Path(app_data) / "HospitalHubV2"
+
+
+def _config_path() -> Path:
+    config_dir = app_data_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "config.json"
 
@@ -234,6 +244,46 @@ def load_ssh_start_maximized() -> bool:
 def save_ssh_start_maximized(enabled: bool) -> None:
     data = _load_all()
     data["ssh_start_maximized"] = bool(enabled)
+    _save_all(data)
+
+
+def load_rdp_in_terminal() -> bool:
+    """Where the RDP button opens a session (2026-11-13): True — as a tab of
+    the terminal window (ui.rdp_embedded, "Wsparcie Claude" available),
+    False — a separate mstsc window, as before.  The other one is always in
+    the button's menu."""
+    return bool(_load_all().get("rdp_in_terminal", False))
+
+
+def save_rdp_in_terminal(enabled: bool) -> None:
+    data = _load_all()
+    data["rdp_in_terminal"] = bool(enabled)
+    _save_all(data)
+
+
+def load_claude_strip_screens() -> bool:
+    """Saved "Wsparcie Claude" threads keep no screenshots (2026-11-13):
+    sealing a record replaces its images with a line of text.  On by default."""
+    return bool(_load_all().get("claude_strip_screens", True))
+
+
+def save_claude_strip_screens(enabled: bool) -> None:
+    data = _load_all()
+    data["claude_strip_screens"] = bool(enabled)
+    _save_all(data)
+
+
+def load_claude_thread_days() -> int:
+    """Saved threads not used for this many days are deleted; 0 — never."""
+    try:
+        return max(0, int(_load_all().get("claude_thread_days", 30)))
+    except (TypeError, ValueError):
+        return 30
+
+
+def save_claude_thread_days(days: int) -> None:
+    data = _load_all()
+    data["claude_thread_days"] = max(0, int(days))
     _save_all(data)
 
 

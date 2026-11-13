@@ -319,7 +319,8 @@ def _production_sources():
         rel = os.path.relpath(path, _PARENT)
         # build/ and dist/ are PyInstaller output — copies of the sources the
         # bundle carries, not modules of their own.
-        if (rel.split(os.sep)[0] in ("vpn", "tests", "smoke", "build", "dist")
+        if (rel.split(os.sep)[0] in ("vpn", "tests", "smoke", "build", "dist",
+                  "dist_portable")
                 or "__pycache__" in rel):
             continue
         yield rel, open(path, encoding="utf-8").read()

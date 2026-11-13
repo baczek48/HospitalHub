@@ -44,6 +44,10 @@ _MAX_CHARS = 60000
 #: Longest the tool server waits for the UI thread to answer a read.
 _READ_TIMEOUT_S = 30
 
+#: Session ids of the conversations running in this process — a sweep of
+#: records left by a crash must not delete theirs (claude_threads keeps it).
+from claude_threads import LIVE_SESSIONS as _LIVE_SESSIONS  # noqa: E402
+
 #: Claude's orange — the panel's frame and the SSH window's button share it.
 ACCENT = "#d97757"
 ACCENT_HOVER = "#e88a6b"
@@ -97,6 +101,59 @@ def system_prompt(label: str) -> str:
         "albo o który pytał administrator) — krótko. Jeśli nic istotnego, odpowiedz "
         f"dokładnie jednym słowem: {LIVE_SILENT}"
     )
+
+
+def screen_system_prompt(label: str) -> str:
+    """An RDP tab (2026-11-13): Claude looks at screenshots, read only."""
+    return (
+        "Działasz w HospitalHub jako „Wsparcie Claude” dla jednej sesji pulpitu "
+        f"zdalnego (RDP): {label}. Rozmawiasz z administratorem po polsku, krótko "
+        "i konkretnie.\n"
+        "Masz jedno narzędzie: screen_capture — zrzut ekranu tej sesji RDP. Nie "
+        "możesz niczego kliknąć, wpisać ani uruchomić: wszystko robi administrator. "
+        "Gdy coś trzeba zrobić, opisz dokładnie, gdzie kliknąć lub co wpisać "
+        "(komendy PowerShell/cmd w bloku kodu, jedna linia, gotowe do przepisania) "
+        "i jednym zdaniem napisz, po co; potem zrób nowy zrzut i sprawdź wynik.\n"
+        "Zasady: to komputery i serwery szpitalne, często produkcyjne. Najpierw "
+        "proponuj czynności tylko do odczytu (podgląd zdarzeń, usługi, menedżer "
+        "zadań, Get-Service, Get-EventLog -Newest, Get-Process, dir, type). Gdy "
+        "proponujesz coś, co zmienia stan (restart usługi lub komputera, usuwanie "
+        "plików, zmiany w rejestrze, instalacja), wyraźnie to zaznacz i opisz "
+        "skutki. Nigdy nie proś o hasła. Na ekranie mogą być dane osobowe "
+        "pacjentów — zrzuty NIE są maskowane: nie przepisuj tych danych w "
+        "odpowiedzi i nie opisuj ich bez potrzeby.\n"
+        "Zanim odpowiesz na pierwsze pytanie, zrób zrzut ekranu (screen_capture)."
+    )
+
+
+#: A screenshot for Claude: the long side at most this many pixels (more
+#: is scaled down by the model anyway, and costs the owner's subscription),
+#: and at most this many bytes before it is sent as JPEG instead of PNG.
+_SCREEN_MAX_SIDE = 1568
+_SCREEN_MAX_PNG = 2_500_000
+
+
+def encode_screenshot(image) -> tuple[str, str, int, int]:
+    """(base64, mime type, width, height) of a screenshot for Claude."""
+    import base64
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    if max(image.width(), image.height()) > _SCREEN_MAX_SIDE:
+        image = image.scaled(_SCREEN_MAX_SIDE, _SCREEN_MAX_SIDE,
+                             Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+
+    def encode(fmt: str, quality: int = -1) -> bytes:
+        data = QByteArray()
+        buf = QBuffer(data)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buf, fmt, quality)
+        buf.close()
+        return bytes(data)
+
+    raw, mime = encode("PNG"), "image/png"
+    if len(raw) > _SCREEN_MAX_PNG:
+        raw, mime = encode("JPG", 85), "image/jpeg"
+    return base64.b64encode(raw).decode("ascii"), mime, image.width(), image.height()
 
 
 def new_lines(previous: list[str], current: list[str]) -> list[str]:
@@ -220,15 +277,35 @@ class ClaudeSupportPanel(QWidget):
     _tool_request = pyqtSignal(object)
     _process_event = pyqtSignal(str, object)
 
+    _titled = pyqtSignal(str)
+
     def __init__(self, target, parent=None, *, process_factory=None,
-                 server_factory=None, find_claude=None):
+                 server_factory=None, find_claude=None, store=None, thread=None,
+                 title_maker=None):
         super().__init__(parent)
+        # Threads (2026-11-13): with a store, the conversation is a Claude
+        # Code session of our id, kept only when the owner saves it;
+        # `thread` resumes a saved one.  Without a store nothing is kept.
+        self._store = store
+        self._thread = thread
+        self._saved = thread is not None
+        self._title = thread.get("title", "") if thread else ""
+        self._log: list[dict] = list(thread.get("messages", [])) if thread else []
+        self._title_maker = title_maker
+        if store is not None:
+            import claude_threads as ct
+            self._session_id = thread["id"] if thread else ct.new_session_id()
+        else:
+            self._session_id = None
+        self._titled.connect(self._on_titled, Qt.ConnectionType.QueuedConnection)
         self.setObjectName("claudePanel")
         # A plain QWidget paints a style-sheet border only with this.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(_PANEL_STYLE)
         self.setMinimumWidth(320)
         self._target = target
+        #: An RDP tab: screenshots instead of text, no live mode (2026-11-13).
+        self._screen = getattr(target, "kind", lambda: "terminal")() == "screen"
         self._process_factory = process_factory or cs.ClaudeProcess
         self._server_factory = server_factory or cs.ToolServer
         self._find_claude = find_claude or cs.find_claude
@@ -272,6 +349,16 @@ class ClaudeSupportPanel(QWidget):
             "ważnego (najwyżej co 15 s; każda aktualizacja zużywa subskrypcję)")
         self._btn_live.toggled.connect(self._toggle_live)
         head.addWidget(self._btn_live)
+        # RDP: a screenshot only when the owner asks something (his choice
+        # of 2026-11-13) — no live mode sending the screen by itself.
+        self._btn_live.setVisible(not self._screen)
+        self._btn_save = QPushButton("Zapamiętaj")
+        self._btn_save.setToolTip(
+            "Zapisz tę rozmowę jako wątek — dostanie nazwę z treści i wrócisz do "
+            "niej z listy „Wątki” (Claude będzie pamiętał całą rozmowę)")
+        self._btn_save.clicked.connect(self._save_thread)
+        self._btn_save.setVisible(self._store is not None)
+        head.addWidget(self._btn_save)
         self._btn_end = QPushButton("Zakończ")
         self._btn_end.setToolTip("Zakończ wsparcie — Claude traci dostęp do terminala")
         self._btn_end.clicked.connect(self._end_or_dismiss)
@@ -279,10 +366,17 @@ class ClaudeSupportPanel(QWidget):
         root.addLayout(head)
 
         self._masked = 0
+        self._shots = 0
         self._scope = QLabel(self._scope_text())
         self._scope.setWordWrap(True)
         self._scope.setStyleSheet("color: #8b949e; font-size: 11px;")
         root.addWidget(self._scope)
+        self._thread_lbl = QLabel("")
+        self._thread_lbl.setWordWrap(True)
+        self._thread_lbl.setStyleSheet(f"color: {ACCENT_HOVER}; font-size: 12px;"
+                                       " font-weight: bold;")
+        self._thread_lbl.hide()
+        root.addWidget(self._thread_lbl)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -350,7 +444,9 @@ class ClaudeSupportPanel(QWidget):
             self._typing.stop()
             self._typing_row.hide()
 
-    def _bubble(self, text: str, who: str) -> QLabel:
+    def _bubble(self, text: str, who: str, *, replay: bool = False) -> QLabel:
+        if not replay and who in ("user", "claude"):
+            self._log.append({"who": who, "text": text})
         lbl = QLabel()
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
@@ -416,11 +512,42 @@ class ClaudeSupportPanel(QWidget):
                          "potem otwórz wsparcie ponownie.", "error")
             self._finish_ui()
             return False
-        self._server = self._server_factory(self._handle_tool)
-        url = self._server.start()
-        self._process = self._process_factory(
-            url, self._server.token, system_prompt(self._target.label()),
-            lambda kind, payload: self._process_event.emit(kind, payload))
+        on_event = lambda kind, payload: self._process_event.emit(kind, payload)  # noqa: E731
+        session = {}
+        if self._store is not None:
+            import claude_threads as ct
+            session = dict(session_id=self._session_id, resume=self._saved,
+                           cwd=ct.workdir())
+            # Records of conversations that never ended cleanly go now.
+            self._store.sweep(keep=_LIVE_SESSIONS | {self._session_id})
+            if self._saved:
+                # The sealed record back where Claude Code reads it — readable
+                # only while this conversation runs (2026-11-13).
+                try:
+                    opened = self._store.open_record(self._session_id)
+                except ct.ThreadsLocked:
+                    opened = False
+                if not opened:
+                    self._bubble("Nie można otworzyć zapisu tego wątku. Wątki są "
+                                 "zaszyfrowane hasłem vaulta — zaloguj się do vaulta, "
+                                 "w którym rozmowa została zapamiętana.", "error")
+                    self._finish_ui()
+                    return False
+            self._store.started(self._session_id, saved=self._saved)
+            _LIVE_SESSIONS.add(self._session_id)
+        if self._screen:
+            self._server = self._server_factory(self._handle_tool,
+                                                tools=cs.SCREEN_TOOLS)
+            url = self._server.start()
+            self._process = self._process_factory(
+                url, self._server.token, screen_system_prompt(self._target.label()),
+                on_event, tools=cs.SCREEN_TOOLS, **session)
+        else:
+            self._server = self._server_factory(self._handle_tool)
+            url = self._server.start()
+            self._process = self._process_factory(
+                url, self._server.token, system_prompt(self._target.label()),
+                on_event, **session)
         try:
             self._process.start()
         except Exception as exc:
@@ -428,10 +555,21 @@ class ClaudeSupportPanel(QWidget):
                          "error")
             self.end()
             return False
-        self._bubble("Claude widzi tę jedną kartę terminala (ekran i historię) i "
-                     "podpowiada komendy — wpisujesz je sam. Treść terminala trafia "
-                     "do Claude'a; numery PESEL są przed wysłaniem zamieniane na "
-                     f"{cs.PESEL_MASK}, inne dane pacjentów — nie.", "info")
+        if self._thread is not None:
+            self._replay(self._thread)
+            return True
+        if self._screen:
+            self._bubble("Claude widzi tę jedną sesję RDP — robi zrzut ekranu, gdy "
+                         "o coś zapytasz, i podpowiada, co zrobić; klikasz i piszesz "
+                         "sam. UWAGA: zrzut trafia do Claude'a w całości — obrazu nie "
+                         "da się zamaskować, więc dane pacjentów widoczne na ekranie "
+                         "(także PESEL) zostaną wysłane. Zasłoń je przed pytaniem.",
+                         "info")
+        else:
+            self._bubble("Claude widzi tę jedną kartę terminala (ekran i historię) i "
+                         "podpowiada komendy — wpisujesz je sam. Treść terminala trafia "
+                         "do Claude'a; numery PESEL są przed wysłaniem zamieniane na "
+                         f"{cs.PESEL_MASK}, inne dane pacjentów — nie.", "info")
         self._set_busy(False, "Gotowy.")
         self._input.setFocus()
         return True
@@ -454,8 +592,91 @@ class ClaudeSupportPanel(QWidget):
         server, self._server = self._server, None
         if server is not None:
             server.stop()
+        self._close_thread()
         self._finish_ui()
         self.closed.emit()
+
+    # -- threads (2026-11-13) ------------------------------------------------ #
+
+    def _replay(self, thread: dict) -> None:
+        """A saved thread comes back: its messages, then "resumed"."""
+        for m in thread.get("messages", []):
+            if m.get("who") in ("user", "claude"):
+                self._bubble(m.get("text", ""), m["who"], replay=True)
+        self._show_thread_title()
+        self._bubble(f"Wznowiono wątek „{self._title}” — Claude pamięta tę rozmowę. "
+                     f"Teraz: {self._target.label()}.", "info")
+        self._set_busy(False, "Gotowy.")
+        self._input.setFocus()
+
+    def _show_thread_title(self) -> None:
+        self._thread_lbl.setText(f"Wątek: {self._title}")
+        self._thread_lbl.show()
+        self._btn_save.setText("Zapamiętano")
+        self._btn_save.setEnabled(False)
+        self._btn_save.setToolTip("Ta rozmowa jest zapisana — lista „Wątki” obok "
+                                  "przycisku Wsparcie Claude")
+
+    def thread_id(self) -> str | None:
+        return self._session_id
+
+    def _save_thread(self) -> None:
+        """"Zapamiętaj": saved at once under a provisional name, then renamed
+        by Claude from the content (a short Haiku call in the background)."""
+        if self._store is None or self._saved or self._ended:
+            return
+        import claude_threads as ct
+        if not self._store.unlocked:
+            self._bubble("Nie można zapamiętać: wątki są szyfrowane hasłem vaulta, "
+                         "a klucz jeszcze nie jest odblokowany. Zaloguj się do vaulta "
+                         "szpitali i spróbuj ponownie.", "error")
+            return
+        self._saved = True
+        self._title = ct.fallback_title(self._log)
+        self._store.save(self._session_id, title=self._title, kind=self._kind(),
+                         label=self._target.label(), messages=self._log)
+        self._show_thread_title()
+        self._btn_save.setText("Nadaję nazwę…")
+        maker = self._title_maker or ct.make_title
+        messages, label = list(self._log), self._target.label()
+        threading.Thread(target=lambda: self._titled.emit(maker(messages, label)),
+                         name="claude-title", daemon=True).start()
+
+    def _on_titled(self, title: str) -> None:
+        if not title or self._store is None:
+            return
+        self._title = title
+        try:
+            self._store.rename(self._session_id, title)
+        except Exception:
+            pass
+        self._show_thread_title()
+
+    def _kind(self) -> str:
+        return "screen" if self._screen else "terminal"
+
+    def _sync_thread(self) -> None:
+        """A saved thread keeps its newest messages."""
+        if self._store is not None and self._saved:
+            try:
+                self._store.save(self._session_id, title=self._title,
+                                 kind=self._kind(), label=self._target.label(),
+                                 messages=self._log)
+            except Exception:
+                pass                         # locked meanwhile: the record stays
+
+    def _close_thread(self) -> None:
+        if self._store is None or self._session_id is None:
+            return
+        _LIVE_SESSIONS.discard(self._session_id)
+        if self._saved:
+            self._sync_thread()
+        # Once the process has let go of Claude Code's record: a saved thread's
+        # is sealed (encrypted, the plain file deleted), an unsaved one deleted.
+        store, sid = self._store, self._session_id
+        timer = threading.Timer(4.0, lambda: store.finished(sid))
+        timer.daemon = True
+        timer.start()
 
     def _finish_ui(self) -> None:
         self._ended = True
@@ -470,6 +691,10 @@ class ClaudeSupportPanel(QWidget):
         # tab (owner, 2026-10-21).
         self._btn_end.setText("Zamknij")
         self._btn_end.setToolTip("Zamknij panel wsparcia")
+        if not self._saved:
+            # The record of an unsaved conversation is deleted at the end.
+            self._btn_save.setEnabled(False)
+            self._btn_save.setToolTip("Zapamiętać można rozmowę, która trwa")
         self._state.setText("Wsparcie zakończone.")
 
     def _end_or_dismiss(self) -> None:
@@ -485,6 +710,12 @@ class ClaudeSupportPanel(QWidget):
     # -- PESEL masking (2026-10-21) ------------------------------------------ #
 
     def _scope_text(self) -> str:
+        if self._screen:
+            text = (f"RDP: {self._target.label()} · tylko odczyt · zrzuty ekranu "
+                    f"bez maskowania")
+            if self._shots:
+                text += f" · wysłane zrzuty: {self._shots}"
+            return text
         text = f"Terminal: {self._target.label()} · tylko odczyt"
         if self._masked:
             text += f" · zamaskowane PESEL: {self._masked}"
@@ -531,13 +762,15 @@ class ClaudeSupportPanel(QWidget):
                 self._live_spoke = True
                 self._bubble(str(payload), "claude")
         elif kind == "tool":
-            self._state.setText("Claude czyta terminal…")
+            self._state.setText("Claude patrzy na ekran…" if self._screen
+                                else "Claude czyta terminal…")
         elif kind == "turn_end":
             if payload.get("is_error"):
                 self._bubble(_login_hint(payload.get("text", "")), "error")
             live, self._live_turn = self._live_turn, False
             spoke, self._live_spoke = self._live_spoke, False
             self._set_busy(False, "Na żywo: bez uwag." if live and not spoke else "")
+            self._sync_thread()
         elif kind == "exit":
             stderr = str(payload.get("stderr") or "")
             self._bubble("Claude Code zakończył działanie."
@@ -547,7 +780,7 @@ class ClaudeSupportPanel(QWidget):
     # -- live mode --------------------------------------------------------- #
 
     def _toggle_live(self, on: bool) -> None:
-        if self._ended:
+        if self._ended or self._screen:
             return
         if on:
             self._live_seen = self._tail()
@@ -595,7 +828,7 @@ class ClaudeSupportPanel(QWidget):
 
     def _handle_tool(self, name: str, arguments: dict):
         """Runs in the tool server's thread; the terminal is read in the UI's."""
-        if name != cs.TOOL_READ:
+        if name != (cs.TOOL_SCREEN if self._screen else cs.TOOL_READ):
             return "Nieznane narzędzie.", True
         job = _Job(name, arguments)
         self._tool_request.emit(job)
@@ -608,6 +841,8 @@ class ClaudeSupportPanel(QWidget):
             return job.finish("Wsparcie zakończone.", True)
         if not self._target.alive():
             return job.finish("Karta terminala jest zamknięta albo rozłączona.", True)
+        if self._screen:
+            return self._capture_for(job)
         try:
             lines = int(job.arguments.get("lines") or 150)
         except (TypeError, ValueError):
@@ -615,6 +850,42 @@ class ClaudeSupportPanel(QWidget):
         lines = max(10, min(lines, 2000))
         job.finish(_trim(self._mask(self._target.read(lines)))
                    or "(terminal jest pusty)")
+
+
+    def _capture_for(self, job: _Job) -> None:
+        """A screenshot of the RDP tab for Claude, shown small in the
+        conversation too — the owner sees what left."""
+        image = self._target.capture()
+        if image is None:
+            return job.finish("Nie udało się zrobić zrzutu — sesja RDP nie jest "
+                              "połączona albo jej karta nie jest widoczna. Poproś "
+                              "administratora, żeby przełączył się na tę kartę.", True)
+        try:
+            data, mime, w, h = encode_screenshot(image)
+        except Exception as exc:
+            return job.finish(f"Zrzut się nie udał ({type(exc).__name__}).", True)
+        self._shots += 1
+        self._scope.setText(self._scope_text())
+        self._thumbnail(image)
+        job.finish(cs.image_result(data, mime, f"Zrzut ekranu sesji RDP, {w}×{h} px."))
+
+    def _thumbnail(self, image) -> None:
+        from PyQt6.QtGui import QPixmap
+        lbl = QLabel()
+        thumb = image.scaledToWidth(min(260, image.width()),
+                                    Qt.TransformationMode.SmoothTransformation)
+        lbl.setPixmap(QPixmap.fromImage(thumb))
+        lbl.setToolTip("Ten zrzut ekranu został wysłany do Claude'a")
+        lbl.setStyleSheet(f"border: 1px solid {ACCENT_DIM}; border-radius: 4px;")
+        row = QWidget()
+        lay = QVBoxLayout(row)
+        lay.setContentsMargins(4, 0, 0, 0)
+        lay.setSpacing(2)
+        cap = QLabel("Wysłany zrzut ekranu:")
+        cap.setStyleSheet("color: #8b949e; font-size: 11px;")
+        lay.addWidget(cap)
+        lay.addWidget(lbl, 0, Qt.AlignmentFlag.AlignLeft)
+        self._add(row)
 
 
 def _login_hint(text: str) -> str:

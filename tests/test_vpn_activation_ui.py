@@ -602,7 +602,7 @@ def test_27_the_new_ui_path_is_unreachable_from_production():
         rel = os.path.relpath(path, _PARENT)
         head = rel.split(os.sep)[0]
         # build/ and dist/: PyInstaller output, copies of the sources.
-        if head in ("tests", "vpn", "smoke", "build", "dist") or "__pycache__" in rel:
+        if head in ("tests", "vpn", "smoke", "build", "dist", "dist_portable") or "__pycache__" in rel:
             continue
         # Stage 46: the prepared V2 controller is the one other module allowed
         # to name the prompt — and `test_vpn_panel_v2_bridge` is what keeps

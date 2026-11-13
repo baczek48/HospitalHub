@@ -51,7 +51,47 @@ def test_the_panel_never_writes_to_its_target():
         tree = ast.parse(f.read())
     used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
             and isinstance(n.value, ast.Attribute) and n.value.attr == "_target"}
-    assert used <= {"label", "alive", "read"}, used
+    # "capture": the screenshot of an RDP tab (2026-11-13) — read only too.
+    assert used <= {"label", "alive", "read", "capture"}, used
+
+
+def test_the_rdp_target_cannot_click_or_type():
+    """2026-11-13: an RDP tab gives Claude screenshots and nothing else."""
+    with open(os.path.join(_PARENT, "ui", "ssh_panel.py"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    target = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.ClassDef) and n.name == "_RdpSupportTarget")
+    methods = {n.name for n in target.body if isinstance(n, ast.FunctionDef)}
+    assert methods == {"__init__", "kind", "label", "alive", "capture"}
+    called = {n.func.attr for n in ast.walk(target)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert called <= {"is_connected", "capture"}, called
+
+
+def test_the_rdp_tool_is_a_screenshot_only():
+    assert [t["name"] for t in cs.SCREEN_TOOLS] == [cs.TOOL_SCREEN]
+    assert cs.allowed_tool_names(cs.SCREEN_TOOLS) == ["mcp__hospitalhub__screen_capture"]
+    p = cs.ClaudeProcess("http://127.0.0.1:1/mcp", "t", "x", lambda *a: None,
+                         tools=cs.SCREEN_TOOLS)
+    cmd = p.command("claude.exe", r"C:\tmp\hh")
+    assert cmd[cmd.index("--tools") + 1] == ""
+    allowed = cmd[cmd.index("--allowedTools") + 1:cmd.index("--permission-mode")]
+    assert allowed == ["mcp__hospitalhub__screen_capture"]
+
+
+def test_a_screen_server_offers_no_terminal_tool_and_returns_an_image():
+    server = cs.ToolServer(lambda name, args: (cs.image_result("QUJD", note="n"), False),
+                           tools=cs.SCREEN_TOOLS)
+    listed = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert [t["name"] for t in listed["result"]["tools"]] == [cs.TOOL_SCREEN]
+    refused = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                             "params": {"name": cs.TOOL_READ, "arguments": {}}})
+    assert "error" in refused
+    called = server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                            "params": {"name": cs.TOOL_SCREEN, "arguments": {}}})
+    content = called["result"]["content"]
+    assert content[0] == {"type": "image", "data": "QUJD", "mimeType": "image/png"}
+    assert content[1] == {"type": "text", "text": "n"}
 
 
 def test_claude_code_runs_with_no_built_in_tools_and_only_this_server():
@@ -179,10 +219,19 @@ class Target:
         return "[root@srvDB ~]# docker compose ps\nasi-backend  Exited (1)\n\n\n"
 
 
+@pytest.fixture(autouse=True)
+def _private_thread_store(tmp_path, monkeypatch):
+    """Threads (2026-11-13): the window's panels keep a list and Claude Code
+    records — here in a temporary folder, never the user's profile."""
+    monkeypatch.setenv("HH_DATA_DIR", str(tmp_path / "hh_data"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude_cfg"))
+
+
 class FakeProcess:
     instances = []
 
-    def __init__(self, url, token, prompt, on_event):
+    def __init__(self, url, token, prompt, on_event, **kw):
+        self.kw = kw
         self.url, self.token, self.prompt, self.on_event = url, token, prompt, on_event
         self.sent, self.stopped = [], False
         FakeProcess.instances.append(self)

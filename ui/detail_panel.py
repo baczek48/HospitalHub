@@ -145,7 +145,7 @@ from ui.db_connect import launch_sqldeveloper
 from config import (load_column_widths, save_column_widths,
                     load_personal_vpn_vault, save_personal_vpn_vault,
                     load_vpn_autofill_enabled,
-                    load_ssh_start_maximized)
+                    load_ssh_start_maximized, load_rdp_in_terminal)
 
 # Session-level VPN profile cache (loaded once per app session)
 _vpn_session_profiles: list = []
@@ -1159,8 +1159,10 @@ class DetailPanel(QWidget):
                 menu.addAction(icon("globe", "#c9d1d9"), "Otwórz w przeglądarce",
                                lambda m=item: self._open_www(m))
             elif ctype == 'RDP':
-                menu.addAction("Połącz (RDP)",
-                               lambda m=item: connect_rdp(m, self, self._admin_unlocked))
+                menu.addAction("Połącz RDP w oknie terminala (Wsparcie Claude)",
+                               lambda m=item: self._open_rdp(m, True))
+                menu.addAction("Połącz RDP w osobnym oknie (mstsc)",
+                               lambda m=item: self._open_rdp(m, False))
             else:
                 menu.addAction(icon("connect", "#c9d1d9"), "Połącz (SSH + SFTP)",
                                lambda m=item: self._open_ssh(m))
@@ -1201,7 +1203,7 @@ class DetailPanel(QWidget):
         m = copy.copy(machine)
         m.credentials = [cred] + [c for c in machine.credentials if c is not cred]
         if getattr(machine, 'connection_type', 'SSH') == 'RDP':
-            connect_rdp(m, self, self._admin_unlocked)
+            self._open_rdp(m)
         else:
             self._open_ssh(m)
 
@@ -1262,15 +1264,19 @@ class DetailPanel(QWidget):
             btn_connect = QPushButton("RDP")
             btn_connect.setFixedSize(34, 28)
             btn_connect.setToolTip(
-                f"Połącz przez Remote Desktop (port {machine.rdp_port or '3389'})"
+                f"Połącz przez Remote Desktop (port {machine.rdp_port or '3389'})\n"
+                "Prawy klik: w oknie terminala / w osobnym oknie"
             )
+            btn_connect.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn_connect.customContextMenuRequested.connect(
+                lambda pos, m=machine, b=btn_connect:
+                    self._rdp_where_menu(m).exec(b.mapToGlobal(pos)))
             btn_connect.setStyleSheet(
                 "QPushButton { background: #2a1a35; color: #c084fc; border: 1px solid #6b3fa0;"
                 " border-radius: 4px; font-size: 11px; font-weight: bold; padding: 0; }"
                 "QPushButton:hover { background: #7c3aed; color: #fff; border-color: #c084fc; }"
             )
-            btn_connect.clicked.connect(
-                lambda _, m=machine: connect_rdp(m, self, self._admin_unlocked))
+            btn_connect.clicked.connect(lambda _, m=machine: self._open_rdp(m))
         elif machine.connection_type == "WWW":
             btn_connect = QPushButton()
             set_icon(btn_connect, "globe", "#3fb950", active="#7ee787")
@@ -1495,6 +1501,36 @@ class DetailPanel(QWidget):
             dlg.showMaximized()
         else:
             dlg.show()
+
+    def _open_rdp(self, machine: models.Machine, in_terminal: bool | None = None):
+        """RDP where the owner chose (2026-11-13): a tab of the hospital's
+        terminal window ("Wsparcie Claude" available), or mstsc on its own.
+        None: the default from Plik → "Otwieraj RDP w oknie terminala"."""
+        if in_terminal is None:
+            in_terminal = load_rdp_in_terminal()
+        if not in_terminal:
+            connect_rdp(machine, self, self._admin_unlocked)
+            return
+        dlg = SshDialog.window_for(self.window(), self.current_hospital)
+        if dlg is None:
+            dlg = SshDialog(None, hospital=self.current_hospital,
+                            all_hospitals=self._all_hospitals,
+                            admin_unlocked=self._admin_unlocked, parent=self)
+            if load_ssh_start_maximized():
+                dlg.showMaximized()
+            else:
+                dlg.show()
+        dlg.open_rdp_machine(machine)
+
+    def _rdp_where_menu(self, machine: models.Machine) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet(self._MENU_QSS)
+        tab = menu.addAction("Otwórz w oknie terminala (Wsparcie Claude)",
+                             lambda: self._open_rdp(machine, True))
+        win = menu.addAction("Otwórz w osobnym oknie (mstsc)",
+                             lambda: self._open_rdp(machine, False))
+        menu.setDefaultAction(tab if load_rdp_in_terminal() else win)
+        return menu
 
     def _open_www(self, machine: models.Machine):
         from PyQt6.QtGui import QDesktopServices

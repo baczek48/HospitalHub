@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def _crash_log_path() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home())
-    d = Path(base) / "HospitalHubV2"
+    # HospitalHub Remote (portable) sets HH_DATA_DIR: crash.log beside its exe.
+    d = Path(os.environ.get("HH_DATA_DIR") or Path(base) / "HospitalHubV2")
     try:
         d.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -551,6 +552,7 @@ class AppManager:
         except Exception:
             pass
         self.remove_window(window)
+        _settle_claude_threads()
         try:
             window.destroy_cleanup()
         except Exception:
@@ -580,6 +582,7 @@ class AppManager:
                     return  # Cancel — abort quit
         self._hide_all_windows()
         self._close_all_ssh_dialogs()
+        _settle_claude_threads(final=True)
         for w in self._windows:
             # One window's failing cleanup must never keep the application
             # from quitting (2026-10-17: it did, on every attempt).
@@ -765,7 +768,23 @@ def main():
     manager = AppManager(app)
     manager.run_initial_login()
 
-    exit_code = app.exec()
+    finish_and_exit(app.exec())
+
+
+def _settle_claude_threads(final: bool = False) -> None:
+    """Records of the "Wsparcie Claude" conversations just ended are sealed
+    while the vault's key is still in memory (claude_threads, 2026-11-13)."""
+    try:
+        import claude_threads
+        if claude_threads.is_unlocked():
+            claude_threads.settle(final=final)
+    except Exception:
+        _log_exception("claude_threads.settle")
+
+
+def finish_and_exit(exit_code: int) -> None:
+    """After the event loop: the cleanup that must not be skipped, then a
+    hard exit.  HospitalHub Remote (remote_main.py) ends the same way."""
     # Force-terminate: Qt threads or blocked I/O (paramiko/pysftp) can
     # keep the interpreter alive after app.quit(). Best-effort cleanup
     # already ran via tray/close handlers, so exit hard here.

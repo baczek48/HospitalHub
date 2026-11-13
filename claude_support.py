@@ -34,11 +34,14 @@ import threading
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-__all__ = ["ToolServer", "ClaudeProcess", "find_claude", "TOOLS", "SERVER_NAME",
-           "TOOL_READ", "allowed_tool_names", "mask_pesel", "PESEL_MASK"]
+__all__ = ["ToolServer", "ClaudeProcess", "find_claude", "TOOLS", "SCREEN_TOOLS",
+           "SERVER_NAME", "TOOL_READ", "TOOL_SCREEN", "allowed_tool_names",
+           "mask_pesel", "PESEL_MASK", "image_result"]
 
 SERVER_NAME = "hospitalhub"
 TOOL_READ = "terminal_read"
+#: An RDP tab (2026-11-13): Claude sees a screenshot instead of text.
+TOOL_SCREEN = "screen_capture"
 
 TOOLS = [
     {
@@ -59,8 +62,32 @@ TOOLS = [
 ]
 
 
-def allowed_tool_names() -> list[str]:
-    return [f"mcp__{SERVER_NAME}__{t['name']}" for t in TOOLS]
+#: The one tool of an RDP tab: a screenshot of the remote desktop, taken
+#: when Claude asks for it during a turn — that is, only after the owner has
+#: written something (no live mode for RDP, owner's choice of 2026-11-13).
+SCREEN_TOOLS = [
+    {
+        "name": TOOL_SCREEN,
+        "description": (
+            "Take a screenshot of the shared Remote Desktop (RDP) session and "
+            "look at it. Use it before answering and whenever you need to see "
+            "the current state of the remote screen."),
+        "inputSchema": {"type": "object", "properties": {},
+                        "additionalProperties": False},
+    }
+]
+
+
+def allowed_tool_names(tools=None) -> list[str]:
+    return [f"mcp__{SERVER_NAME}__{t['name']}" for t in (tools or TOOLS)]
+
+
+def image_result(png_base64: str, mime: str = "image/png", note: str = "") -> list[dict]:
+    """MCP content of a screenshot: the image, and a line of text with it."""
+    content = [{"type": "image", "data": png_base64, "mimeType": mime}]
+    if note:
+        content.append({"type": "text", "text": note})
+    return content
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -132,12 +159,16 @@ def mask_pesel(text: str) -> tuple[str, int]:
 class ToolServer:
     """A minimal MCP server (Streamable HTTP, JSON responses) on 127.0.0.1.
 
-    `handler(name, arguments) -> (text, is_error)` runs in the server's
-    request thread and may block (an approval waits for the user).
+    `handler(name, arguments) -> (result, is_error)` runs in the server's
+    request thread and may block (an approval waits for the user).  `result`
+    is text, or a list of MCP content blocks (a screenshot: :func:`image_result`).
+    `tools` is what the server offers: :data:`TOOLS` (an SSH tab) or
+    :data:`SCREEN_TOOLS` (an RDP tab) — never both.
     """
 
-    def __init__(self, handler):
+    def __init__(self, handler, tools=None):
         self._handler = handler
+        self.tools = list(tools or TOOLS)
         self.token = secrets.token_urlsafe(32)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -228,18 +259,19 @@ class ToolServer:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": self.tools}
         elif method == "tools/call":
             params = message.get("params") or {}
             name = params.get("name", "")
-            if name not in {t["name"] for t in TOOLS}:
+            if name not in {t["name"] for t in self.tools}:
                 return _error(mid, -32602, f"unknown tool: {name}")
             try:
-                text, is_error = self._handler(name, params.get("arguments") or {})
+                payload, is_error = self._handler(name, params.get("arguments") or {})
             except Exception as exc:
-                text, is_error = f"HospitalHub: błąd narzędzia ({type(exc).__name__})", True
-            result = {"content": [{"type": "text", "text": text}],
-                      "isError": bool(is_error)}
+                payload, is_error = f"HospitalHub: błąd narzędzia ({type(exc).__name__})", True
+            content = (payload if isinstance(payload, list)
+                       else [{"type": "text", "text": str(payload)}])
+            result = {"content": content, "isError": bool(is_error)}
         else:
             return _error(mid, -32601, f"method not found: {method}")
         return {"jsonrpc": "2.0", "id": mid, "result": result}
@@ -287,9 +319,20 @@ class ClaudeProcess:
     """
 
     def __init__(self, server_url: str, token: str, system_prompt: str, on_event,
-                 *, executable: str | None = None, spawn=subprocess.Popen):
+                 *, executable: str | None = None, spawn=subprocess.Popen,
+                 tools=None, session_id: str | None = None, resume: bool = False,
+                 cwd: str | None = None):
         self._url = server_url
         self._token = token
+        self._tools = list(tools or TOOLS)
+        #: Threads (2026-11-13, claude_threads): our id for Claude Code's
+        #: record — a new session (--session-id) or a saved one (--resume).
+        #: Without an id nothing is kept (--no-session-persistence).
+        self.session_id = session_id
+        self._resume = resume
+        #: Where Claude Code runs: one folder for every conversation, so a
+        #: resume finds its record (None: the temporary folder).
+        self._cwd = cwd
         self._prompt = system_prompt
         self._on_event = on_event
         self._executable = executable
@@ -302,15 +345,21 @@ class ClaudeProcess:
     def command(self, executable: str, workdir: str) -> list[str]:
         config = os.path.join(workdir, "mcp.json")
         prompt = os.path.join(workdir, "prompt.txt")
+        if not self.session_id:
+            session = ["--no-session-persistence"]
+        elif self._resume:
+            session = ["--resume", self.session_id]
+        else:
+            session = ["--session-id", self.session_id]
         return [executable, "-p",
                 "--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose",
                 "--tools", "",
                 "--mcp-config", config, "--strict-mcp-config",
-                "--allowedTools", *allowed_tool_names(),
+                "--allowedTools", *allowed_tool_names(self._tools),
                 "--permission-mode", "dontAsk",
                 "--setting-sources", "",
-                "--no-session-persistence",
+                *session,
                 "--append-system-prompt-file", prompt]
 
     def start(self) -> None:
@@ -326,7 +375,7 @@ class ClaudeProcess:
             f.write(self._prompt)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._proc = self._spawn(
-            self.command(executable, self._dir), cwd=self._dir,
+            self.command(executable, self._dir), cwd=self._cwd or self._dir,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             env=_clean_environment(), creationflags=flags)

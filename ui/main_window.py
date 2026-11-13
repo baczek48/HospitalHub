@@ -15,6 +15,7 @@ import models
 from vault_io import discard_backup, write_vault_atomic
 from config import (save_last_vault, load_vault_list,
                     load_ssh_start_maximized, save_ssh_start_maximized,
+                    load_rdp_in_terminal, save_rdp_in_terminal,
                     load_hospital_sort_order, save_hospital_sort_order,
                     load_theme, save_theme, save_personal_vpn_vault,
                     load_personal_vpn_vault)
@@ -69,6 +70,20 @@ def encrypt_off_ui_thread(data: dict, password: str) -> bytes:
     return outcome["content"]
 
 
+def _unlock_claude_threads(window) -> None:
+    """Saved "Wsparcie Claude" threads are encrypted under a key that this
+    vault's password unwraps — into memory, off the UI thread (2026-11-13)."""
+    password = getattr(window, "_password", "")
+    if getattr(window, "_vault_type", "global") == "vpn" or not password:
+        return
+    try:
+        import claude_threads
+        claude_threads.unlock_async(getattr(window, "_vault_path", ""), password,
+                                    owner=window)
+    except Exception:
+        pass
+
+
 class MainWindow(QMainWindow):
     open_vault_requested = pyqtSignal()
     force_close_requested = pyqtSignal()
@@ -105,6 +120,7 @@ class MainWindow(QMainWindow):
         self._setup_menu()
         if self._vault_type != "vpn":
             self._refresh_hospital_list()
+            _unlock_claude_threads(self)
         self._update_title()
 
     # ------------------------------------------------------------------ #
@@ -283,6 +299,14 @@ class MainWindow(QMainWindow):
         act_ssh_max.setChecked(load_ssh_start_maximized())
         act_ssh_max.toggled.connect(save_ssh_start_maximized)
 
+        # 2026-11-13: where the RDP button opens a session; the other place
+        # is always in the button's right-click menu.
+        act_rdp_tab = file_menu.addAction(
+            "Otwieraj RDP w oknie terminala (Wsparcie Claude)")
+        act_rdp_tab.setCheckable(True)
+        act_rdp_tab.setChecked(load_rdp_in_terminal())
+        act_rdp_tab.toggled.connect(save_rdp_in_terminal)
+
         file_menu.addSeparator()
 
         act_close = file_menu.addAction("Zamknij okno")
@@ -292,7 +316,7 @@ class MainWindow(QMainWindow):
         act_exit.triggered.connect(self._force_close)
         # Docked, the VPN menu leaves out what the main window's Plik already
         # has, and "Zamknij okno" (the X in the pane's header does it).
-        self._dock_skip = (act_open_vault, act_ssh_max, act_close)
+        self._dock_skip = (act_open_vault, act_ssh_max, act_rdp_tab, act_close)
 
         view_menu = menu.addMenu("Widok")
         theme_menu = view_menu.addMenu("Motyw")
@@ -589,6 +613,7 @@ class MainWindow(QMainWindow):
             if self._do_save(path):
                 self._vault_path = path
                 save_last_vault(path)
+                _unlock_claude_threads(self)
                 self._update_title()
 
     def _do_save(self, path: str) -> bool:
@@ -700,6 +725,8 @@ class MainWindow(QMainWindow):
                 # password — the one the user may be changing because it
                 # leaked.  It must not stay next to the vault (review 65/1).
                 discard_backup(self._vault_path)
+                # The thread key: wrapped for the new password, the old wrap gone.
+                _unlock_claude_threads(self)
                 QMessageBox.information(
                     self, "Sukces", "Hasło zostało zmienione i vault zapisany."
                 )
@@ -843,6 +870,11 @@ class MainWindow(QMainWindow):
     def destroy_cleanup(self):
         """Stop all background timers/workers before final destruction."""
         self._admin_lock_timer.stop()
+        try:
+            import claude_threads
+            claude_threads.release(self)
+        except Exception:
+            pass
         if self._vpn_panel is not None:
             from ui import detail_panel as _dp
             _dp.unshare_vpn_window(self._vpn_panel)

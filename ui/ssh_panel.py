@@ -7472,6 +7472,9 @@ class _EnvironmentPanel(QWidget):
     """Machine list with hospital dropdown, double-click connect, credential context menu."""
     open_machine = pyqtSignal(object)            # machine (uses first cred)
     open_machine_cred = pyqtSignal(object, object)  # machine, credential
+    #: An RDP machine where the owner chose (2026-11-13): machine, credential
+    #: or None, True = a tab of this window / False = a separate mstsc window.
+    open_rdp = pyqtSignal(object, object, bool)
 
     _STYLE_IDLE = (
         "QFrame#machineCard { background:#1a1d28; border:1px solid #2a2d3a;"
@@ -7702,8 +7705,13 @@ class _EnvironmentPanel(QWidget):
                 "QPushButton:hover { background:#7c3aed; color:#fff;"
                 " border-color:#7c3aed; }"
             )
-            btn.clicked.connect(lambda _=False, _m=m: _connect_rdp(
-                _m, self, self._admin_unlocked))
+            btn.setToolTip(btn.toolTip() + "\nPrawy klik: w oknie terminala / "
+                           "w osobnym oknie")
+            btn.clicked.connect(lambda _=False, _m=m: self._rdp_default(_m))
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, _m=m, _b=btn: self._rdp_where_menu(_m, None).exec(
+                    _b.mapToGlobal(pos)))
         else:
             btn = QPushButton("SSH")
             btn.setFixedSize(36, 18)
@@ -7782,9 +7790,32 @@ class _EnvironmentPanel(QWidget):
 
     def _dblclick_connect(self, machine):
         if getattr(machine, 'connection_type', 'SSH') == 'RDP':
-            _connect_rdp(machine, self, self._admin_unlocked)
+            self._rdp_default(machine)
         else:
             self.open_machine.emit(machine)
+
+    def _rdp_default(self, machine, cred=None) -> None:
+        from config import load_rdp_in_terminal
+        self.open_rdp.emit(machine, cred, load_rdp_in_terminal())
+
+    _RDP_MENU_QSS = (
+        "QMenu{background:#1a1d28;color:#e1e4eb;border:1px solid #2a2d3a;"
+        "border-radius:10px;padding:6px;}"
+        "QMenu::item{padding:6px 18px;border-radius:6px;}"
+        "QMenu::item:selected{background:#4a5adf;}"
+        "QMenu::separator{height:1px;background:#2a2d3a;margin:4px 10px;}")
+
+    def _rdp_where_menu(self, machine, cred) -> QMenu:
+        """"W oknie terminala" / "W osobnym oknie" — the default first."""
+        from config import load_rdp_in_terminal
+        menu = QMenu(self)
+        menu.setStyleSheet(self._RDP_MENU_QSS)
+        tab = menu.addAction("Otwórz w oknie terminala (Wsparcie Claude)",
+                             lambda: self.open_rdp.emit(machine, cred, True))
+        win = menu.addAction("Otwórz w osobnym oknie (mstsc)",
+                             lambda: self.open_rdp.emit(machine, cred, False))
+        menu.setDefaultAction(tab if load_rdp_in_terminal() else win)
+        return menu
 
     def _show_cred_menu(self, machine, card, pos):
         menu = QMenu(self)
@@ -7797,6 +7828,13 @@ class _EnvironmentPanel(QWidget):
         )
         vis_creds = machine.credentials if self._admin_unlocked else [
             c for c in machine.credentials if not c.admin_only]
+        is_rdp = getattr(machine, 'connection_type', 'SSH') == 'RDP'
+        if is_rdp:
+            menu.addAction("Otwórz w oknie terminala (Wsparcie Claude)",
+                           lambda: self.open_rdp.emit(machine, None, True))
+            menu.addAction("Otwórz w osobnym oknie (mstsc)",
+                           lambda: self.open_rdp.emit(machine, None, False))
+            menu.addSeparator()
         if vis_creds:
             header = menu.addAction("Połącz jako:")
             header.setEnabled(False)
@@ -7805,6 +7843,14 @@ class _EnvironmentPanel(QWidget):
                 label = cred.login
                 if cred.note:
                     label += f"  ({cred.note})"
+                if is_rdp:
+                    sub = menu.addMenu(label)
+                    sub.setStyleSheet(self._RDP_MENU_QSS)
+                    sub.addAction("W oknie terminala",
+                        lambda _c=cred, _m=machine: self.open_rdp.emit(_m, _c, True))
+                    sub.addAction("W osobnym oknie",
+                        lambda _c=cred, _m=machine: self.open_rdp.emit(_m, _c, False))
+                    continue
                 menu.addAction(label,
                     lambda _c=cred, _m=machine: self.open_machine_cred.emit(_m, _c))
         else:
@@ -8050,6 +8096,9 @@ class _Session:
         #: reading) — shown only while this tab is on screen (2026-10-21).
         self.claude_panel = None
 
+    #: An SSH tab; _RdpSession says True.
+    is_rdp = False
+
     @property
     def term(self) -> 'TerminalWidget':
         return self.pane.term
@@ -8057,6 +8106,37 @@ class _Session:
     @property
     def excluded(self) -> bool:
         return self.pane.exclude_cb.isChecked()
+
+
+class _RdpSession:
+    """One RDP tab (2026-11-13): the remote desktop in a tab of this window,
+    so "Wsparcie Claude" can be switched on for it.
+
+    It stands in the window's list of sessions beside the SSH ones (the tab
+    order is the list order) and has the attributes the window reads from
+    every session; the SSH-only paths (keys, SFTP, statistics, search,
+    Multi-exec) check ``is_rdp`` and leave it out.
+    """
+
+    is_rdp = True
+    #: Multi-exec never types into it.
+    excluded = True
+    worker = None
+    stats_worker = None
+    sftp = None
+    sftp_client = None
+    sftp_path = '/'
+    last_stats = None
+    reconnecting = False
+    term = None
+
+    def __init__(self, pane, label: str, machine):
+        self.pane = pane
+        self.label = label
+        self.machine = machine
+        self.has_unread = False
+        self.sftp_history: list[str] = []
+        self.claude_panel = None
 
 
 # ──────────────────────────────────────── Add-session dialog ─────────────────
@@ -8377,6 +8457,28 @@ class _SupportTarget:
         return "\n".join(rows[-lines:])
 
 
+class _RdpSupportTarget:
+    """One RDP tab as "Wsparcie Claude" sees it: screenshots of the remote
+    desktop, taken when Claude asks during a turn.  It cannot click or type."""
+
+    def __init__(self, dialog: 'SshDialog', session: '_RdpSession'):
+        self._dialog = dialog
+        self._session = session
+
+    def kind(self) -> str:
+        return "screen"
+
+    def label(self) -> str:
+        return self._session.label
+
+    def alive(self) -> bool:
+        s = self._session
+        return s in self._dialog._sessions and s.pane.is_connected()
+
+    def capture(self):
+        return self._session.pane.capture()
+
+
 
 class SshDialog(QDialog):
     # Class-level list to prevent garbage collection of detached windows
@@ -8418,8 +8520,11 @@ class SshDialog(QDialog):
         self._hospital = hospital
         self._all_hospitals = all_hospitals or []
         self._admin_unlocked = admin_unlocked
-        vis_creds = machine.credentials if admin_unlocked else [
-            c for c in machine.credentials if not c.admin_only]
+        # No machine (HospitalHub Remote, 2026-10-28): the window opens on
+        # its machine list and connects nothing by itself.
+        creds = machine.credentials if machine is not None else []
+        vis_creds = creds if admin_unlocked else [
+            c for c in creds if not c.admin_only]
         self._cred     = vis_creds[0] if vis_creds else None
         self._sessions: list[_Session] = []
         self._multiexec = False
@@ -8443,7 +8548,8 @@ class SshDialog(QDialog):
             self._status("Brak biblioteki paramiko. Zainstaluj: pip install paramiko", err=True)
             return
 
-        QTimer.singleShot(0, self._add_first_session)
+        if machine is not None:
+            QTimer.singleShot(0, self._add_first_session)
 
     def keyPressEvent(self, event):
         """Cycle session tabs with Ctrl+Tab / Ctrl+Shift+Tab.
@@ -8494,12 +8600,11 @@ class SshDialog(QDialog):
         self._sftp_panel.status_msg.connect(lambda t, e: self._status(t, err=e))
         left_tabs.addTab(self._sftp_panel, icon("folder", "#e2b340"), "Pliki")
 
-        self._env_panel = _EnvironmentPanel(
-            self._hospital, all_hospitals=self._all_hospitals,
-            initial_ip=self._machine.ip, initial_machine=self._machine,
-            admin_unlocked=self._admin_unlocked)
+        self._env_panel = self._make_env_panel()
         self._env_panel.open_machine.connect(self._open_extra_machine)
         self._env_panel.open_machine_cred.connect(self._open_machine_with_cred)
+        if hasattr(self._env_panel, 'open_rdp'):
+            self._env_panel.open_rdp.connect(self._open_rdp_where)
         left_tabs.addTab(self._env_panel, icon("monitor", "#58a6ff"), "Środowisko")
 
         self._left_tabs = left_tabs
@@ -8554,9 +8659,24 @@ class SshDialog(QDialog):
             "QPushButton:hover{background:#33200f;border-color:#d97757;}")
         self._btn_claude.toggled.connect(self._toggle_claude_support)
 
+        # Saved conversations (2026-11-13): back to one on the tab on screen.
+        self._btn_threads = QPushButton("Wątki")
+        set_icon(self._btn_threads, "clipboard", "#e88a6b", size=14)
+        self._btn_threads.setToolTip(
+            "Zapamiętane rozmowy z Claude — wybierz, aby wrócić do rozmowy na "
+            "bieżącej karcie")
+        self._btn_threads.setStyleSheet(
+            "QPushButton{background:#1a1310;color:#e88a6b;"
+            "border:1px solid #3d2418;border-radius:6px;padding:4px 12px;"
+            "font-size:11px;}"
+            "QPushButton:hover{background:#33200f;border-color:#d97757;}"
+            "QPushButton::menu-indicator{width:0;}")
+        self._btn_threads.clicked.connect(self._show_threads_menu)
+
         tb.addWidget(self._btn_multiexec)
         tb.addWidget(btn_new)
         tb.addWidget(self._btn_claude)
+        tb.addWidget(self._btn_threads)
         tb.addStretch()
         tlay.addLayout(tb)
 
@@ -8586,6 +8706,11 @@ class SshDialog(QDialog):
         self._grid_layout.setContentsMargins(4, 4, 4, 4)
         self._grid_layout.setSpacing(4)
         self._mode_stack.addWidget(self._grid_container)
+        # RDP tabs wait here while Multi-exec shows the SSH grid: a parent
+        # inside this window, never None — a parentless native widget gets a
+        # window of its own, and the remote session would go with the old one.
+        self._rdp_parking = QWidget(self)
+        self._rdp_parking.hide()
 
         tlay.addWidget(self._mode_stack, 1)
         # The terminal and "Wsparcie Claude" share an inner splitter with a
@@ -8759,6 +8884,16 @@ class SshDialog(QDialog):
 
     _SFTP_PANEL_WIDTH = 250
 
+    def _make_env_panel(self) -> QWidget:
+        """The machine list of the left panel.  It emits ``open_machine`` and
+        ``open_machine_cred`` and has ``set_active`` / ``set_admin_mode``;
+        HospitalHub Remote puts its own list here."""
+        return _EnvironmentPanel(
+            self._hospital, all_hospitals=self._all_hospitals,
+            initial_ip=self._machine.ip if self._machine else '',
+            initial_machine=self._machine,
+            admin_unlocked=self._admin_unlocked)
+
     def _on_splitter_moved(self, pos, index):
         width = self._main_splitter.sizes()[0]
         self._left_collapsed = (width == 0)
@@ -8923,6 +9058,55 @@ class SshDialog(QDialog):
 
         QTimer.singleShot(150, term.setFocus)
 
+    # ── RDP tabs (2026-11-13) ─────────────────────────────────────────────
+
+    def open_rdp_machine(self, machine, cred=None) -> None:
+        """`machine` over RDP in a new tab of this window, brought up."""
+        self._add_rdp_session(machine, cred)
+        if self.isMinimized():
+            if self._was_maximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _add_rdp_session(self, machine, cred=None) -> None:
+        from ui.rdp_embedded import RdpPane, available
+        if cred is None:
+            creds = machine.credentials if self._admin_unlocked else [
+                c for c in machine.credentials if not c.admin_only]
+            cred = creds[0] if creds else None
+        label = machine.ip + (f"  ({machine.name})" if machine.name else "")
+        if not available():
+            QMessageBox.critical(self, "Błąd RDP",
+                                 "Ten Windows nie ma kontrolki pulpitu zdalnego "
+                                 "(mstscax.dll). Użyj „Otwórz w osobnym oknie”.")
+            return
+        try:
+            pane = RdpPane(machine, cred, label)
+        except ValueError as exc:            # address or port from the vault
+            QMessageBox.critical(self, "Błąd RDP", str(exc))
+            return
+        session = _RdpSession(pane, label, machine)
+        pane.close_requested.connect(
+            lambda s=session: self._close_session_by_ref(s))
+        pane.state_changed.connect(
+            lambda _state, s=session: self._on_rdp_state(s))
+        self._sessions.append(session)
+        if self._multiexec:
+            # Multi-exec shows SSH only: the tab waits for the tab view.
+            # It connects when it is first shown.
+            pane.setParent(self._rdp_parking)
+            self._notice("Karta RDP otwarta — zobaczysz ją po wyłączeniu Multi-exec.")
+        else:
+            self._tab_widget.addTab(pane, label)
+            self._tab_widget.setCurrentIndex(self._tab_widget.count() - 1)
+
+    def _on_rdp_state(self, s: '_RdpSession') -> None:
+        if self._active_session() is s:
+            self._update_window_title()
+
     def _auto_close_session(self, worker: '_SshWorker'):
         """Invoked when a worker's SSH session ends — shows disconnect banner then closes tab."""
         for s in self._sessions:
@@ -8985,6 +9169,9 @@ class SshDialog(QDialog):
         if self._multiexec:
             return
         src = self._sessions[idx]
+        if src.is_rdp:
+            self._add_rdp_session(src.machine)
+            return
         w = src.worker
         host = getattr(w, '_host', '')
         user = getattr(w, '_user', '')
@@ -9058,7 +9245,9 @@ class SshDialog(QDialog):
         and in Alt+Tab (UX audit E-18)."""
         parts = ["SSH"]
         s = self._active_session()
-        if s is not None:
+        if s is not None and s.is_rdp:
+            parts = ["RDP", s.pane.host]
+        elif s is not None:
             w = s.worker
             parts.append(f"{w._user}@{w._host}" if w._user else w._host)
         hospital = getattr(self._hospital, 'name', '') if self._hospital else ''
@@ -9093,6 +9282,13 @@ class SshDialog(QDialog):
             self._sftp_panel.switch_sftp(None, None)
             return
         s = self._sessions[idx]
+        if s.is_rdp:
+            # No terminal, files or statistics: the card lit, the rest empty.
+            self._env_panel.set_active(s.machine.ip, s.machine)
+            self._sftp_panel.switch_sftp(None, None)
+            self._clear_stats_display()
+            self._sync_search_ui_to_active()
+            return
         # Drain anything that buffered while this tab was hidden (throttled
         # feed in TerminalWidget) so the user sees current state immediately.
         s.pane.term.flush_now()
@@ -9121,6 +9317,9 @@ class SshDialog(QDialog):
         Missing/empty credentials → open session with blank auth; the SSH
         worker will prompt for Login/Password directly in the terminal.
         """
+        if getattr(machine, 'connection_type', 'SSH') == 'RDP':
+            self._open_rdp_by_choice(machine)
+            return
         vis_creds = machine.credentials if self._admin_unlocked else [
             c for c in machine.credentials if not c.admin_only]
         cred = vis_creds[0] if vis_creds else None
@@ -9133,6 +9332,10 @@ class SshDialog(QDialog):
 
     def _open_machine_with_cred(self, machine, cred):
         """Connect to a machine with a specific credential (from context menu)."""
+        if getattr(machine, 'connection_type', 'SSH') == 'RDP':
+            # It opened an SSH tab to an RDP machine before (2026-11-13).
+            self._open_rdp_by_choice(machine, cred)
+            return
         label = machine.ip + (f"  ({machine.name})" if machine.name else "")
         label += f"  [{cred.login}]"
         self._add_session(label=label, ip=machine.ip,
@@ -9140,12 +9343,32 @@ class SshDialog(QDialog):
                           machine=machine)
         self._left_tabs.setCurrentWidget(self._sftp_panel)
 
+    def _open_rdp_where(self, machine, cred, in_terminal: bool) -> None:
+        if in_terminal:
+            self._add_rdp_session(machine, cred)
+        else:
+            from ui.rdp import machine_with_first
+            _connect_rdp(machine_with_first(machine, cred), self, self._admin_unlocked)
+
+    def _open_rdp_by_choice(self, machine, cred=None) -> None:
+        """An RDP machine from the Environment list: the default place
+        (Plik → "Otwieraj RDP w oknie terminala")."""
+        from config import load_rdp_in_terminal
+        if load_rdp_in_terminal():
+            self._add_rdp_session(machine, cred)
+        else:
+            from ui.rdp import machine_with_first
+            _connect_rdp(machine_with_first(machine, cred), self, self._admin_unlocked)
+
     def _teardown_session(self, s: '_Session'):
         """Release all memory held by a session (worker + pyte scrollback).
 
         Used by both single-tab close and full-window close paths so that
         closing the SSH window actually frees scrollback (50k lines × n sessions).
         """
+        if getattr(s, 'is_rdp', False):
+            s.pane.shutdown()
+            return
         # Stop any pending auto-reconnect loop so a queued timer can't revive
         # a tab the user just closed.
         s.reconnecting = False
@@ -9254,6 +9477,124 @@ class SshDialog(QDialog):
         self._btn_claude.setChecked(s is not None and self._claude_live(s))
         self._btn_claude.blockSignals(False)
 
+    # ── Saved threads (2026-11-13) ────────────────────────────────────────
+
+    _THREADS_MENU_QSS = (
+        "QMenu { background:#1a1d28; color:#e1e4eb; border:1px solid #2a2d3a;"
+        " border-radius:10px; padding:6px; }"
+        "QMenu::item { padding:7px 16px; border-radius:6px; font-size:12px; }"
+        "QMenu::item:selected { background:#d97757; color:#fff; }"
+        "QMenu::item:disabled { color:#6e7681; }"
+        "QMenu::separator { height:1px; background:#2a2d3a; margin:4px 10px; }")
+
+    @staticmethod
+    def _thread_store():
+        import claude_threads
+        return claude_threads.ThreadStore()
+
+    def _show_threads_menu(self) -> None:
+        store = self._thread_store()
+        threads = store.threads()
+        s = self._current_session()
+        kind = None if s is None else ("screen" if s.is_rdp else "terminal")
+        menu = QMenu(self)
+        menu.setStyleSheet(self._THREADS_MENU_QSS)
+        menu.setToolTipsVisible(True)
+        if not store.unlocked:
+            a = menu.addAction("Wątki są zaszyfrowane — zaloguj się do vaulta, "
+                               "w którym zostały zapamiętane")
+            a.setEnabled(False)
+        elif not threads:
+            a = menu.addAction("Brak zapamiętanych rozmów — w panelu Wsparcie "
+                               "Claude kliknij „Zapamiętaj”")
+            a.setEnabled(False)
+        for t in threads[:30]:
+            when = (t.get("updated") or "")[:16].replace("T", " ")
+            what = "RDP" if t.get("kind") == "screen" else "SSH"
+            sub = menu.addMenu(f"{t.get('title', 'Rozmowa')}   ·   {what} · {when}")
+            sub.setStyleSheet(self._THREADS_MENU_QSS)
+            sub.setToolTipsVisible(True)
+            info = sub.addAction(f"Karta: {t.get('label', '')}")
+            info.setEnabled(False)
+            act = sub.addAction("Wróć do rozmowy na tej karcie",
+                                lambda t=t: self._resume_thread(t))
+            if kind != t.get("kind"):
+                act.setEnabled(False)
+                act.setText("Wróć do rozmowy — otwórz kartę "
+                            + ("RDP" if t.get("kind") == "screen" else "SSH"))
+            sub.addSeparator()
+            sub.addAction("Zmień nazwę…", lambda t=t: self._rename_thread(t))
+            sub.addAction("Usuń wątek…", lambda t=t: self._delete_thread(t))
+        self._add_thread_settings(menu)
+        menu.exec(self._btn_threads.mapToGlobal(
+            QPoint(0, self._btn_threads.height())))
+
+    def _add_thread_settings(self, menu) -> None:
+        """What a saved thread keeps (2026-11-13): screenshots out, days."""
+        import config
+        menu.addSeparator()
+        strip = menu.addAction("Usuwaj zrzuty ekranu z zapisanych rozmów")
+        strip.setCheckable(True)
+        strip.setChecked(config.load_claude_strip_screens())
+        strip.setToolTip("Po zakończeniu rozmowy obrazy z sesji RDP są usuwane z "
+                         "zapisu — Claude pamięta, co ustaliliście, ale nie widzi "
+                         "starych zrzutów (dane pacjentów).")
+        strip.toggled.connect(config.save_claude_strip_screens)
+        days = config.load_claude_thread_days()
+        expire = menu.addAction("Usuwaj wątki nieużywane od 30 dni")
+        expire.setCheckable(True)
+        expire.setChecked(days > 0)
+        expire.toggled.connect(
+            lambda on: config.save_claude_thread_days(30 if on else 0))
+
+    def _resume_thread(self, thread: dict) -> None:
+        s = self._current_session()
+        if s is None:
+            return
+        if self._claude_live(s):
+            if s.claude_panel.thread_id() == thread["id"]:
+                return
+            if not self._ask_close("Na tej karcie trwa rozmowa z Claude.\n\n"
+                                   "Zakończyć ją i wrócić do wybranego wątku?"):
+                return
+        if any(self._claude_live(o) and o.claude_panel.thread_id() == thread["id"]
+               for o in self._sessions):
+            QMessageBox.information(self, "Wątek", "Ten wątek jest już otwarty na "
+                                    "innej karcie.")
+            return
+        self._start_claude_panel(s, thread)
+
+    def _rename_thread(self, thread: dict) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+        title, ok = QInputDialog.getText(self, "Zmień nazwę wątku", "Nazwa:",
+                                         text=thread.get("title", ""))
+        if ok and title.strip():
+            try:
+                self._thread_store().rename(thread["id"], title)
+            except Exception as exc:
+                QMessageBox.warning(self, "Wątek", f"Nie można zmienić nazwy "
+                                    f"({type(exc).__name__}).")
+
+    def _delete_thread(self, thread: dict) -> None:
+        if any(self._claude_live(o) and o.claude_panel.thread_id() == thread["id"]
+               for o in self._sessions):
+            QMessageBox.information(self, "Wątek", "Najpierw zakończ tę rozmowę.")
+            return
+        box = QMessageBox(QMessageBox.Icon.Question, "Usunąć wątek?",
+                          f"„{thread.get('title', '')}”\n\nRozmowa zostanie usunięta "
+                          "z listy i z zapisu Claude Code na tym komputerze.",
+                          parent=self)
+        yes = box.addButton("Usuń", QMessageBox.ButtonRole.DestructiveRole)
+        no = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(no)
+        box.exec()
+        if box.clickedButton() is yes:
+            try:
+                self._thread_store().delete(thread["id"])
+            except Exception as exc:
+                QMessageBox.warning(self, "Wątek", f"Nie można usunąć wątku "
+                                    f"({type(exc).__name__}).")
+
     def _toggle_claude_support(self, on: bool) -> None:
         s = self._current_session()
         if not on:
@@ -9271,10 +9612,17 @@ class SshDialog(QDialog):
         if self._claude_live(s):
             self._sync_claude_panel()
             return
+        self._start_claude_panel(s)
+
+    def _start_claude_panel(self, s, thread=None) -> None:
+        """A new conversation on tab `s`, or a saved `thread` resumed."""
         from ui.claude_panel import ClaudeSupportPanel
         # This tab's last conversation, kept for reading, goes now.
         self._drop_claude_panel(s)
-        panel = ClaudeSupportPanel(_SupportTarget(self, s), self)
+        target = (_RdpSupportTarget(self, s) if s.is_rdp
+                  else _SupportTarget(self, s))
+        panel = ClaudeSupportPanel(target, self, store=self._thread_store(),
+                                   thread=thread)
         panel.closed.connect(
             lambda s=s, p=panel: self._on_claude_support_closed(s, p))
         panel.dismissed.connect(
@@ -9311,6 +9659,13 @@ class SshDialog(QDialog):
         if s.claude_panel is not None:
             s.claude_panel.target_gone()
             self._drop_claude_panel(s)
+        if getattr(s, 'is_rdp', False):
+            self._teardown_session(s)
+            if not self._multiexec:
+                self._tab_widget.removeTab(self._tab_widget.indexOf(s.pane))
+            s.pane.hide()
+            s.pane.deleteLater()
+            return
         # Push edits still waiting in temp while this session's SFTP is open
         # (C1-04): the teardown below closes it, and a flush after that met a
         # closed transport — the last ~2 s of edits were lost.
@@ -9352,20 +9707,23 @@ class SshDialog(QDialog):
     def _rebuild_grid(self):
         # Pull panes out of tab widget — removeTab hides them, so we must
         # explicitly reparent to None and then show() after addWidget().
+        # RDP tabs go to the parking instead (see _setup_ui): never None.
+        rdp_panes = {id(s.pane) for s in self._sessions if s.is_rdp}
         while self._tab_widget.count():
             w = self._tab_widget.widget(0)
             self._tab_widget.removeTab(0)
             if w:
-                w.setParent(None)
+                w.setParent(self._rdp_parking if id(w) in rdp_panes else None)
         while self._grid_layout.count():
             item = self._grid_layout.takeAt(0)
             if item and item.widget():
                 item.widget().setParent(None)
 
-        n = len(self._sessions)
+        ssh = [s for s in self._sessions if not s.is_rdp]
+        n = len(ssh)
         n_rows = max(1, (n + 1) // 2)
 
-        for i, s in enumerate(self._sessions):
+        for i, s in enumerate(ssh):
             r, c = divmod(i, 2)
             self._grid_layout.addWidget(s.pane, r, c)
             s.pane.show()
@@ -9428,7 +9786,7 @@ class SshDialog(QDialog):
 
     def _clear_current(self):
         idx = self._tab_widget.currentIndex()
-        if 0 <= idx < len(self._sessions):
+        if 0 <= idx < len(self._sessions) and not self._sessions[idx].is_rdp:
             s = self._sessions[idx]
             s.term.clear()
             # Re-display connection banner
@@ -9446,8 +9804,9 @@ class SshDialog(QDialog):
     # ── SSH / PTY ─────────────────────────────────────────────────────────
 
     def _on_ssh_error(self, msg: str):
-        if self._sessions:
-            self._sessions[0].term.feed(f"\x1b[31mBłąd SSH: {msg}\x1b[0m\r\n")
+        ssh = [s for s in self._sessions if not s.is_rdp]
+        if ssh:
+            ssh[0].term.feed(f"\x1b[31mBłąd SSH: {msg}\x1b[0m\r\n")
         self._status(f"Błąd SSH: {msg}", err=True)
 
     # ── Connection helpers ─────────────────────────────────────────────────
@@ -9757,7 +10116,8 @@ class SshDialog(QDialog):
 
     def _active_session(self) -> '_Session | None':
         if self._multiexec:
-            return self._sessions[0] if self._sessions else None
+            ssh = [s for s in self._sessions if not s.is_rdp]
+            return ssh[0] if ssh else None
         # Stats workers can fire after the SSH panel has been torn down
         # (e.g. user closed the window before the QThread drained); the
         # underlying QTabWidget C++ object is gone but the Python proxy
@@ -9770,6 +10130,11 @@ class SshDialog(QDialog):
         if 0 <= idx < len(self._sessions):
             return self._sessions[idx]
         return None
+
+    def _search_session(self):
+        """The session search works on: the active one, unless it is RDP."""
+        s = self._active_session()
+        return None if s is None or s.is_rdp else s
 
     # ── Terminal search ───────────────────────────────────────────────────
 
@@ -9820,7 +10185,7 @@ class SshDialog(QDialog):
         ponownego uruchamiania wyszukiwania."""
         if not self._search_btn.isChecked():
             return
-        active = self._active_session()
+        active = self._search_session()
         term = active.term._search_term if active else ''
         self._search_edit.blockSignals(True)
         self._search_edit.setText(term)
@@ -9828,7 +10193,7 @@ class SshDialog(QDialog):
         self._update_search_count()
 
     def _apply_search_to_active(self, term: str):
-        active = self._active_session()
+        active = self._search_session()
         if active is None:
             self._search_count_lbl.setText('')
             return
@@ -9842,21 +10207,21 @@ class SshDialog(QDialog):
         self._apply_search_to_active(text)
 
     def _on_search_next(self):
-        active = self._active_session()
+        active = self._search_session()
         if active is None:
             return
         active.term.search_next()
         self._update_search_count()
 
     def _on_search_prev(self):
-        active = self._active_session()
+        active = self._search_session()
         if active is None:
             return
         active.term.search_prev()
         self._update_search_count()
 
     def _update_search_count(self):
-        active = self._active_session()
+        active = self._search_session()
         if active is None:
             self._search_count_lbl.setText('')
             return
@@ -10026,7 +10391,8 @@ class SshDialog(QDialog):
         Sessions already open stay — closing a working shell is the user's
         call, not a side effect of the lock."""
         self._admin_unlocked = unlocked
-        if not unlocked and self._cred is not None and self._cred.admin_only:
+        if (not unlocked and self._cred is not None and self._cred.admin_only
+                and self._machine is not None):
             vis = [c for c in self._machine.credentials if not c.admin_only]
             self._cred = vis[0] if vis else None
         self._env_panel.set_admin_mode(unlocked)
@@ -10054,7 +10420,8 @@ class SshDialog(QDialog):
             return True
         transfer = self._sftp_panel.transfer_running()
         live = sum(1 for s in self._sessions
-                   if getattr(s.worker, '_running', False))
+                   if (s.pane.is_connected() if s.is_rdp
+                       else getattr(s.worker, '_running', False)))
         if not transfer and live < 2:
             return True
         if transfer:
@@ -10066,7 +10433,8 @@ class SshDialog(QDialog):
                         if uploading else
                         "pobierany plik nie zostanie zapisany w całości."))
         else:
-            text = (f"Otwarte sesje SSH: {live}.\n\nZamknięcie okna "
+            kinds = "SSH i RDP" if any(s.is_rdp for s in self._sessions) else "SSH"
+            text = (f"Otwarte sesje {kinds}: {live}.\n\nZamknięcie okna "
                     "rozłączy wszystkie.")
         return self._ask_close(text)
 
@@ -10094,7 +10462,8 @@ class SshDialog(QDialog):
         # below closes (C1-04).
         self._sftp_panel.stop()
         for s in self._sessions:
-            s.worker.stop()
+            if s.worker is not None:
+                s.worker.stop()
         # One shared wait for every thread, the rest retired (S-02, S-08).
         _unplug_and_retire(
             [s.worker for s in self._sessions]

@@ -153,7 +153,8 @@ def test_c204_the_exit_path_removes_what_is_pending(rdp, monkeypatch):
 
 def test_c204_main_cleans_up_before_the_hard_exit():
     src = open(os.path.join(_PARENT, "main.py"), encoding="utf-8").read()
-    tail = src[src.index("exit_code = app.exec()"):]
+    assert "finish_and_exit(app.exec())" in src
+    tail = src[src.index("def finish_and_exit("):]
     assert tail.index("cleanup_pending_credentials()") < tail.index("os._exit(")
     assert tail.index("clear_secret_from_clipboard()") < tail.index("os._exit(")
 
