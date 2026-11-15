@@ -15,17 +15,20 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QMenuBar, QMessageBox
 
 import models
+import upgrade_plan as up
 from crypto import hash_admin_password, verify_admin_password
 from ui import theme
 from ui.dialogs import AdminSetupDialog, AdminUnlockDialog, ChangePasswordDialog
 from ui.icons import icon
 from ui.remote_panel import RemoteMachinesPanel
 from ui.ssh_panel import SshDialog
+from ui.upgrade_panel import UpgradePanel
+from ui.utils import confirm
 from vault_io import discard_backup, write_vault_atomic
 
 __all__ = ["RemoteWindow", "APP_TITLE", "file_stamp"]
@@ -56,6 +59,9 @@ class RemoteWindow(SshDialog):
         self._admin_hash = admin_hash
         self._admin_salt = admin_salt
         self._stamp = file_stamp(vault_path)
+        #: id(session) → the upgrade command waited for in that terminal:
+        #: {"re", "gid", "mid", "label", "buf"} (see _upgrade_output).
+        self._upgrade_wait: dict[int, dict] = {}
         super().__init__(None, hospital=hospitals[0], all_hospitals=hospitals,
                          admin_unlocked=False)
 
@@ -66,11 +72,27 @@ class RemoteWindow(SshDialog):
         tabs.setTabIcon(at, icon("monitor", "#58a6ff"))
         tabs.tabBar().moveTab(at, 0)
         tabs.setCurrentWidget(self._env_panel)
-        self._main_splitter.setSizes([300, 900])
+        self._main_splitter.setSizes([320, 880])
+        # Three tabs in a narrow panel: shortened, never behind arrows.
+        tabs.tabBar().setUsesScrollButtons(False)
+        tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+
+        # "Aktualizacja" (2026-11-15): the upgrade plan of the hospital.
+        self._upgrade_panel = UpgradePanel(self._env_panel.current_hospital(),
+                                           admin_unlocked=False)
+        tabs.addTab(self._upgrade_panel, icon("refresh", "#d29922"),
+                    "Aktualizacja")
+        self._upgrade_panel.data_changed.connect(self._save)
+        self._upgrade_panel.open_requested.connect(self._open_upgrade_tabs)
+        self._upgrade_panel.run_requested.connect(self._run_upgrade_command)
+        self._upgrade_panel.interrupt_requested.connect(self._interrupt_upgrade)
+        self._env_panel.data_changed.connect(self._upgrade_panel.refresh)
 
         # Wsparcie Claude sends the terminal's screen out of the hospital's
         # network and needs Claude Code on the machine: not here.
         self._btn_claude.hide()
+        # "Wątki" are saved Claude conversations — nothing to go back to here.
+        self._btn_threads.hide()
 
         self._env_panel.data_changed.connect(self._save)
         self._env_panel.hospital_changed.connect(self._on_hospital_changed)
@@ -104,6 +126,153 @@ class RemoteWindow(SshDialog):
         # The last session closed: back to the machine list.
         if not self._sessions:
             self._left_tabs.setCurrentWidget(self._env_panel)
+
+    def closeEvent(self, event):
+        box = self._upgrade_panel.hd_box
+        if (box.busy() and not getattr(self, "_close_confirmed", False)
+                and not confirm(
+                self, "Pobieranie",
+                "Trwa pobieranie z hd.asseco.pl. Przerwać je i zamknąć okno?",
+                yes="Przerwij i zamknij", no="Wróć")):
+            event.ignore()
+            return
+        super().closeEvent(event)
+        if event.isAccepted():
+            box.shutdown()
+
+    def _connect_worker(self, worker, term, pane, ip, user, is_first,
+                        session=None):
+        super()._connect_worker(worker, term, pane, ip, user, is_first, session)
+        if session is not None:
+            worker.output.connect(
+                lambda text, s=session: self._upgrade_output(s, text))
+
+    def _teardown_session(self, s):
+        self._upgrade_wait.pop(id(s), None)
+        super()._teardown_session(s)
+
+    # ── Aktualizacja ──────────────────────────────────────────────────────
+
+    def _session_for(self, machine):
+        """The open SSH tab of a vault machine (the first one), or None."""
+        for s in self._sessions:
+            if (not s.is_rdp and s.machine is not None
+                    and s.machine.id == machine.id):
+                return s
+        return None
+
+    @staticmethod
+    def _session_ready(s) -> bool:
+        w = s.worker
+        return (w is not None and getattr(w, "_channel", None) is not None
+                and not s.reconnecting)
+
+    def _open_upgrade_tabs(self, machines: list) -> None:
+        opened = 0
+        for m in machines:
+            if self._session_for(m) is None:
+                self._open_extra_machine(m)
+                opened += 1
+        self._left_tabs.setCurrentWidget(self._upgrade_panel)
+        self._notice(f"Otwarto karty: {opened}" if opened
+                     else "Wszystkie karty z listy są już otwarte")
+
+    def _run_upgrade_command(self, group: dict, cmd: dict, machines: list) -> None:
+        panel = self._upgrade_panel
+        version = panel.version()
+        if "{WERSJA}" in cmd.get("text", "") and not version:
+            QMessageBox.warning(self, "Aktualizacja",
+                                "Komenda używa {WERSJA} — wpisz najpierw wersję "
+                                "u góry zakładki Aktualizacja.")
+            return
+        ready, missing, busy = [], [], []
+        for m in machines:
+            s = self._session_for(m)
+            if s is None or not self._session_ready(s):
+                missing.append(m)
+            else:
+                ready.append((m, s))
+                if id(s) in self._upgrade_wait:
+                    busy.append(m)
+        if not ready:
+            QMessageBox.information(
+                self, "Aktualizacja",
+                "Żadna maszyna grupy nie ma połączonej karty.\n"
+                "Użyj „Otwórz karty po kolei” i poczekaj na połączenie.")
+            return
+        if cmd.get("confirm") or busy or missing:
+            shown = up.expand(cmd.get("text", ""), version)
+            text = (f"„{cmd['label']}” — {group['name']}\n\nNa maszynach:\n"
+                    + "\n".join(f"   {m.ip}  {m.name}" for m, _s in ready)
+                    + f"\n\nKomendy:\n{shown}")
+            if cmd.get("requires_stopped") and group.get("process"):
+                text += (f"\n\n(najpierw sprawdzenie, że proces "
+                         f"„{group['process']}” nie działa)")
+            if missing:
+                text += ("\n\nPOMINIĘTE — brak połączonej karty:\n"
+                         + "\n".join(f"   {m.ip}  {m.name}" for m in missing))
+            if busy:
+                text += ("\n\nPoprzednia komenda jeszcze trwa na:\n"
+                         + "\n".join(f"   {m.ip}" for m in busy)
+                         + "\nzostanie przerwana (Ctrl+C).")
+            box = QMessageBox(QMessageBox.Icon.Question, "Aktualizacja", text,
+                              parent=self)
+            go = box.addButton("Wykonaj", QMessageBox.ButtonRole.AcceptRole)
+            no = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(no)
+            box.setEscapeButton(no)
+            box.exec()
+            if box.clickedButton() is not go:
+                return
+        for m in missing:
+            panel.set_status(group["id"], m.id, "miss",
+                             f"{cmd['label']}: brak połączonej karty")
+        for m, s in ready:
+            token = up.new_id()[:8]
+            data = (up.build_line(cmd, group, version, token) + "\r").encode("utf-8")
+            interrupted = id(s) in self._upgrade_wait
+            if interrupted:
+                self._send_one(s, b"\x03", True)
+            self._upgrade_wait[id(s)] = {
+                "re": up.marker_re(token), "gid": group["id"], "mid": m.id,
+                "label": cmd["label"], "buf": ""}
+            if interrupted:
+                QTimer.singleShot(400, lambda s=s, d=data: s.worker.send(d))
+            else:
+                s.worker.send(data)
+            panel.set_status(group["id"], m.id, "run", f"{cmd['label']}: trwa…")
+        n = len(ready)
+        self._notice(f"„{cmd['label']}” wysłane na {n} "
+                     f"{'maszynę' if n == 1 else 'maszyny'}")
+
+    def _upgrade_output(self, s, text: str) -> None:
+        w = self._upgrade_wait.get(id(s))
+        if w is None:
+            return
+        w["buf"] = (w["buf"] + text)[-1500:]
+        found = w["re"].search(up.strip_ansi(w["buf"]))
+        if not found:
+            return
+        del self._upgrade_wait[id(s)]
+        code = int(found.group(1))
+        self._upgrade_panel.set_status(
+            w["gid"], w["mid"], "ok" if code == 0 else "fail",
+            f"{w['label']}: kod {code}")
+
+    def _interrupt_upgrade(self, group: dict, machines: list) -> None:
+        n = 0
+        for m in machines:
+            s = self._session_for(m)
+            if s is None or not self._session_ready(s):
+                continue
+            self._send_one(s, b"\x03", True)
+            n += 1
+            w = self._upgrade_wait.pop(id(s), None)
+            if w is not None:
+                self._upgrade_panel.set_status(
+                    w["gid"], w["mid"], "stop", f"{w['label']}: przerwano (Ctrl+C)")
+        self._notice(f"Ctrl+C wysłane na {n} "
+                     f"{'maszynę' if n == 1 else 'maszyny'}")
 
     # ── Menu ──────────────────────────────────────────────────────────────
 
@@ -147,7 +316,13 @@ class RemoteWindow(SshDialog):
 
     def _on_hospital_changed(self, hospital) -> None:
         self._hospital = hospital
+        self._upgrade_panel.set_hospital(hospital)
         self._update_window_title()
+
+    def set_admin_mode(self, unlocked: bool) -> None:
+        super().set_admin_mode(unlocked)
+        if hasattr(self, "_upgrade_panel"):
+            self._upgrade_panel.set_admin_mode(unlocked)
 
     def _toggle_admin(self) -> None:
         if self._admin_unlocked:

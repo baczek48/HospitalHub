@@ -50,6 +50,9 @@ class Hospital:
     amms_url: str = ""
     amms_login: str = ""
     amms_password: str = ""
+    # "Aktualizacja" tab of HospitalHub Portable (2026-11-15): the upgrade
+    # plan — machine order, groups and command buttons (upgrade_plan.py).
+    upgrade: dict = field(default_factory=dict)
 
 
 VPN_PROVIDERS_BUILTIN = [
@@ -151,6 +154,7 @@ def _hospital_to_dict(h: Hospital) -> dict:
         "amms_url": h.amms_url,
         "amms_login": h.amms_login,
         "amms_password": h.amms_password,
+        **({"upgrade": h.upgrade} if h.upgrade else {}),
     }
 
 
@@ -200,6 +204,7 @@ def _hospital_from_dict(d: dict) -> Hospital:
         amms_url=d.get("amms_url", ""),
         amms_login=d.get("amms_login", ""),
         amms_password=d.get("amms_password", ""),
+        upgrade=d.get("upgrade") if isinstance(d.get("upgrade"), dict) else {},
     )
 
 

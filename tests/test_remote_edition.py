@@ -134,6 +134,7 @@ def test_the_window_opens_on_its_machine_list(window):
     assert window._sessions == []                  # nothing connects by itself
     assert window.windowTitle() == "HospitalHub Portable  ·  Szpital Betanin"
     assert window._btn_claude.isHidden()
+    assert window._btn_threads.isHidden()      # Claude's saved conversations
 
 
 def test_the_list_holds_every_type_and_hides_admin_items(window):

@@ -50,3 +50,6 @@ crash*.txt
 
 # HospitalHub Remote: portable zips (build_remote.bat)
 dist_portable/
+
+# Dane logowania hd.asseco.pl (2026-11-15) — nigdy do repo
+hd.asseco.txt
