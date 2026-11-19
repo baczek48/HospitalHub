@@ -314,3 +314,31 @@ def test_refit_after_a_resize_reconnects_on_a_fresh_control(app, monkeypatch):
     monkeypatch.setattr(v, "start", lambda: calls.append("start"))
     v._on_disconnected(1)
     assert calls == ["destroy", "start"], "nowa kontrolka, potem połączenie"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Keyboard focus (2026-11-19: the second question went to the RDP session)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_press_outside_the_control_takes_the_keyboard_back(app, monkeypatch):
+    """With the Windows focus inside the control, a press on another widget
+    hands it to that widget's window; with no control holding it — nothing."""
+    import ui.rdp_embedded as re_
+    from PyQt6.QtWidgets import QPlainTextEdit
+    edit = QPlainTextEdit()
+    calls = []
+    monkeypatch.setattr(re_._user32, "SetFocus", lambda h: calls.append(h))
+    monkeypatch.setattr(re_, "_focus_in_control", lambda: False)
+    assert re_.reclaim_focus(edit) is False and calls == []
+    monkeypatch.setattr(re_, "_focus_in_control", lambda: True)
+    assert re_.reclaim_focus(edit) is True and len(calls) == 1
+
+
+def test_a_press_on_the_session_itself_keeps_the_keyboard_there(app, monkeypatch):
+    import ui.rdp_embedded as re_
+    view = re_.RdpView("192.0.2.1", 3389, "u", "p")
+    calls = []
+    monkeypatch.setattr(re_._user32, "SetFocus", lambda h: calls.append(h))
+    monkeypatch.setattr(re_, "_focus_in_control", lambda: True)
+    assert re_.reclaim_focus(view) is False and calls == []
+    assert re_._reclaimer is not None      # installed with the first view

@@ -34,10 +34,12 @@ import ctypes.wintypes as wt
 import os
 import re
 
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+import weakref
+
+from PyQt6.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QImage
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 __all__ = ["RdpPane", "RdpView", "split_login", "drives_to_redirect",
@@ -132,6 +134,8 @@ _user32.GetDC.restype = wt.HDC
 _user32.GetDC.argtypes = [wt.HWND]
 _user32.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
 _user32.SetFocus.argtypes = [wt.HWND]
+_user32.GetFocus.restype = wt.HWND
+_user32.IsChild.argtypes = [wt.HWND, wt.HWND]
 _gdi32.CreateCompatibleDC.restype = wt.HDC
 _gdi32.CreateCompatibleDC.argtypes = [wt.HDC]
 _gdi32.CreateDIBSection.restype = wt.HBITMAP
@@ -197,6 +201,75 @@ def available() -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Keyboard focus back from the control
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 2026-11-19 (a colleague, RDP tab + Wsparcie Claude): "at the second question
+# I could not put the cursor in the field — it seemed to be there, but all the
+# typing went to the RDP".  The control takes the Windows keyboard focus into
+# its own child windows, which Qt does not know about.  Qt still thinks the
+# question field has the focus (the caret blinks there), so a click on it
+# changes nothing for Windows and the keys keep going to the session.  A press
+# on any of our widgets outside the control therefore hands the Windows focus
+# back to the Qt window first; Qt then gives it to the widget pressed.
+
+_VIEWS: "weakref.WeakSet[RdpView]" = weakref.WeakSet()
+_reclaimer = None
+
+
+def _focus_in_control() -> bool:
+    """The Windows keyboard focus sits in one of our Remote Desktop controls."""
+    focus = _user32.GetFocus()
+    if not focus:
+        return False
+    for view in list(_VIEWS):
+        ax = view._ax_hwnd
+        if ax and (focus == ax or _user32.IsChild(wt.HWND(ax), focus)):
+            return True
+    return False
+
+
+def _inside_view(widget) -> bool:
+    while widget is not None:
+        if isinstance(widget, RdpView):
+            return True
+        widget = widget.parentWidget()
+    return False
+
+
+def reclaim_focus(widget) -> bool:
+    """Give the Windows focus back to `widget`'s window when the control holds
+    it.  True when it was moved."""
+    if widget is None or _inside_view(widget) or not _focus_in_control():
+        return False
+    top = widget.window()
+    if top is None:
+        return False
+    _user32.SetFocus(wt.HWND(int(top.winId())))
+    return True
+
+
+class _FocusReclaimer(QObject):
+    """Application-wide: a press on our widgets takes the keyboard back."""
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and isinstance(obj, QWidget)):
+            try:
+                reclaim_focus(obj)
+            except Exception:
+                pass
+        return False
+
+
+def _install_reclaimer() -> None:
+    global _reclaimer
+    app = QApplication.instance()
+    if _reclaimer is None and app is not None:
+        _reclaimer = _FocusReclaimer(app)
+        app.installEventFilter(_reclaimer)
+
+
 # The control
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -238,6 +311,8 @@ class RdpView(QWidget):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(_RESIZE_DEBOUNCE_MS)
         self._resize_timer.timeout.connect(self._apply_display_size)
+        _VIEWS.add(self)
+        _install_reclaimer()
 
     # -- creating the control ---------------------------------------------- #
 
