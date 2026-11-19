@@ -26,6 +26,19 @@ if not exist "dist\HospitalHubRemote\HospitalHubRemote.exe" (
 )
 copy /y "remote_README.txt" "dist\HospitalHubRemote\CZYTAJ.txt" >nul
 
+REM Rejestr HL7 (2026-11-19): Oracle Instant Client dla kont z haslem 10G
+REM (DPY-3015). Caly, niezmieniony folder z licencja Oracle (BASIC_LITE_LICENSE).
+set "IC=third_party\instantclient_19_29"
+if exist "%IC%\oci.dll" (
+    xcopy /e /i /q /y "%IC%" "dist\HospitalHubRemote\instantclient_19_29" >nul
+    if errorlevel 1 (
+        echo BLAD: nie skopiowano Instant Client. Przerwano.
+        exit /b 1
+    )
+) else (
+    echo UWAGA: brak %IC% - paczka bez Oracle Instant Client.
+)
+
 if not exist dist_portable mkdir dist_portable
 if exist "dist_portable\HospitalHubRemote-%VER%.zip" del /q "dist_portable\HospitalHubRemote-%VER%.zip"
 REM Compress-Archive zawodzil na duzym _internal (wyjatek bez kodu bledu),

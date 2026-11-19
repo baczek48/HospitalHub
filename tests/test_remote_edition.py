@@ -468,3 +468,87 @@ def test_enter_in_the_password_opens_and_never_closes(app, vault):
         pump(50)
     assert finished == [QDialog.DialogCode.Accepted.value]
     assert dlg.get_result()[0] == vault[0]
+
+
+# ── Closing asks every time (owner, 2026-11-19) ──────────────────────────
+
+def test_closing_without_sessions_asks_and_keeps_the_window_on_no(
+        window, monkeypatch):
+    from ui.remote_window import RemoteWindow
+    asked = []
+    monkeypatch.setattr(RemoteWindow, "_ask_portable_close",
+                        lambda self, title, text, yes:
+                        asked.append((title, text, yes)) or False)
+    assert not window._sessions
+    window.close()
+    pump(50)
+    assert window.isVisible()
+    assert asked and asked[0][0] == "Zamknąć HospitalHub Portable?"
+    assert asked[0][2] == "Zamknij program"
+
+
+@pytest.fixture
+def own_window(app, vault):
+    """A window the test itself closes (it is deleted on close)."""
+    from PyQt6 import sip
+    from ui.remote_window import RemoteWindow
+    path, ah, salt = vault
+    data = decrypt(open(path, "rb").read(), "haslo")
+    w = RemoteWindow(path, "haslo", models.from_dict(data), ah, salt)
+    w.show()
+    pump(100)
+    yield w
+    if not sip.isdeleted(w):
+        w.close_without_asking()
+    pump(200)
+
+
+def test_yes_closes_the_window(own_window, monkeypatch):
+    from PyQt6 import sip
+    from ui.remote_window import RemoteWindow
+    monkeypatch.setattr(RemoteWindow, "_ask_portable_close",
+                        lambda self, title, text, yes: True)
+    own_window.close()
+    pump(100)
+    assert sip.isdeleted(own_window) or not own_window.isVisible()
+
+
+def test_switching_vault_says_so(window, monkeypatch):
+    from ui.remote_window import RemoteWindow
+    asked = []
+    monkeypatch.setattr(RemoteWindow, "_ask_portable_close",
+                        lambda self, title, text, yes:
+                        asked.append((title, yes)) or False)
+    window.closing_for_switch = True
+    window.close()
+    window.closing_for_switch = False
+    assert asked == [("Otworzyć inny vault?", "Otwórz inny vault")]
+
+
+def test_a_running_download_asks_once_not_twice(own_window, monkeypatch):
+    from PyQt6 import sip
+    from ui import remote_window as rw
+    window = own_window
+    asked = []
+    monkeypatch.setattr(window._upgrade_panel.hd_box, "busy", lambda: True)
+    monkeypatch.setattr(window._upgrade_panel.hd_box, "shutdown", lambda: None)
+    monkeypatch.setattr(rw, "confirm", lambda *a, **k: asked.append("hd") or True)
+    monkeypatch.setattr(rw.RemoteWindow, "_ask_portable_close",
+                        lambda self, *a: asked.append("close") or False)
+    window.close()
+    pump(50)
+    assert asked == ["hd"]
+    assert sip.isdeleted(window) or not window.isVisible()
+
+
+def test_the_question_defaults_to_keeping_the_window(window, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    seen = {}
+
+    def fake_exec(box):
+        seen["default"] = box.defaultButton().text()
+        seen["escape"] = box.escapeButton().text()
+        return 0
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    assert window._ask_portable_close("t", "x", "Zamknij program") is False
+    assert seen == {"default": "Nie zamykaj", "escape": "Nie zamykaj"}

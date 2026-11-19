@@ -82,7 +82,7 @@ _ROLES = {
     # --- deep backgrounds -> window ---
     "#0a0c10": "WINDOW", "#010409": "WINDOW", "#0c1018": "WINDOW", "#0d1117": "WINDOW",
     "#0d1525": "WINDOW", "#14161e": "WINDOW", "#131920": "WINDOW", "#13171c": "WINDOW",
-    "#111820": "WINDOW", "#0c1018": "WINDOW",
+    "#111820": "WINDOW", "#0c1018": "WINDOW", "#0f1117": "WINDOW",
     # --- elevated surfaces -> cards ---
     "#161b22": "ELEV", "#1a1d28": "ELEV", "#1c2128": "ALT", "#151b23": "ELEV",
     "#1c1f26": "ELEV", "#1a1e24": "ELEV", "#1e1e23": "ELEV", "#22242e": "ELEV",
@@ -105,6 +105,11 @@ _ROLES = {
     "#5a80b0": "BLUE2", "#b0c0ff": "BLUE2", "#c0d0f0": "BLUE2",
     # --- indigo / periwinkle ---
     "#4a5adf": "INDIGO", "#6382ff": "INDIGO", "#5a6aef": "INDIGO", "#3a4070": "INDIGO",
+    # Button text of the Aktualizacja / SI tabs: pale on the light theme
+    # looked disabled (owner, 2026-11-19).
+    "#a5b4ff": "INDIGO",
+    # The selected row of the Portable lists (ui/list_style.py).
+    "#1f2a4a": "BLUE_BG",
     # --- blue badge backgrounds/borders ---
     "#1f4a70": "BLUE_BG", "#1a3a5c": "BLUE_BG", "#1f3a5f": "BLUE_BG", "#1a3050": "BLUE_BG",
     "#1a2540": "BLUE_BG", "#152540": "BLUE_BG", "#1a2040": "BLUE_BG", "#1c2240": "BLUE_BG",
@@ -123,6 +128,7 @@ _ROLES = {
     "#e74c3c": "RED", "#c0392b": "RED2", "#e05555": "RED",
     "#5a2020": "RED_BG", "#3d1a1a": "RED_BG", "#2a1515": "RED_BG", "#2d1117": "RED_BG",
     "#3d1f1f": "RED_BG", "#5a2d2d": "RED_BD",
+    "#2a1a1a": "RED_BG", "#ff9b8f": "RED", "#b33a3a": "RED2",
     # --- ambers / yellows ---
     "#d29922": "AMBER", "#e2b340": "AMBER", "#fce94f": "AMBER", "#c9a227": "AMBER",
     "#c4a000": "AMBER", "#f0c850": "AMBER", "#f0d050": "AMBER", "#da8b45": "AMBER",

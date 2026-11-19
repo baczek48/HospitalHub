@@ -4956,6 +4956,12 @@ class SftpPanel(QWidget):
             QTimer.singleShot(0, _restore_scroll)
 
     def eventFilter(self, obj, event):
+        # Still being built: the path field gets its filter before the table
+        # exists, and under an application style sheet (Portable's list look,
+        # 2026-11-19) each later setStyleSheet sends it events — "'SftpPanel'
+        # object has no attribute '_table'" on start of 2.0.40.
+        if getattr(self, "_table", None) is None:
+            return False
         # Path edit: Escape cancels, FocusOut returns to label
         if self._table_keys(obj, event):
             return True

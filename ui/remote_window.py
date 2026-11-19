@@ -26,6 +26,7 @@ from ui import theme
 from ui.dialogs import AdminSetupDialog, AdminUnlockDialog, ChangePasswordDialog
 from ui.icons import icon
 from ui.remote_panel import RemoteMachinesPanel
+from ui.si_panel import SiPanel
 from ui.ssh_panel import SshDialog
 from ui.upgrade_panel import UpgradePanel
 from ui.utils import confirm
@@ -62,6 +63,8 @@ class RemoteWindow(SshDialog):
         #: id(session) → the upgrade command waited for in that terminal:
         #: {"re", "gid", "mid", "label", "buf"} (see _upgrade_output).
         self._upgrade_wait: dict[int, dict] = {}
+        #: (machine id, module) → the terminal tab following its logs (SI).
+        self._si_tabs: dict[tuple, object] = {}
         super().__init__(None, hospital=hospitals[0], all_hospitals=hospitals,
                          admin_unlocked=False)
 
@@ -87,6 +90,16 @@ class RemoteWindow(SshDialog):
         self._upgrade_panel.run_requested.connect(self._run_upgrade_command)
         self._upgrade_panel.interrupt_requested.connect(self._interrupt_upgrade)
         self._env_panel.data_changed.connect(self._upgrade_panel.refresh)
+
+        # "SI" (2026-11-19): the Serwer Integracji modules (docker compose).
+        self._si_panel = SiPanel(self._env_panel.current_hospital(),
+                                 admin_unlocked=False)
+        tabs.addTab(self._si_panel, icon("grid", "#3fb950"), "SI")
+        self._si_panel.data_changed.connect(self._save)
+        self._si_panel.follow_requested.connect(self._si_follow)
+        self._si_panel.hl7_requested.connect(self.open_hl7_registry)
+        self._hl7_window = None
+        self._env_panel.data_changed.connect(self._si_panel.refresh)
 
         # Wsparcie Claude sends the terminal's screen out of the hospital's
         # network and needs Claude Code on the machine: not here.
@@ -127,18 +140,68 @@ class RemoteWindow(SshDialog):
         if not self._sessions:
             self._left_tabs.setCurrentWidget(self._env_panel)
 
+    #: Set by RemoteApp for "Plik → Otwórz inny vault…": the question says so.
+    closing_for_switch = False
+
+    def _confirm_close(self) -> bool:
+        """Portable asks every time (owner, 2026-11-19): one click on X ended
+        every session and the whole program without a word.  The main
+        HospitalHub's SSH window keeps its own rule (asks from two sessions)."""
+        if getattr(self, "_close_confirmed", False):
+            return True
+        live = sum(1 for s in self._sessions
+                   if (s.pane.is_connected() if s.is_rdp
+                       else getattr(s.worker, "_running", False)))
+        lines = []
+        if self._sftp_panel.transfer_running():
+            lines.append("Trwa przesyłanie pliku — zamknięcie je przerwie, "
+                         "plik może zostać niepełny.")
+        si = getattr(self, "_si_panel", None)
+        if si is not None and si.busy():
+            lines.append("Trwa operacja w zakładce SI — zamknięcie zerwie "
+                         "połączenie (serwer może ją dokończyć bez podglądu).")
+        if live:
+            kinds = "SSH i RDP" if any(s.is_rdp for s in self._sessions) else "SSH"
+            lines.append(f"Otwarte sesje {kinds}: {live} — wszystkie zostaną "
+                         "rozłączone.")
+        if self.closing_for_switch:
+            title, question, yes = ("Otworzyć inny vault?",
+                                    "Zamknąć ten vault i otworzyć inny?",
+                                    "Otwórz inny vault")
+        else:
+            title, question, yes = ("Zamknąć HospitalHub Portable?",
+                                    "Na pewno zamknąć HospitalHub Portable?",
+                                    "Zamknij program")
+        text = question + ("\n\n" + "\n".join(lines) if lines else "")
+        return self._ask_portable_close(title, text, yes)
+
+    def _ask_portable_close(self, title: str, text: str, yes: str) -> bool:
+        """"Nie zamykaj" is the default and Escape: Enter never closes."""
+        box = QMessageBox(QMessageBox.Icon.Warning, title, text, parent=self)
+        close_btn = box.addButton(yes, QMessageBox.ButtonRole.DestructiveRole)
+        keep_btn = box.addButton("Nie zamykaj", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.setEscapeButton(keep_btn)
+        box.exec()
+        return box.clickedButton() is close_btn
+
     def closeEvent(self, event):
         box = self._upgrade_panel.hd_box
-        if (box.busy() and not getattr(self, "_close_confirmed", False)
-                and not confirm(
-                self, "Pobieranie",
-                "Trwa pobieranie z hd.asseco.pl. Przerwać je i zamknąć okno?",
-                yes="Przerwij i zamknij", no="Wróć")):
-            event.ignore()
-            return
+        if box.busy() and not getattr(self, "_close_confirmed", False):
+            if not confirm(
+                    self, "Pobieranie",
+                    "Trwa pobieranie z hd.asseco.pl. Przerwać je i zamknąć okno?",
+                    yes="Przerwij i zamknij", no="Wróć"):
+                event.ignore()
+                return
+            # That was the question — no second one about closing.
+            self._close_confirmed = True
         super().closeEvent(event)
         if event.isAccepted():
             box.shutdown()
+            self._si_panel.shutdown()
+            if self._hl7_window is not None:
+                self._hl7_window.close()
 
     def _connect_worker(self, worker, term, pane, ip, user, is_first,
                         session=None):
@@ -149,13 +212,90 @@ class RemoteWindow(SshDialog):
 
     def _teardown_session(self, s):
         self._upgrade_wait.pop(id(s), None)
+        self._si_tabs = {k: v for k, v in self._si_tabs.items() if v is not s}
         super()._teardown_session(s)
+
+    # ── SI ────────────────────────────────────────────────────────────────
+
+    def open_hl7_registry(self) -> None:
+        """"HL7 → Rejestr paczek…": one window, raised when already open."""
+        w = self._hl7_window
+        if w is None:
+            from ui.hl7_registry_window import Hl7RegistryWindow
+            w = Hl7RegistryWindow(self._hospital,
+                                  admin_unlocked=self._admin_unlocked,
+                                  parent=self)
+            w.data_changed.connect(self._save)
+            self._hl7_window = w
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def _si_follow(self, machine, items: list) -> None:
+        """One terminal tab per module following its logs (owner,
+        2026-11-19).  A module's tab already open: Ctrl+C and the tail from
+        the start again; otherwise a new tab named after the module, the
+        command typed once it has connected (up to ~20 s)."""
+        from ui.si_panel import machine_credential, machine_port
+        alive = {id(s) for s in self._sessions}
+        self._si_tabs = {k: s for k, s in self._si_tabs.items()
+                         if id(s) in alive}
+        first = None
+        for name, command in items:
+            key = (machine.id, name)
+            s = self._si_tabs.get(key)
+            if s is None:
+                cred = machine_credential(machine, self._admin_unlocked)
+                host, port = machine_port(machine)
+                self._add_session(label=f"SI: {name}", ip=host,
+                                  user=cred.login if cred else "",
+                                  password=cred.password if cred else "",
+                                  port=port, machine=machine)
+                s = self._sessions[-1]
+                self._si_tabs[key] = s
+                self._si_type_when_ready(s, command)
+            elif self._session_ready(s):
+                self._send_one(s, b"\x03", True)
+                QTimer.singleShot(400, lambda s=s, c=command: self._si_type(s, c))
+            else:
+                self._si_type_when_ready(s, command)
+            first = first or s
+        if first is not None:
+            idx = self._tab_widget.indexOf(first.pane)
+            if idx >= 0:
+                self._tab_widget.setCurrentIndex(idx)
+        n = len(items)
+        self._notice(f"Logi na żywo: {n} "
+                     f"{'karta' if n == 1 else 'karty' if n < 5 else 'kart'}"
+                     " (Ctrl+C kończy)")
+
+    def _si_type(self, s, command: str) -> None:
+        if s.worker is not None and id(s) in {id(x) for x in self._sessions}:
+            s.worker.send((command + "\r").encode("utf-8"))
+
+    def _si_type_when_ready(self, s, command: str, tries: int = 0) -> None:
+        if id(s) not in {id(x) for x in self._sessions}:
+            return
+        if self._session_ready(s):
+            # A fresh shell: a moment for its prompt first.
+            QTimer.singleShot(800, lambda: self._si_type(s, command))
+        elif tries < 40:
+            QTimer.singleShot(500, lambda: self._si_type_when_ready(
+                s, command, tries + 1))
+        else:
+            self._notice(f"{s.label}: karta się nie połączyła — logi nie "
+                         "zostały uruchomione")
 
     # ── Aktualizacja ──────────────────────────────────────────────────────
 
     def _session_for(self, machine):
-        """The open SSH tab of a vault machine (the first one), or None."""
+        """The open SSH tab of a vault machine (the first one), or None.
+        The SI log tabs never count: an upgrade command must not land in a
+        tab that is following logs."""
+        si_tabs = {id(x) for x in getattr(self, "_si_tabs", {}).values()}
         for s in self._sessions:
+            if id(s) in si_tabs:
+                continue
             if (not s.is_rdp and s.machine is not None
                     and s.machine.id == machine.id):
                 return s
@@ -286,6 +426,10 @@ class RemoteWindow(SshDialog):
         file_menu.addSeparator()
         file_menu.addAction("Zamknij", self.close)
 
+        hl7_menu = bar.addMenu("HL7")
+        act = hl7_menu.addAction("Rejestr paczek…", self.open_hl7_registry)
+        act.setShortcut("Ctrl+Shift+H")
+
         view_menu = bar.addMenu("Widok")
         theme_menu = view_menu.addMenu("Motyw")
         group = QActionGroup(self)
@@ -317,12 +461,18 @@ class RemoteWindow(SshDialog):
     def _on_hospital_changed(self, hospital) -> None:
         self._hospital = hospital
         self._upgrade_panel.set_hospital(hospital)
+        self._si_panel.set_hospital(hospital)
+        if self._hl7_window is not None:
+            self._hl7_window.set_hospital(hospital)
         self._update_window_title()
 
     def set_admin_mode(self, unlocked: bool) -> None:
         super().set_admin_mode(unlocked)
         if hasattr(self, "_upgrade_panel"):
             self._upgrade_panel.set_admin_mode(unlocked)
+            self._si_panel.set_admin_mode(unlocked)
+            if self._hl7_window is not None:
+                self._hl7_window.set_admin_mode(unlocked)
 
     def _toggle_admin(self) -> None:
         if self._admin_unlocked:

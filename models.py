@@ -53,6 +53,9 @@ class Hospital:
     # "Aktualizacja" tab of HospitalHub Portable (2026-11-15): the upgrade
     # plan — machine order, groups and command buttons (upgrade_plan.py).
     upgrade: dict = field(default_factory=dict)
+    # "SI" tab of HospitalHub Portable (2026-11-19): the Serwer Integracji
+    # machine and its modules' folder (si_docker.py).
+    si: dict = field(default_factory=dict)
 
 
 VPN_PROVIDERS_BUILTIN = [
@@ -155,6 +158,7 @@ def _hospital_to_dict(h: Hospital) -> dict:
         "amms_login": h.amms_login,
         "amms_password": h.amms_password,
         **({"upgrade": h.upgrade} if h.upgrade else {}),
+        **({"si": h.si} if h.si else {}),
     }
 
 
@@ -205,6 +209,7 @@ def _hospital_from_dict(d: dict) -> Hospital:
         amms_login=d.get("amms_login", ""),
         amms_password=d.get("amms_password", ""),
         upgrade=d.get("upgrade") if isinstance(d.get("upgrade"), dict) else {},
+        si=d.get("si") if isinstance(d.get("si"), dict) else {},
     )
 
 

@@ -31,7 +31,10 @@ def test_light_map_is_unchanged():
     from ui import theme
     assert theme._MAPS[theme.LIGHT]["#0d1117"] == theme.WINDOW == "#e7e8ec"
     assert theme._MAPS[theme.LIGHT]["#1f6feb"] == "#1f6feb"
-    assert len(theme._MAPS[theme.LIGHT]) == 124
+    # 124 + 6 added 2026-11-19 (button colours of the Aktualizacja / SI
+    # tabs, the HL7 window background, the selected row of the Portable
+    # lists — unmapped before, none changed).
+    assert len(theme._MAPS[theme.LIGHT]) == 130
 
 
 @pytest.mark.parametrize("tid,light", [("dark", False), ("navy", False),

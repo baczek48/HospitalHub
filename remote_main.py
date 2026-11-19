@@ -103,9 +103,11 @@ class RemoteApp:
         if w is None:
             return
         self._switching = True
+        w.closing_for_switch = True
         w.close()
         if w.isVisible():              # the user kept the window
             self._switching = False
+            w.closing_for_switch = False
 
     def _on_window_gone(self, *_):
         self._window = None
@@ -128,6 +130,13 @@ def _activate_existing() -> bool:
 
 
 def main():
+    if "--selftest-oracledb" in sys.argv:
+        # The build check of the HL7 register's driver (2026-11-19).
+        import hl7_registry
+        out = os.path.join(PROGRAM_DIR, "selftest-oracledb.txt")
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(hl7_registry.selftest() + "\n")
+        sys.exit(0)
     # Before anything reads the settings or writes crash.log: both follow
     # HH_DATA_DIR (config.app_data_dir, main._crash_log_path).
     os.environ.setdefault("HH_DATA_DIR", data_dir(PROGRAM_DIR))
@@ -149,6 +158,9 @@ def main():
         _theme.install(app, chosen)
     else:
         hh.apply_dark_theme(app)
+    # The Portable lists: one modern look, every theme (2026-11-19).
+    from ui import list_style
+    list_style.install(app)
     app.setWindowIcon(hh.make_icon())
 
     remote = RemoteApp(app)

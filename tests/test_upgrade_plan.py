@@ -166,7 +166,7 @@ def _fake_session(window, machine):
 
 def test_the_upgrade_tab_sits_next_to_the_machines(window):
     tabs = window._left_tabs
-    assert [tabs.tabText(i) for i in range(tabs.count())] ==         ["Maszyny", "Pliki", "Aktualizacja"]
+    assert [tabs.tabText(i) for i in range(tabs.count())] ==         ["Maszyny", "Pliki", "Aktualizacja", "SI"]
 
 
 def test_a_command_goes_to_every_machine_of_the_group(window, monkeypatch):
