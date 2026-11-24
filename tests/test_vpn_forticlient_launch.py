@@ -746,7 +746,9 @@ def test_15b_legacy_launch_call_sites_are_unchanged():
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                         and node.func.id == "_open_forticlient_gui"):
                     callers.add(fn.name)
-    assert callers == {"connect", "disconnect", "launch_app"}
+    # 2026-11-24: "Rozłącz" reaches it through _forticlient_window_for_disconnect
+    # (with the .lnk, or when the client is not running).
+    assert callers == {"connect", "_forticlient_window_for_disconnect", "launch_app"}
     source = open(os.path.join(_PARENT, "vpn_connect.py"), encoding="utf-8").read()
     for token in ("FortiClientProvider", "launch_system", "default_registry"):
         assert token not in source

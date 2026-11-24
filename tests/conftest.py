@@ -258,6 +258,15 @@ def _no_modal_file_dialogs(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _forti_disconnect_without_desktop_shell(monkeypatch):
+    """2026-11-24: "Rozłącz" without the .lnk asks the desktop shell (COM) to
+    restore a running FortiClient.  A described machine has no shell unless a
+    test says so."""
+    import vpn_connect
+    monkeypatch.setattr(vpn_connect, "_desktop_shell_start", lambda exe, cwd: False)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_appdata(monkeypatch, tmp_path):
     """config.py writes APPDATA/HospitalHubV2/config.json; a test must
     never touch the real one (2026-10-14).  Each test gets an empty APPDATA."""

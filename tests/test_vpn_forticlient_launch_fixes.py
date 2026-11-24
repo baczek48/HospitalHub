@@ -322,4 +322,67 @@ def test_production_legacy_imports_the_rule_not_the_new_architecture():
     rule_tree = ast.parse(open(launch_rules.__file__, encoding="utf-8").read())
     rule_imports = {a.name for n in ast.walk(rule_tree) if isinstance(n, ast.Import)
                     for a in n.names}
-    assert rule_imports == {"os"}, "reguła bez subprocess, bez vpn, bez vpn_connect"
+    # 2026-11-24: the rule module also holds the desktop-shell start and the
+    # logon environment (pywin32, imported inside them) — still no process
+    # machinery of its own and nothing of either side.
+    assert "os" in rule_imports
+    assert not {"subprocess", "vpn_connect"} & rule_imports, "reguła bez subprocess, bez vpn_connect"
+    assert not any(m == "vpn" or m.startswith("vpn.") for m in rule_imports)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2026-11-24 (field, a colleague's machine without the .lnk): "Rozłącz"
+# started the running client a second time through Popen and FortiClient's
+# Electron died with "Cannot read properties of null (reading 'TraceLog')".
+# Only the disconnect changes; the start shared with "Połącz" does not.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _disconnect_machine(monkeypatch, *, lnk, running, shell):
+    m = machine(lnk=lnk)()
+    m.running = running
+    calls = {"shell": [], "legacy": []}
+    monkeypatch.setattr(vpn_connect, "winreg", __import__(
+        "tests.test_vpn_forticlient_launch", fromlist=["FakeWinreg"]).FakeWinreg(m.env))
+    monkeypatch.setattr(vpn_connect, "os", __import__(
+        "tests.test_vpn_forticlient_launch", fromlist=["_os_shim"])._os_shim(m.env))
+    monkeypatch.setattr(vpn_connect, "_is_process_running", lambda name: m.running)
+    monkeypatch.setattr(vpn_connect, "_desktop_shell_start",
+                        lambda exe, cwd: calls["shell"].append((exe, cwd)) or shell)
+    monkeypatch.setattr(vpn_connect, "_open_forticlient_gui",
+                        lambda app_path="", tr=None: calls["legacy"].append(app_path)
+                        or (True, "Otwarto FortiClient — połącz się w oknie klienta."))
+    return calls
+
+
+def test_disconnect_without_lnk_restores_the_running_client_through_the_shell(monkeypatch):
+    calls = _disconnect_machine(monkeypatch, lnk=False, running=True, shell=True)
+    trace = __import__("tests.test_vpn_forticlient_launch",
+                       fromlist=["RecordingTrace"]).RecordingTrace()
+    ok, _ = vpn_connect._forticlient_window_for_disconnect("", tr=trace)
+    assert ok is True
+    assert calls == {"shell": [(GUI_64, DIR_64)], "legacy": []}, "żadnego Popen drugiej kopii"
+    assert trace.steps[-1]["strategy"] == "desktop_shell"
+
+
+def test_disconnect_without_a_shell_never_starts_a_second_client(monkeypatch):
+    calls = _disconnect_machine(monkeypatch, lnk=False, running=True, shell=False)
+    ok, _ = vpn_connect._forticlient_window_for_disconnect("")
+    assert ok is True and calls["legacy"] == []
+
+
+@pytest.mark.parametrize("lnk,running", [(True, True), (True, False), (False, False)])
+def test_disconnect_with_lnk_or_no_client_is_unchanged(monkeypatch, lnk, running):
+    calls = _disconnect_machine(monkeypatch, lnk=lnk, running=running, shell=True)
+    vpn_connect._forticlient_window_for_disconnect("APP")
+    assert calls == {"shell": [], "legacy": ["APP"]}
+
+
+def test_connect_and_launch_app_keep_the_old_start():
+    tree = ast.parse(open(os.path.join(_PARENT, "vpn_connect.py"), encoding="utf-8").read())
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    used = lambda fn, name: any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                                and c.func.id == name for c in ast.walk(fns[fn]))
+    assert used("disconnect", "_forticlient_window_for_disconnect")
+    for fn in ("connect", "launch_app", "_open_forticlient_gui"):
+        assert not used(fn, "_desktop_shell_start"), fn
+        assert not used(fn, "_forticlient_window_for_disconnect"), fn

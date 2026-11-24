@@ -1671,6 +1671,50 @@ def _open_forticlient_gui(app_path: str = "", tr=None) -> tuple[bool, str]:
           process_started=True, pid=proc.pid, timeout_ms=3000, **attempt)
     return True, "Otwarto FortiClient — połącz się w oknie klienta."
 
+def _desktop_shell_start(exe: str, cwd) -> bool:
+    """Start `exe` through the running desktop shell (explorer), the way a
+    double-click does; False when there is no shell to ask."""
+    from launch_rules import desktop_shell_execute
+    return bool(desktop_shell_execute(exe, cwd))
+
+
+def _forticlient_window_for_disconnect(app_path: str = "", tr=None) -> tuple[bool, str]:
+    """Bring the running FortiClient forward so "Disconnect" can be clicked.
+
+    2026-11-24 (pole, kolega): bez skrótu .lnk `_open_forticlient_gui`
+    startował przy „Rozłącz” DRUGĄ kopię działającego klienta przez Popen →
+    Electron „Cannot read properties of null (reading 'TraceLog')”.  Ze
+    skrótem drugi start idzie przez powłokę i tylko przywraca okno (logi
+    właściciela 10-19, 10-26) — więc:
+
+    * skrót jest albo klient nie działa → dokładnie jak dotąd
+      (`_open_forticlient_gui`, wspólne z „Połącz”, nietknięte);
+    * brak skrótu i klient działa → start przez powłokę pulpitu (jak
+      podwójne kliknięcie: przywraca okno pierwszej instancji); gdy powłoki
+      nie ma — żadnego drugiego procesu, automatyka szuka okna, które jest.
+    """
+    tr = tr if tr is not None else _TRACE_NULL
+    if os.path.isfile(_FORTI_LNK) or not _is_process_running("FortiClient.exe"):
+        return _open_forticlient_gui(app_path, tr=tr)
+    forti_gui = _find_forticlient_gui(app_path)
+    if not forti_gui or not _validate_exe(forti_gui)[0]:
+        return _open_forticlient_gui(app_path, tr=tr)
+    cwd, cwd_source = choose_launch_cwd(_forti_install_dir(), forti_gui, os.path.isdir)
+    try:
+        shell_started = _desktop_shell_start(forti_gui, cwd)
+    except Exception as e:
+        _dbg(f"  -> desktop shell start FAIL: {type(e).__name__}")
+        shell_started = False
+    if shell_started:
+        tr.ok("vpn.launch", strategy="desktop_shell", started=True,
+              process_started=True, already_running=True, lnk_present=False,
+              cwd_source=cwd_source)
+    else:
+        tr.warn("vpn.launch", strategy="already_running", started=True,
+                process_started=False, already_running=True, lnk_present=False)
+    return True, "FortiClient już działa."
+
+
 # ------------------------------------------------------------------ #
 # Keyboard simulation for Chromium-based FortiClient (SendInput)       #
 # ------------------------------------------------------------------ #
@@ -3629,7 +3673,7 @@ def disconnect(provider: str, server: str = "",
                         message=type(exc).__name__)
 
         # Free edition — open GUI and auto-click Disconnect
-        ok, msg = _open_forticlient_gui(app_path, tr=tr)
+        ok, msg = _forticlient_window_for_disconnect(app_path, tr=tr)
         if ok:
             tr.ok("vpn.automation", automation_mode="tab_sequence",
                   phase="spawn", started=True)

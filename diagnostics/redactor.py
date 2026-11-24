@@ -197,6 +197,7 @@ ALLOWED_KEYS = set(IP_KEYS | HOST_KEYS | IDENTITY_KEYS | PATH_KEYS
     "scrollback", "transport", "cipher", "server_version",
     # launch outcome (emitted by vpn_connect itself, which never imports vpn/)
     "process_started", "observation_failed", "fallback_from", "cwd_source",
+    "already_running",
 }
 
 _FLAG_RE = re.compile(r"^-{1,2}[A-Za-z][A-Za-z0-9][\w-]*$")
