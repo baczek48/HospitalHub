@@ -353,6 +353,42 @@ def test_long_code_lines_wrap_instead_of_widening_the_panel():
     assert "white-space:pre;" not in html and "white-space: pre;" not in html
 
 
+def test_long_tokens_get_break_points_that_copying_takes_out():
+    from ui.claude_panel import ZWSP, breakable, unbreakable, wrapped_html
+    path = "/opt/asseco/amms/logs/integration/serwer_integracji_2026_error.log"
+    assert ZWSP in breakable(path) and unbreakable(breakable(path)) == path
+    assert breakable("krótkie słowa zostają jak są") == "krótkie słowa zostają jak są"
+    html = wrapped_html(f"[link](https://example.org{path}) i {path}")
+    assert f'href="https://example.org{path}"' in html, "adres linku nietknięty"
+    assert ZWSP not in html.partition("<body")[0], "ani w stylach"
+
+
+def test_a_long_conversation_stays_as_wide_as_the_panel_with_no_gap_below(app):
+    """2026-11-23 (owner): after a while the answers ran off the right edge
+    and a large empty space opened between the last answer and the input."""
+    panel, proc = make_panel(app)
+    panel.resize(380, 600)
+    panel.show()
+    text = "Sprawdź log usługi, połączenie z bazą zostało zerwane. " * 6
+    for i in range(8):
+        panel._bubble(text, "claude" if i % 2 else "user")
+    panel._bubble("Plik: /opt/asseco/amms/logs/integration/serwer_integracji_"
+                  "2026-11-23_HL7_ADT_A01_error_trace.log", "user")
+    panel._bubble("`MSH|^~\\&|AMMS|SZPITAL|SI|SI|20261123101500||ADT^A01^ADT_A01|"
+                  "MSG0000123456789|P|2.5`", "claude")
+    for _ in range(8):
+        panel._bubble(text, "claude")
+    for _ in range(30):
+        pump()
+    body = panel._scroll.widget()
+    assert body.width() <= panel._scroll.viewport().width()
+    stretch = panel._messages.itemAt(panel._messages.count() - 1).geometry()
+    assert stretch.height() == 0, "pusto pod ostatnią odpowiedzią"
+    bar = panel._scroll.verticalScrollBar()
+    assert bar.value() == bar.maximum(), "widok na najnowszej wiadomości"
+    panel.end()
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 2026-10-20 (owner): live mode, a quick "Zakończ", and opening it again
 # ══════════════════════════════════════════════════════════════════════════

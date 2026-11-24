@@ -12,6 +12,7 @@ lives in :mod:`claude_support`.
 
 from __future__ import annotations
 
+import html as _html
 import re
 import threading
 
@@ -193,14 +194,90 @@ def code_blocks(markdown: str) -> list[str]:
     return [b.strip() for b in _CODE_BLOCK.findall(markdown or "") if b.strip()]
 
 
+#: An invisible place where a line may break.  QLabel wraps only at spaces,
+#: so one path, URL or HL7 segment without them made its bubble as wide as
+#: itself — the whole conversation grew past the panel's right edge, and the
+#: scroll area, which sizes its height for the panel's width, left that much
+#: too much empty space under the last answer (2026-11-23).
+ZWSP = "\u200b"
+#: Characters after which a long token may break, and the longest stretch
+#: left without a break.
+_BREAK_AFTER = set("/\\|^_.,;:=&?-~+#@)]}>")
+_LONG_TOKEN = 24
+_MAX_RUN = 16
+_TOKEN = re.compile(r"\S{%d,}" % _LONG_TOKEN)
+
+
+def _break_token(match: re.Match) -> str:
+    out = []
+    run = 0
+    for ch in match.group(0):
+        out.append(ch)
+        run += 1
+        if ch in _BREAK_AFTER or run >= _MAX_RUN:
+            out.append(ZWSP)
+            run = 0
+    if out and out[-1] == ZWSP:
+        out.pop()
+    return "".join(out)
+
+
+def breakable(text: str) -> str:
+    """Plain text whose long tokens may wrap: invisible break points (ZWSP)
+    after separators and at least every few characters.  Short words are left
+    alone; copying the text takes the break points out again."""
+    return _TOKEN.sub(_break_token, text or "")
+
+
+def unbreakable(text: str) -> str:
+    return (text or "").replace(ZWSP, "")
+
+
+_TEXT_NODE = re.compile(r">([^<]+)<")
+
+
 def wrapped_html(markdown: str) -> str:
-    """Markdown as HTML in which code wraps too (a long command line pushed
-    the whole conversation wider than the panel — measured 2026-10-20)."""
+    """Markdown as HTML in which everything wraps inside the panel: code
+    keeps its lines but wraps (a long command line, 2026-10-20), and long
+    tokens get break points in the text only — never in tags or links."""
     doc = QTextDocument()
     doc.setMarkdown(markdown or "")
     html = doc.toHtml()
-    return html.replace("white-space:pre;", "white-space:pre-wrap;").replace(
+    html = html.replace("white-space:pre;", "white-space:pre-wrap;").replace(
         "white-space: pre;", "white-space: pre-wrap;")
+    head, sep, body = html.partition("<body")
+    if not sep:
+        return html
+
+    def text(m: re.Match) -> str:
+        return ">" + _html.escape(breakable(_html.unescape(m.group(1))),
+                                  quote=False) + "<"
+
+    return head + sep + _TEXT_NODE.sub(text, body)
+
+
+def _strip_breaks_from_clipboard() -> None:
+    """Text copied out of a bubble (mouse selection, Ctrl+C) loses the
+    invisible break points — a pasted command must be exactly what it says.
+    Only when HospitalHub itself put it there."""
+    cb = QApplication.clipboard()
+    if cb is None or not cb.ownsClipboard():
+        return
+    text = cb.text()
+    if ZWSP in text:
+        cb.setText(unbreakable(text))
+
+
+_clipboard_hooked = False
+
+
+def _hook_clipboard() -> None:
+    global _clipboard_hooked
+    cb = QApplication.clipboard()
+    if _clipboard_hooked or cb is None:
+        return
+    cb.dataChanged.connect(_strip_breaks_from_clipboard)
+    _clipboard_hooked = True
 
 
 def _trim(text: str) -> str:
@@ -381,6 +458,13 @@ class ClaudeSupportPanel(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Follow the newest message once the layout has really grown, not a
+        # guessed 30 ms later; scrolling up to read stops the following.
+        self._follow = True
+        bar = self._scroll.verticalScrollBar()
+        bar.rangeChanged.connect(self._on_range)
+        bar.valueChanged.connect(self._on_scrolled)
+        _hook_clipboard()
         body = QWidget()
         self._messages = QVBoxLayout(body)
         self._messages.setContentsMargins(0, 0, 0, 0)
@@ -421,8 +505,21 @@ class ClaudeSupportPanel(QWidget):
             # Claude is still at it: the dots stay under the newest message.
             self._messages.removeWidget(self._typing_row)
             self._messages.insertWidget(self._messages.count() - 1, self._typing_row)
-        QTimer.singleShot(30, lambda: self._scroll.verticalScrollBar().setValue(
-            self._scroll.verticalScrollBar().maximum()))
+        self._follow = True
+        self._to_bottom()
+        QTimer.singleShot(0, self._to_bottom)
+
+    def _to_bottom(self) -> None:
+        if self._follow:
+            bar = self._scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+    def _on_range(self, _lo: int, _hi: int) -> None:
+        self._to_bottom()
+
+    def _on_scrolled(self, value: int) -> None:
+        bar = self._scroll.verticalScrollBar()
+        self._follow = value >= bar.maximum() - 4
 
     def _show_typing(self) -> None:
         if self._typing_row is None:
@@ -451,7 +548,13 @@ class ClaudeSupportPanel(QWidget):
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
                                     | Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        # Ignored across: a bubble takes the panel's width and never asks for
+        # more, whatever it holds.  Preferred down: its height comes from
+        # heightForWidth at the real width — Minimum made Qt's guessed-width
+        # sizeHint the floor, ~10% too tall per bubble, and the surplus piled
+        # up as empty space under the last answer (measured 2026-11-23).
+        lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        lbl.setMinimumWidth(0)
         if who == "user":
             lbl.setTextFormat(Qt.TextFormat.PlainText)
             lbl.setStyleSheet("background: #1f3a5f; color: #e6edf3; border-radius: 8px;"
@@ -468,7 +571,7 @@ class ClaudeSupportPanel(QWidget):
             lbl.setTextFormat(Qt.TextFormat.PlainText)
             colour = "#f85149" if who == "error" else "#8b949e"
             lbl.setStyleSheet(f"color: {colour}; font-size: 11px; padding: 0 4px;")
-        lbl.setText(text)
+        lbl.setText(breakable(text))
         self._add(lbl)
         return lbl
 
