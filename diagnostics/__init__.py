@@ -42,8 +42,11 @@ from pathlib import Path
 
 APP_NAME = "HospitalHub"
 APP_VARIANT = "V2"
-#: Kept here for now; moves to a shared constant when the app has one.
-APP_VERSION = "2.0.0-dev"
+#: The build's number (app_version, written by the build script; "dev" from source).
+try:
+    from app_version import VERSION as APP_VERSION
+except Exception:
+    APP_VERSION = "dev"
 
 #: Overridable so tests never touch the user's real %APPDATA%.
 DIR_ENV_VAR = "HOSPITALHUB_DIAG_DIR"

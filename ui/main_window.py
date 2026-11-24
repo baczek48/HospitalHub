@@ -364,6 +364,10 @@ class MainWindow(QMainWindow):
                 act.triggered.connect(lambda _checked, k=key: self._set_sort_order(k))
                 self._sort_actions[key] = act
 
+        # 2026-11-24: version, author, release date, folders.
+        from ui.about_dialog import add_info_menu
+        self._info_menu = add_info_menu(menu, self, "V2")
+
     def _close_to_tray(self):
         """Hide window to system tray."""
         from ui import vpn_dock

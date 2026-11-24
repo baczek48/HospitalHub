@@ -66,6 +66,9 @@ PrivilegesRequiredOverridesAllowed=commandline
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription={#MyAppName} — instalator
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoCopyright=© 2026 {#MyAppPublisher}. Wszelkie prawa zastrzeżone.
+AppCopyright=© 2026 {#MyAppPublisher}. Wszelkie prawa zastrzeżone.
 ; Restart Manager zamyka działającą aplikację przed podmianą plików
 CloseApplications=yes
 
@@ -99,8 +102,16 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; from 1.x at the same path) asks for it.  CreateProcess cannot elevate;
 ; ShellExecute starts it the way a double-click does and shows the UAC prompt.
 Filename: "{app}\{#MyAppExeName}"; Description: "Uruchom {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser shellexec
+; 2026-11-24: an update started from HospitalHub (Info → Sprawdź aktualizacje)
+; runs silently with /HHUPDATE=1 — the app closed itself for it, so start it again.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser shellexec; Check: IsHHUpdate
 
 [Code]
+function IsHHUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:HHUPDATE|0}') = '1';
+end;
+
 const
   OldV2Key = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#OldV2AppId}_is1';
 

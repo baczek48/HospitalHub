@@ -15,8 +15,11 @@ set "VER=%~1"
 if "%VER%"=="" set "VER=dev"
 
 echo === HospitalHub Remote %VER%: build ===
+py -3.13 write_build_info.py "%VER%"
 py -3.13 -m PyInstaller --noconfirm HospitalHubRemote.spec
-if errorlevel 1 (
+set "PYI_ERR=%errorlevel%"
+del /q _build_info.py 2>nul
+if not "%PYI_ERR%"=="0" (
     echo BLAD: PyInstaller zwrocil blad. Przerwano.
     exit /b 1
 )

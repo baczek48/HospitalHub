@@ -54,3 +54,6 @@ dist_portable/
 # Dane logowania hd.asseco.pl (2026-11-15) — nigdy do repo
 hd.asseco.txt
 third_party/
+
+# Wersja i data wpisywane przez build_v2.bat / build_remote.bat
+_build_info.py

@@ -443,6 +443,10 @@ class RemoteWindow(SshDialog):
             act.setData(tid)
             group.addAction(act)
         group.triggered.connect(lambda a: self._choose_theme(a.data()))
+
+        # 2026-11-24: version, author, release date, folders.
+        from ui.about_dialog import add_info_menu
+        add_info_menu(bar, self, "Portable", own_vault=lambda: self._vault_path)
         self.layout().setMenuBar(bar)
         self._menu_bar = bar
 

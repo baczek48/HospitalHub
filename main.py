@@ -481,7 +481,7 @@ class AppManager:
         act_close.triggered.connect(lambda checked, w=window: self._force_close_window(w))
 
         act_quit = menu.addAction("Zamknij wszystko")
-        act_quit.triggered.connect(self._quit_all)
+        act_quit.triggered.connect(lambda: self._quit_all())
 
         tray.setContextMenu(menu)
 
@@ -559,7 +559,9 @@ class AppManager:
             _log_exception("destroy_cleanup przy zamykaniu okna")
         window.deleteLater()
 
-    def _quit_all(self):
+    def _quit_all(self, before_quit=None) -> bool:
+        """Close everything; False when the user cancelled (or `before_quit`,
+        called once nothing else can stop the quit, returned False)."""
         for w in list(self._windows):
             if w._unsaved:
                 w.show()
@@ -575,11 +577,15 @@ class AppManager:
                 clicked = box.clickedButton()
                 if clicked is btn_yes:
                     if not w._save():
-                        return  # save failed: abort quit, nothing lost (C4-01)
+                        return False  # save failed: abort quit, nothing lost (C4-01)
                 elif clicked is btn_no:
                     pass
                 else:
-                    return  # Cancel — abort quit
+                    return False  # Cancel — abort quit
+        # 2026-11-24: the update hands over to its installer here — after the
+        # questions, before anything is closed.
+        if before_quit is not None and not before_quit():
+            return False
         self._hide_all_windows()
         self._close_all_ssh_dialogs()
         _settle_claude_threads(final=True)
@@ -595,6 +601,7 @@ class AppManager:
         self._trays.clear()
         self._windows.clear()
         self._app.quit()
+        return True
 
     def _on_open_vault_requested(self):
         login = LoginDialog()
@@ -766,6 +773,8 @@ def main():
     app.setWindowIcon(make_icon())
 
     manager = AppManager(app)
+    from ui import update_dialog
+    update_dialog.set_quit_all_hook(manager._quit_all)
     manager.run_initial_login()
 
     finish_and_exit(app.exec())
