@@ -295,6 +295,8 @@ class LoginDialog(QDialog):
                 QMessageBox.critical(self, "Niewłaściwy typ vaulta", kind_error)
                 return
             save_last_vault(vault_path)
+            import vault_sync
+            vault_sync.note_loaded(vault_path, data)
             items = models.vpn_from_dict(data) if vtype == "vpn" else models.from_dict(data)
             self._result = (vault_path, password, items,
                             data.get("admin_hash", ""), data.get("admin_salt", ""), vtype)
@@ -689,6 +691,8 @@ class _OpenVaultDialog(FormStyled, QDialog):
             if kind_error:
                 QMessageBox.critical(self, "Niewłaściwy typ vaulta", kind_error)
                 return
+            import vault_sync
+            vault_sync.note_loaded(path, data)
             if self._vault_type == "vpn":
                 items = models.vpn_from_dict(data)
             else:

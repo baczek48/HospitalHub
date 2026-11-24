@@ -13,6 +13,8 @@ Narzędzie do zarządzania infrastrukturą IT szpitali. Dane połączeń, poświ
 - Zapis atomowy: awaria w trakcie zapisu nie uszkodzi pliku. Obok vaulta zostaje kopia poprzedniej wersji (`.vault.bak`).
 - Hasło główne nie jest nigdzie zapisywane.
 - Zmiany zapisujesz ręcznie (`Ctrl+S`). Pasek tytułu pokazuje `[niezapisane]`.
+- **Scalanie z vaultem kolegi** (Plik → Scal zmiany z innego vaulta…): lista różnic z wyborem, co przejąć. Nowe dane kolegi wchodzą, Twoje zmiany i loginy zostają, tekst notatek łączy się linia po linii, usunięcia tylko na życzenie. Vault zapamiętuje skróty poprzednich wartości, więc z czasem HospitalHub sam rozpoznaje, która wersja jest nowsza. Elementy admina bez odblokowania przechodzą tak jak w pliku kolegi (bez usuwania).
+- Menu Info: wersja, sprawdzanie aktualizacji i instalacja nowej wersji z GitHuba (z kontrolą SHA-256), położenie vaultów.
 
 ### Szpitale, maszyny, bazy danych
 - Struktura: szpital → maszyny (SSH/RDP) → bazy danych → notatki o środowisku.

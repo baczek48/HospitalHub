@@ -12,6 +12,7 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QActionGroup
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crypto import encrypt, hash_admin_password, verify_admin_password
 import models
+import vault_sync
 from vault_io import discard_backup, write_vault_atomic
 from config import (save_last_vault, load_vault_list,
                     load_ssh_start_maximized, save_ssh_start_maximized,
@@ -110,6 +111,10 @@ class MainWindow(QMainWindow):
         self._vpn_panel = None
         self._sort_order = load_hospital_sort_order()
         self._sort_actions = {}
+        # 2026-11-24: the vault's own history (vault_sync) — handed over by the
+        # login dialog — and what is on disk, to record what each save changes.
+        self._sync = vault_sync.take_loaded(vault_path)
+        self._saved_snapshot = vault_sync.plain(self._models_dict())
 
         self._admin_lock_timer = QTimer(self)
         self._admin_lock_timer.setSingleShot(True)
@@ -271,6 +276,9 @@ class MainWindow(QMainWindow):
         act_save_as = file_menu.addAction("Zapisz jako / Eksportuj")
         act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         act_save_as.triggered.connect(self._save_as)
+
+        act_merge = file_menu.addAction("Scal zmiany z innego vaulta…")
+        act_merge.triggered.connect(self._merge_from_vault)
 
         if self._vault_type != "vpn":
             act_export = file_menu.addAction("Eksportuj szpital do vaulta...")
@@ -599,6 +607,118 @@ class MainWindow(QMainWindow):
     # Save / export                                                        #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Merging a colleague's copy (2026-11-24)                              #
+    # ------------------------------------------------------------------ #
+
+    def _read_other_vault(self, path: str):
+        """The decrypted content of another vault file, or None.  This
+        vault's password first (the team's copies usually share it)."""
+        from PyQt6.QtWidgets import QApplication, QInputDialog, QLineEdit
+        from crypto import decrypt
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+        except OSError as e:
+            QMessageBox.critical(self, "Scalanie", f"Nie można odczytać pliku:\n{e}")
+            return None
+        password = self._password
+        for attempt in range(4):
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                return decrypt(content, password)
+            except Exception:
+                pass
+            finally:
+                QApplication.restoreOverrideCursor()
+            prompt = ("Ten vault ma inne hasło niż Twój.\nPodaj hasło vaulta kolegi:"
+                      if attempt == 0 else "Nieprawidłowe hasło. Spróbuj ponownie:")
+            password, ok = QInputDialog.getText(self, "Hasło vaulta", prompt,
+                                                QLineEdit.EchoMode.Password)
+            if not ok or not password:
+                return None
+        QMessageBox.critical(self, "Scalanie", "Nie udało się otworzyć vaulta.")
+        return None
+
+    def _merge_from_vault(self, path: str = ""):
+        """Plik → „Scal zmiany z innego vaulta…”: a colleague's copy is
+        compared with this one and the user picks what to take over
+        (vault_merge).  Applied in memory; Ctrl+S keeps it."""
+        import vault_merge
+        from vault_io import vault_kind_error
+        from ui.vault_merge_dialog import VaultMergeDialog
+        if not path:
+            start_dir = os.path.dirname(self._vault_path) if self._vault_path else ""
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Scal zmiany z vaulta (np. od kolegi)", start_dir,
+                "Vault files (*.vault);;Wszystkie pliki (*)")
+        if not path:
+            return
+        if self._vault_path and (os.path.normcase(os.path.abspath(path))
+                                 == os.path.normcase(os.path.abspath(self._vault_path))):
+            QMessageBox.information(self, "Scalanie",
+                                    "To jest ten sam plik, który masz otwarty.")
+            return
+        theirs = self._read_other_vault(path)
+        if theirs is None:
+            return
+        kind_error = vault_kind_error(theirs, "vpn" if self._vault_type == "vpn" else "global")
+        if kind_error:
+            QMessageBox.critical(self, "Scalanie", kind_error)
+            return
+        mine = self._models_dict()
+        mine[vault_sync.SYNC_KEY] = self._sync
+
+        def replan(show_admin: bool):
+            return vault_merge.plan(mine, theirs, show_admin=show_admin)
+
+        plan = replan(self._vault_type == "vpn" or self._admin_unlocked)
+        if not plan.changes:
+            extra = []
+            if plan.older_there:
+                extra.append(f"Starsze dane u kolegi: {plan.older_there} (zostają Twoje).")
+            if plan.only_here:
+                extra.append(f"Twoje elementy, których kolega nie ma: {plan.only_here}.")
+            QMessageBox.information(
+                self, "Scalanie", "Nie ma nic nowego do przejęcia."
+                + ("\n\n" + "\n".join(extra) if extra else ""))
+            return
+
+        def unlock() -> bool:
+            self._unlock_admin()
+            return self._admin_unlocked
+
+        can_unlock = bool(self._admin_hash) and not self._admin_unlocked
+        dlg = VaultMergeDialog(self, os.path.basename(path), plan, replan=replan,
+                               unlock=unlock if can_unlock else None)
+        if not dlg.exec():
+            return
+        merged, sync = vault_merge.apply(dlg.plan, dlg.chosen)
+        counts = vault_merge.summary(dlg.plan, dlg.chosen)
+        fresh = (models.vpn_from_dict(merged) if self._vault_type == "vpn"
+                 else models.from_dict(merged))
+        vault_merge.update_in_place(self._hospitals, fresh)
+        self._sync = sync
+        if not self._admin_hash and theirs.get("admin_hash") and theirs.get("admin_salt"):
+            # Admin items came over; with no admin password here they could
+            # never be unlocked — the colleague's admin password comes along.
+            self._admin_hash = theirs["admin_hash"]
+            self._admin_salt = theirs["admin_salt"]
+        if self._vpn_panel is not None:
+            self._vpn_panel._rebuild_cards()
+        self._on_data_changed()
+        lines = [f"Dodane elementy: {counts['added']}",
+                 f"Przejęte zmiany: {counts['changed']}",
+                 f"Zostawione Twoje wartości: {counts['kept']}"]
+        if counts["deleted"]:
+            lines.append(f"Usunięte elementy: {counts['deleted']}")
+        if counts["admin_auto"]:
+            lines.append(f"W tym zmiany admina przejęte bez podglądu: {counts['admin_auto']}")
+        QMessageBox.information(
+            self, "Scalono",
+            "\n".join(lines) + "\n\nZapisz vault (Ctrl+S), aby zachować zmiany. "
+            "Zamknięcie bez zapisu cofa scalenie.")
+
     def _save(self) -> bool:
         # The result matters to whoever closes the window after saving: a save
         # that failed must not be followed by a close (C4-01).
@@ -631,12 +751,18 @@ class MainWindow(QMainWindow):
         finally:
             self._saving = False
 
+    def _models_dict(self) -> dict:
+        if self._vault_type == "vpn":
+            return models.vpn_to_dict(self._hospitals)
+        return models.to_dict(self._hospitals)
+
     def _do_save_now(self, path: str) -> bool:
         try:
-            if self._vault_type == "vpn":
-                data = models.vpn_to_dict(self._hospitals)
-            else:
-                data = models.to_dict(self._hospitals)
+            data = self._models_dict()
+            # What this save changes goes into the vault's history (vault_sync).
+            snapshot = vault_sync.plain(data)
+            sync = vault_sync.record(self._sync, self._saved_snapshot, snapshot)
+            data[vault_sync.SYNC_KEY] = sync
             if self._admin_hash:
                 data["admin_hash"] = self._admin_hash
                 data["admin_salt"] = self._admin_salt
@@ -644,6 +770,7 @@ class MainWindow(QMainWindow):
             # Atomic write (temp file + fsync + replace), the previous file kept
             # as <vault>.bak, replace retried while AV/sync holds the file.
             write_vault_atomic(path, content)
+            self._sync, self._saved_snapshot = sync, snapshot
             self._unsaved = False
             self._update_title()
             return True
