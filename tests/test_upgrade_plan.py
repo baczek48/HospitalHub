@@ -166,7 +166,7 @@ def _fake_session(window, machine):
 
 def test_the_upgrade_tab_sits_next_to_the_machines(window):
     tabs = window._left_tabs
-    assert [tabs.tabText(i) for i in range(tabs.count())] ==         ["Maszyny", "Pliki", "Aktualizacja", "SI"]
+    assert [tabs.tabText(i) for i in range(tabs.count())] ==         ["Maszyny", "Pliki", "Aktualizacja AMMS", "SI"]
 
 
 def test_a_command_goes_to_every_machine_of_the_group(window, monkeypatch):
@@ -236,3 +236,129 @@ def test_a_confirmed_command_asks_and_ctrl_c_ends_a_wait(window, monkeypatch):
     window._interrupt_upgrade(group, panel.machines_of(group))
     assert sent_ctrl == [b"\x03"]
     assert panel._status[(group["id"], h.machines[0].id)][0] == "stop"
+
+
+# ── 2026-11-26 (owner): "Aktualizacja AMMS" + the hospital's upgrade notes ──
+
+def test_the_notes_are_kept_in_the_plan():
+    assert up.default_plan()["notes"] == ""
+    saved = up.default_plan()
+    saved["notes"] = "AMMS\nsystemctl stop amms\n"
+    assert up.normalize_plan(saved)["notes"] == saved["notes"]
+    # A plan without groups (all deleted) still keeps its notes.
+    assert up.normalize_plan({"notes": "x", "groups": []})["notes"] == "x"
+    assert up.normalize_plan({"groups": saved["groups"]})["notes"] == ""
+
+
+def test_a_notes_file_is_read_in_utf8_or_the_windows_code_page(tmp_path):
+    from ui.upgrade_panel import read_text_file
+    (tmp_path / "u8.txt").write_bytes("zażółć\r\nlinia".encode("utf-8-sig"))
+    (tmp_path / "cp.txt").write_bytes("zażółć\r\nlinia".encode("cp1250"))
+    assert read_text_file(str(tmp_path / "u8.txt")) == "zażółć\nlinia"
+    assert read_text_file(str(tmp_path / "cp.txt")) == "zażółć\nlinia"
+
+
+def test_the_panel_shows_and_saves_the_notes(app):
+    from PyQt6.QtWidgets import QTextEdit
+    import ui.upgrade_panel as panel
+    h = _hospital()
+    p = panel.UpgradePanel(h)
+    saves = []
+    p.data_changed.connect(lambda: saves.append(1))
+    p._edit_notes()
+    dlg = p._notes_dlg
+    # Not modal (owner): the main window stays usable while it is open.
+    assert dlg is not None and dlg.isVisible() and not dlg.isModal()
+    dlg.text.setPlainText("aktualizacja z 192.0.2.53")
+    assert dlg.dirty()
+    dlg.save_btn.click()
+    pump(50)
+    assert h.upgrade["notes"] == "aktualizacja z 192.0.2.53\n" and saves
+    assert not dlg.dirty() and dlg.isVisible()      # saved, still open
+    views = [w for w in p._scroll.widget().findChildren(QTextEdit)
+             if w.isReadOnly()]
+    assert views and "192.0.2.53" in views[0].toPlainText()
+    back = models.from_dict(models.to_dict([h]))[0]
+    assert back.upgrade["notes"] == h.upgrade["notes"]
+    # A second click brings the same window back, not a new one.
+    p._edit_notes()
+    assert p._notes_dlg is dlg
+    # Pinned = above every window, so a click on the main one never hides it.
+    dlg.pin.setChecked(True)
+    pump(20)
+    assert dlg.is_pinned() and dlg.isVisible()
+    dlg.pin.setChecked(False)
+    pump(20)
+    assert not dlg.is_pinned() and dlg.isVisible()
+    assert p.close_notes() and p._notes_dlg is None
+
+
+def test_the_gitlab_link_is_the_projects_page(app, monkeypatch):
+    import ui.upgrade_panel as panel
+    opened = []
+    monkeypatch.setattr(panel.QDesktopServices, "openUrl",
+                        lambda url: opened.append(url.toString()))
+    panel.open_gitlab()
+    assert opened == ["https://amms.asseco.pl/gitlab/dashboard/projects/member"]
+
+
+def test_the_notes_dialog_returns_the_edited_text(app):
+    from ui.upgrade_panel import NotesDialog
+    d = NotesDialog(None, "a")
+    d.text.setPlainText("linia 1\nlinia 2\n\n\n")
+    assert d.value() == "linia 1\nlinia 2\n"
+    d.text.setPlainText("   \n")
+    assert d.value() == ""
+
+
+def test_bold_and_bigger_print_are_saved_and_shown(app):
+    from PyQt6.QtGui import QFont, QTextCursor
+    import ui.upgrade_panel as panel
+    h = _hospital()
+    p = panel.UpgradePanel(h)
+    p._edit_notes()
+    dlg = p._notes_dlg
+    dlg.text.setPlainText("AMMS\nsystemctl stop amms")
+    # No selection: the whole current line (the first one).
+    cur = dlg.text.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.Start)
+    dlg.text.setTextCursor(cur)
+    dlg.toggle_bold()
+    dlg.change_size(4)
+    assert dlg.bold_btn.isChecked()
+    assert dlg.html() and dlg.dirty()
+    dlg.save_btn.click()
+    pump(50)
+    plan = h.upgrade
+    assert plan["notes"] == "AMMS\nsystemctl stop amms\n" and plan["notes_html"]
+    assert panel.notes_rich(plan) == plan["notes_html"]
+    # The preview in the panel keeps it.
+    doc = p._notes_view.document()
+    first = doc.begin().begin().fragment().charFormat()
+    assert first.fontWeight() >= QFont.Weight.DemiBold.value
+    assert first.fontPointSize() == panel.NOTES_PT + 4
+    # Reopened: the formatting is back in the editor.
+    assert p.close_notes()
+    p._edit_notes()
+    assert p._notes_dlg.html() and not p._notes_dlg.dirty()
+    # "Zwykły tekst" takes it off — the notes are plain again.
+    d2 = p._notes_dlg
+    d2.text.selectAll()
+    d2.clear_format()
+    assert d2.html() == ""
+    d2.save_btn.click()
+    pump(50)
+    assert h.upgrade["notes_html"] == ""
+    assert p.close_notes()
+
+
+def test_stale_formatting_gives_way_to_changed_plain_notes(app):
+    import ui.upgrade_panel as panel
+    from PyQt6.QtGui import QTextDocument
+    doc = QTextDocument()
+    doc.setPlainText("stara treść")
+    plan = {"notes": "stara treść\n", "notes_html": doc.toHtml()}
+    assert panel.notes_rich(plan)
+    plan["notes"] = "nowa treść (scalona)\n"
+    assert panel.notes_rich(plan) == ""
+    assert up.normalize_plan(plan)["notes_html"] == plan["notes_html"]

@@ -79,12 +79,18 @@ class RemoteWindow(SshDialog):
         # Three tabs in a narrow panel: shortened, never behind arrows.
         tabs.tabBar().setUsesScrollButtons(False)
         tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+        # 2026-11-26: "Aktualizacja AMMS" is longer than the shared minimum
+        # tab width allows for — each tab as wide as its own text instead.
+        tabs.tabBar().setStyleSheet("QTabBar::tab { min-width: 0px; }")
 
         # "Aktualizacja" (2026-11-15): the upgrade plan of the hospital.
         self._upgrade_panel = UpgradePanel(self._env_panel.current_hospital(),
                                            admin_unlocked=False)
         tabs.addTab(self._upgrade_panel, icon("refresh", "#d29922"),
-                    "Aktualizacja")
+                    "Aktualizacja AMMS")
+        tabs.setTabToolTip(tabs.indexOf(self._upgrade_panel),
+                           "Aktualizacja AMMS — instrukcja, pobieranie z hd.asseco.pl, "
+                           "kolejność kart i komendy grup")
         self._upgrade_panel.data_changed.connect(self._save)
         self._upgrade_panel.open_requested.connect(self._open_upgrade_tabs)
         self._upgrade_panel.run_requested.connect(self._run_upgrade_command)
@@ -186,6 +192,11 @@ class RemoteWindow(SshDialog):
         return box.clickedButton() is close_btn
 
     def closeEvent(self, event):
+        # 2026-11-26: the (non-modal) upgrade notes window goes first — it
+        # may have unsaved edits and asks; "Anuluj" keeps everything open.
+        if not self._upgrade_panel.close_notes():
+            event.ignore()
+            return
         box = self._upgrade_panel.hd_box
         if box.busy() and not getattr(self, "_close_confirmed", False):
             if not confirm(
@@ -321,9 +332,9 @@ class RemoteWindow(SshDialog):
         panel = self._upgrade_panel
         version = panel.version()
         if "{WERSJA}" in cmd.get("text", "") and not version:
-            QMessageBox.warning(self, "Aktualizacja",
+            QMessageBox.warning(self, "Aktualizacja AMMS",
                                 "Komenda używa {WERSJA} — wpisz najpierw wersję "
-                                "u góry zakładki Aktualizacja.")
+                                "u góry zakładki Aktualizacja AMMS.")
             return
         ready, missing, busy = [], [], []
         for m in machines:
@@ -336,7 +347,7 @@ class RemoteWindow(SshDialog):
                     busy.append(m)
         if not ready:
             QMessageBox.information(
-                self, "Aktualizacja",
+                self, "Aktualizacja AMMS",
                 "Żadna maszyna grupy nie ma połączonej karty.\n"
                 "Użyj „Otwórz karty po kolei” i poczekaj na połączenie.")
             return
@@ -355,7 +366,7 @@ class RemoteWindow(SshDialog):
                 text += ("\n\nPoprzednia komenda jeszcze trwa na:\n"
                          + "\n".join(f"   {m.ip}" for m in busy)
                          + "\nzostanie przerwana (Ctrl+C).")
-            box = QMessageBox(QMessageBox.Icon.Question, "Aktualizacja", text,
+            box = QMessageBox(QMessageBox.Icon.Question, "Aktualizacja AMMS", text,
                               parent=self)
             go = box.addButton("Wykonaj", QMessageBox.ButtonRole.AcceptRole)
             no = box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)

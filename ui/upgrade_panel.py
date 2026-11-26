@@ -4,6 +4,9 @@ The upgrade of a hospital done from one place:
 
 * the machines of the upgrade in a list whose order is the order of the
   tabs — "Otwórz karty po kolei" opens an SSH tab for each one not open yet;
+* "Instrukcja aktualizacji" (2026-11-26, owner): the hospital's own upgrade
+  notes ("nasz plik upgrade") on top — read here, edited or loaded from a
+  .txt in a bigger window;
 * groups (AMMS / WildFly, Platforma / Tomcat, Zdarzenia medyczne, Balancer…)
   with their machines and editable command buttons — a click types the
   command into the terminal of every machine of the group at once, so each
@@ -20,13 +23,16 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QDesktopServices, QFont, QKeySequence, QShortcut, QTextCharFormat,
+    QTextCursor, QTextDocument,
+)
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFrame,
+    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
 import upgrade_plan as up
@@ -34,7 +40,7 @@ from ui.hd_download import HdDownloadBox
 from ui.icons import set_icon
 from ui.utils import confirm
 
-__all__ = ["UpgradePanel", "CommandDialog", "MachinePickDialog"]
+__all__ = ["UpgradePanel", "CommandDialog", "MachinePickDialog", "NotesDialog"]
 
 
 _MENU_QSS = (
@@ -71,9 +77,17 @@ _BOX_QSS = (
 )
 
 _FIELD_QSS = (
-    "QLineEdit, QPlainTextEdit { background:#14161e; border:1px solid #2a2d3a;"
+    "QLineEdit, QPlainTextEdit, QTextEdit { background:#14161e; border:1px solid #2a2d3a;"
     " border-radius:6px; padding:4px 6px; color:#c9d1d9; }"
-    "QLineEdit:focus, QPlainTextEdit:focus { border-color:#4a5adf; }"
+    "QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus { border-color:#4a5adf; }"
+)
+
+_SCROLL_QSS = (
+    "QScrollBar:vertical { background:#14161e; width:6px; border:none;"
+    " border-radius:3px; margin:2px; }"
+    "QScrollBar::handle:vertical { background:#2a2d3a; border-radius:3px;"
+    " min-height:20px; }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
 )
 
 #: state → (mark, colour) of a machine's last result in a group.
@@ -170,6 +184,306 @@ class CommandDialog(QDialog):
                 "requires_stopped": self.stopped.isChecked()}
 
 
+def read_text_file(path: str) -> str:
+    """A .txt as the user wrote it: UTF-8, else the Windows code page."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8-sig", "cp1250"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+#: 2026-11-26 (owner): the AMMS GitLab, one click away from the upgrade.
+GITLAB_URL = "https://amms.asseco.pl/gitlab/dashboard/projects/member"
+
+
+def open_gitlab() -> None:
+    QDesktopServices.openUrl(QUrl(GITLAB_URL))
+
+
+#: Base print of the notes; A+ / A− step from it (points).
+NOTES_PT = 10
+_NOTES_MIN_PT, _NOTES_MAX_PT = 8, 28
+
+
+def _clean_text(text: str) -> str:
+    return text.rstrip() + "\n" if text.strip() else ""
+
+
+def notes_rich(plan: dict) -> str:
+    """The formatted notes, if they still hold the plain notes' text."""
+    html = plan.get("notes_html", "") or ""
+    if not html:
+        return ""
+    doc = QTextDocument()
+    doc.setHtml(html)
+    same = _clean_text(doc.toPlainText()) == _clean_text(plan.get("notes", "") or "")
+    return html if same else ""
+
+
+def _has_format(doc) -> bool:
+    """Any bold or resized text — otherwise plain notes are enough."""
+    block = doc.begin()
+    while block.isValid():
+        it = block.begin()
+        while not it.atEnd():
+            f = it.fragment().charFormat()
+            size = f.fontPointSize()
+            if f.fontWeight() >= QFont.Weight.DemiBold.value or (
+                    size and abs(size - NOTES_PT) > 0.1):
+                return True
+            it += 1
+        block = block.next()
+    return False
+
+
+class NotesDialog(QDialog):
+    """The hospital's upgrade instructions, big enough to read and edit.
+
+    2026-11-26 (owner): not modal — the main window stays usable while it
+    is open; "Przypnij" keeps it above every window, so a click on the
+    main window (or the RDP / browser beside it) does not hide it.  Without
+    a parent: unpinned, it may go behind the main window like any window.
+    """
+
+    #: (plain text, rich text or "" when nothing is formatted)
+    saved = pyqtSignal(str, str)
+
+    def __init__(self, parent, text: str, title: str = "", html: str = ""):
+        super().__init__(None)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle("Instrukcja aktualizacji AMMS"
+                            + (f" — {title}" if title else ""))
+        if parent is not None and parent.window() is not None:
+            self.setWindowIcon(parent.window().windowIcon())
+        # Own dark background: without a parent it would get the light
+        # system one, with the panel's pale text on it.
+        self.setObjectName("notesDialog")
+        self.setStyleSheet("QDialog#notesDialog { background:#0d1117; }"
+                           "QLabel, QCheckBox { color:#e1e4eb; }")
+        self.resize(760, 640)
+        lay = QVBoxLayout(self)
+        hint = QLabel("Notatki aktualizacji tego szpitala (maszyny, ścieżki, skrypty "
+                      "bazy). Zapisywane w vaulcie razem ze szpitalem.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#8b949e; font-size:10px;")
+        lay.addWidget(hint)
+        # 2026-11-26 (owner): bold and bigger print for what matters.
+        fmt_row = QHBoxLayout()
+        fmt_row.setSpacing(4)
+        self.bold_btn = QToolButton()
+        self.bold_btn.setText("B")
+        self.bold_btn.setCheckable(True)
+        self.bold_btn.setToolTip("Pogrubienie zaznaczenia (Ctrl+B)")
+        self.bold_btn.setStyleSheet(_GREY_QSS + "QToolButton { font-weight:bold; "
+                                    "min-width:22px; } QToolButton:checked {"
+                                    " background:#1c2240; color:#fff; }")
+        self.bold_btn.clicked.connect(self.toggle_bold)
+        fmt_row.addWidget(self.bold_btn)
+        for label, tip, step in (("A+", "Większa czcionka zaznaczenia (Ctrl++)", 2),
+                                 ("A−", "Mniejsza czcionka zaznaczenia (Ctrl+-)", -2)):
+            b = QToolButton()
+            b.setText(label)
+            b.setToolTip(tip)
+            b.setStyleSheet(_GREY_QSS + "QToolButton { min-width:22px; }")
+            b.clicked.connect(lambda _c=False, st=step: self.change_size(st))
+            fmt_row.addWidget(b)
+        plain = QToolButton()
+        plain.setText("Zwykły tekst")
+        plain.setToolTip("Usuń pogrubienie i rozmiar z zaznaczenia")
+        plain.setStyleSheet(_GREY_QSS)
+        plain.clicked.connect(self.clear_format)
+        fmt_row.addWidget(plain)
+        tip = QLabel("bez zaznaczenia — cała bieżąca linia")
+        tip.setStyleSheet("color:#5a5f72; font-size:10px;")
+        fmt_row.addWidget(tip)
+        fmt_row.addStretch()
+        lay.addLayout(fmt_row)
+
+        self.text = QTextEdit()
+        self.text.setAcceptRichText(False)      # pasted text comes in plain
+        self.text.setStyleSheet(_FIELD_QSS + _SCROLL_QSS + _SCROLL_QSS.replace(
+            "vertical", "horizontal").replace("width:6px", "height:6px")
+            .replace("min-height", "min-width").replace("{ height:0; }", "{ width:0; }"))
+        self.text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(NOTES_PT)
+        self.text.setFont(mono)
+        self.text.document().setDefaultFont(mono)
+        self.text.cursorPositionChanged.connect(self._show_bold)
+        lay.addWidget(self.text, 1)
+        for keys, slot in (("Ctrl+B", self.toggle_bold),
+                           ("Ctrl++", lambda: self.change_size(2)),
+                           ("Ctrl+=", lambda: self.change_size(2)),
+                           ("Ctrl+-", lambda: self.change_size(-2))):
+            QShortcut(QKeySequence(keys), self.text, activated=slot)
+        self._fill(text, html)
+        self._clean = (self.value(), self.html())
+
+        row = QHBoxLayout()
+        load = QPushButton("Wczytaj z pliku…")
+        set_icon(load, "folder", "#8b949e", size=13)
+        load.setStyleSheet(_GREY_QSS)
+        load.setAutoDefault(False)
+        load.clicked.connect(self._load)
+        row.addWidget(load)
+        git = QPushButton("GitLab AMMS")
+        set_icon(git, "external", "#a5b4ff", size=13)
+        git.setStyleSheet(_CMD_QSS)
+        git.setAutoDefault(False)
+        git.setToolTip(GITLAB_URL)
+        git.clicked.connect(open_gitlab)
+        row.addWidget(git)
+        self.pin = QCheckBox("Przypnij (zawsze na wierzchu)")
+        self.pin.setStyleSheet("QCheckBox { color:#e1e4eb; font-size:11px; }")
+        self.pin.setToolTip("Okno zostaje nad innymi oknami — kliknięcie w główne "
+                            "okno go nie chowa")
+        self.pin.toggled.connect(self.set_pinned)
+        row.addWidget(self.pin)
+        row.addStretch()
+        self.save_btn = QPushButton("Zapisz")
+        self.save_btn.setAutoDefault(False)
+        self.save_btn.setStyleSheet(_GREEN_QSS)
+        self.save_btn.clicked.connect(self._save)
+        row.addWidget(self.save_btn)
+        close = QPushButton("Zamknij")
+        close.setAutoDefault(False)
+        close.setStyleSheet(_GREY_QSS)
+        close.clicked.connect(self.close)
+        row.addWidget(close)
+        lay.addLayout(row)
+
+    # ── pinning ──
+    def set_pinned(self, on: bool) -> None:
+        if self.pin.isChecked() != on:
+            self.pin.setChecked(on)     # comes back here through toggled
+            return
+        visible = self.isVisible()
+        geo = self.geometry()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+        if visible:                     # a flag change hides the window
+            self.setGeometry(geo)
+            self.show()
+            self.raise_()
+
+    def is_pinned(self) -> bool:
+        return bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+    # ── text ──
+    def _load(self):
+        path, _f = QFileDialog.getOpenFileName(
+            self, "Wczytaj instrukcję aktualizacji", "",
+            "Pliki tekstowe (*.txt *.md *.log);;Wszystkie pliki (*)")
+        if not path:
+            return
+        try:
+            text = read_text_file(path)
+        except OSError as e:
+            self.text.appendPlainText(f"\n[nie udało się wczytać pliku: {e}]")
+            return
+        if self.text.toPlainText().strip() and not confirm(
+                self, "Instrukcja aktualizacji",
+                "Zastąpić obecną treść zawartością pliku?"):
+            return
+        self.text.setPlainText(text)
+
+    def _fill(self, text: str, html: str) -> None:
+        if html:
+            self.text.setHtml(html)
+        else:
+            self.text.setPlainText(text)
+
+    # ── formatting ──
+    def _target(self) -> QTextCursor:
+        cur = self.text.textCursor()
+        if not cur.hasSelection():
+            cur.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+            cur.movePosition(QTextCursor.MoveOperation.EndOfBlock,
+                             QTextCursor.MoveMode.KeepAnchor)
+        return cur
+
+    def toggle_bold(self) -> None:
+        cur = self._target()
+        bold = cur.charFormat().fontWeight() >= QFont.Weight.DemiBold.value
+        f = QTextCharFormat()
+        f.setFontWeight(QFont.Weight.Normal if bold else QFont.Weight.Bold)
+        cur.mergeCharFormat(f)
+        self._show_bold()
+
+    def change_size(self, step: int) -> None:
+        cur = self._target()
+        start = QTextCursor(cur)
+        start.setPosition(min(cur.anchor(), cur.position()) + 1)
+        size = start.charFormat().fontPointSize() or NOTES_PT
+        f = QTextCharFormat()
+        f.setFontPointSize(max(_NOTES_MIN_PT, min(_NOTES_MAX_PT, size + step)))
+        cur.mergeCharFormat(f)
+
+    def clear_format(self) -> None:
+        cur = self._target()
+        f = QTextCharFormat()
+        f.setFontWeight(QFont.Weight.Normal)
+        f.setFontPointSize(NOTES_PT)
+        cur.mergeCharFormat(f)
+        self._show_bold()
+
+    def _show_bold(self) -> None:
+        w = self.text.textCursor().charFormat().fontWeight()
+        self.bold_btn.setChecked(w >= QFont.Weight.DemiBold.value)
+
+    # ── values ──
+    def value(self) -> str:
+        return _clean_text(self.text.toPlainText())
+
+    def html(self) -> str:
+        """The rich text — only when something is bold or resized."""
+        doc = self.text.document()
+        return doc.toHtml() if self.value() and _has_format(doc) else ""
+
+    def dirty(self) -> bool:
+        return (self.value(), self.html()) != self._clean
+
+    def _save(self) -> None:
+        self._clean = (self.value(), self.html())
+        self.saved.emit(*self._clean)
+
+    def set_text(self, text: str, html: str = "") -> None:
+        """The hospital changed under the window (another one opened)."""
+        self._fill(text, html)
+        self._clean = (self.value(), self.html())
+
+    # ── closing: Esc and the title bar's × too ──
+    def reject(self) -> None:
+        self.close()
+
+    def closeEvent(self, event) -> None:
+        if self.dirty():
+            from PyQt6.QtWidgets import QMessageBox
+            box = QMessageBox(QMessageBox.Icon.Question, "Instrukcja aktualizacji",
+                              "Zapisać zmiany w instrukcji?", parent=self)
+            yes = box.addButton("Zapisz", QMessageBox.ButtonRole.AcceptRole)
+            no = box.addButton("Nie zapisuj", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton("Anuluj", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is yes:
+                self._save()
+            elif box.clickedButton() is not no:
+                event.ignore()
+                return
+        event.accept()
+
+
 class MachinePickDialog(QDialog):
     """Tick machines from a list (in the list's order)."""
 
@@ -224,10 +538,18 @@ class UpgradePanel(QWidget):
         self._status: dict[tuple, tuple] = {}
         self._status_labels: dict[str, QLabel] = {}
         self._select_row = -1
+        #: the open (non-modal) instructions window, if any
+        self._notes_dlg = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
+
+        # 2026-11-26 (owner): what this tab is about, also when its tab
+        # title is cut short in a narrow panel.
+        title = QLabel("Aktualizacja AMMS")
+        title.setStyleSheet("color:#e1e4eb; font-size:13px; font-weight:bold;")
+        root.addWidget(title)
 
         row = QHBoxLayout()
         lbl = QLabel("Wersja:")
@@ -283,6 +605,9 @@ class UpgradePanel(QWidget):
         self._version.setText(self._plan.get("version", ""))
         if not self.hd_box.busy():
             self.hd_box.show_idle()
+        if self._notes_dlg is not None:
+            self._notes_dlg.set_text(self._plan.get("notes", ""),
+                                     notes_rich(self._plan))
         self._rebuild()
 
     def refresh(self) -> None:
@@ -356,6 +681,7 @@ class UpgradePanel(QWidget):
         lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 4, 0)
         lay.setSpacing(8)
+        lay.addWidget(self._notes_box())
         lay.addWidget(self._order_box())
         for g in self._plan["groups"]:
             lay.addWidget(self._group_box(g))
@@ -375,6 +701,95 @@ class UpgradePanel(QWidget):
         lbl.setStyleSheet("color:#8b949e; font-size:9px; font-weight:bold;"
                           " letter-spacing:2px;")
         return lbl
+
+    def _notes_box(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("upgradeBox")
+        frame.setStyleSheet(_BOX_QSS)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        lay.addWidget(self._section("INSTRUKCJA AKTUALIZACJI"))
+        notes = self._plan.get("notes", "")
+        if notes.strip():
+            view = QTextEdit()
+            view.setReadOnly(True)
+            # Narrow panel: long lines wrap here; unwrapped in the big window.
+            view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+            view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            view.setStyleSheet(_FIELD_QSS + _SCROLL_QSS)
+            mono = QFont("Consolas")
+            mono.setStyleHint(QFont.StyleHint.Monospace)
+            mono.setPointSize(9)
+            view.setFont(mono)
+            view.document().setDefaultFont(mono)
+            rich = notes_rich(self._plan)
+            if rich:
+                view.setHtml(rich)
+            else:
+                view.setPlainText(notes)
+            self._notes_view = view
+            view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            view.setFixedHeight(min(220, 16 + 15 * max(3, notes.count("\n") + 1)))
+            lay.addWidget(view)
+        else:
+            empty = QLabel("Brak instrukcji — wklej albo wczytaj plik z opisem "
+                           "aktualizacji tego szpitala.")
+            empty.setWordWrap(True)
+            empty.setStyleSheet("color:#5a5f72; font-size:10px;")
+            lay.addWidget(empty)
+        edit = _shrinkable(QPushButton("Otwórz / edytuj…" if notes.strip()
+                                       else "Dodaj instrukcję…"))
+        set_icon(edit, "pencil", "#8b949e", size=13)
+        edit.setStyleSheet(_GREY_QSS)
+        edit.clicked.connect(self._edit_notes)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        row.addWidget(edit, 1)
+        git = _shrinkable(QPushButton("GitLab AMMS"))
+        set_icon(git, "external", "#a5b4ff", size=13)
+        git.setStyleSheet(_CMD_QSS)
+        git.setToolTip(GITLAB_URL)
+        git.clicked.connect(open_gitlab)
+        row.addWidget(git, 1)
+        lay.addLayout(row)
+        return frame
+
+    def _edit_notes(self) -> None:
+        """Non-modal (2026-11-26): one window per panel, raised if open."""
+        dlg = self._notes_dlg
+        if dlg is not None:
+            dlg.showNormal()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        name = getattr(self._hospital, "name", "") or ""
+        dlg = NotesDialog(self, self._plan.get("notes", ""), name,
+                          notes_rich(self._plan))
+        dlg.saved.connect(self._notes_saved)
+        dlg.destroyed.connect(lambda *_a: setattr(self, "_notes_dlg", None))
+        self._notes_dlg = dlg
+        # The panel goes (window closed): its notes window goes with it.
+        self.destroyed.connect(dlg.deleteLater)
+        dlg.show()
+
+    def close_notes(self) -> bool:
+        """The window closes: the notes window too (it may ask to save).
+        False — the user chose to stay."""
+        dlg = self._notes_dlg
+        if dlg is None:
+            return True
+        if not dlg.close():
+            return False
+        self._notes_dlg = None
+        return True
+
+    def _notes_saved(self, value: str, html: str = "") -> None:
+        if (value, html) != (self._plan.get("notes", ""),
+                             self._plan.get("notes_html", "")):
+            self._plan["notes"] = value
+            self._plan["notes_html"] = html
+            self._commit()
 
     def _order_box(self) -> QFrame:
         frame = QFrame()

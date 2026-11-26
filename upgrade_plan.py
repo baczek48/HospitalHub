@@ -8,7 +8,12 @@ A plan is plain data kept in the vault with the hospital (``Hospital.upgrade``):
   with its machines, the process pattern of its service and its command
   buttons;
 * ``version`` — the version typed in once, put into the commands as
-  ``{WERSJA}``; ``{DATA}`` is today (YYYYMMDD).
+  ``{WERSJA}``; ``{DATA}`` is today (YYYYMMDD);
+* ``notes`` — the hospital's own upgrade instructions (2026-11-26, owner:
+  "nasz plik upgrade" — machines, paths, database scripts), plain text;
+* ``notes_html`` — the same notes with the owner's bold / bigger print
+  (2026-11-26), Qt rich text; shown only while its text is still ``notes``
+  (a merge of plain notes elsewhere wins over stale formatting).
 
 A command button is a few shell lines.  It is typed into the terminal of
 every machine of its group at once, so each terminal shows what happens;
@@ -55,6 +60,8 @@ def default_plan() -> dict:
     return {
         "version": "",
         "order": [],
+        "notes": "",
+        "notes_html": "",
         "hd": default_hd(),
         "groups": [
             {"id": new_id(), "name": "AMMS (WildFly)",
@@ -144,10 +151,14 @@ def normalize_plan(raw) -> dict:
         if isinstance(raw, dict):
             plan["version"] = str(raw.get("version", "") or "")
             plan["order"] = [str(x) for x in raw.get("order", []) or []]
+            plan["notes"] = str(raw.get("notes", "") or "")
+            plan["notes_html"] = str(raw.get("notes_html", "") or "")
             plan["hd"] = normalize_hd(raw.get("hd"))
         return plan
     plan = {"version": str(raw.get("version", "") or ""),
             "order": [str(x) for x in raw.get("order", []) or []],
+            "notes": str(raw.get("notes", "") or ""),
+            "notes_html": str(raw.get("notes_html", "") or ""),
             "hd": normalize_hd(raw.get("hd")),
             "groups": []}
     for g in raw.get("groups", []):

@@ -57,3 +57,5 @@ third_party/
 
 # Wersja i data wpisywane przez build_v2.bat / build_remote.bat
 _build_info.py
+# Instrukcja aktualizacji szpitala (2026-11-26) — adresy wewnętrzne, nigdy do repo
+upgrade_instrukcja.txt
