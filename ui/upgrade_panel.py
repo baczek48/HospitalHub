@@ -21,6 +21,7 @@ into the terminals is the window's job (``run_requested`` /
 
 from __future__ import annotations
 
+import sys
 import time
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
@@ -243,6 +244,28 @@ def _has_format(doc) -> bool:
     return False
 
 
+_SET_WINDOW_POS = None
+
+
+def _set_window_pos():
+    """user32.SetWindowPos with real HWND types (a bare -1 is not taken as
+    HWND_TOPMOST) — on its own WinDLL, so other code keeps its prototypes."""
+    global _SET_WINDOW_POS
+    if _SET_WINDOW_POS is None:
+        import ctypes
+        from ctypes import wintypes
+        fn = ctypes.WinDLL("user32").SetWindowPos
+        fn.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                       ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        fn.restype = wintypes.BOOL
+
+        def call(hwnd: int, after: int, flags: int) -> bool:
+            return bool(fn(wintypes.HWND(hwnd), wintypes.HWND(after), 0, 0, 0, 0, flags))
+
+        _SET_WINDOW_POS = call
+    return _SET_WINDOW_POS
+
+
 class NotesDialog(QDialog):
     """The hospital's upgrade instructions, big enough to read and edit.
 
@@ -349,6 +372,11 @@ class NotesDialog(QDialog):
         self.pin.setStyleSheet("QCheckBox { color:#e1e4eb; font-size:11px; }")
         self.pin.setToolTip("Okno zostaje nad innymi oknami — kliknięcie w główne "
                             "okno go nie chowa")
+        self._pinned = False
+        self._on_top = False
+        self._pin_timer = QTimer(self)
+        self._pin_timer.setInterval(250)
+        self._pin_timer.timeout.connect(self._follow_modal)
         self.pin.toggled.connect(self.set_pinned)
         row.addWidget(self.pin)
         row.addStretch()
@@ -365,20 +393,87 @@ class NotesDialog(QDialog):
         lay.addLayout(row)
 
     # ── pinning ──
+    # 2026-11-26 (owner): pinned on top, it covered the modal dialogs of the
+    # main window (the hd.asseco settings): the dialog opened *under* it and
+    # blocked everything — only Tab + Enter blind got out.  So while another
+    # modal window is up, the pinned window steps down below it, and goes
+    # back on top when that window closes.  On Windows by SetWindowPos only
+    # (no flag change: no hide/show flicker, no focus taken from the dialog).
+
     def set_pinned(self, on: bool) -> None:
         if self.pin.isChecked() != on:
             self.pin.setChecked(on)     # comes back here through toggled
             return
+        self._pinned = on
+        if on:
+            self._pin_timer.start()
+        else:
+            self._pin_timer.stop()
+        self._apply_top(on and self._blocking_modal() is None)
+
+    def is_pinned(self) -> bool:
+        return self._pinned
+
+    def is_on_top(self) -> bool:
+        return self._on_top
+
+    def _blocking_modal(self):
+        """A modal window of the application that is not ours, or None."""
+        from PyQt6.QtWidgets import QApplication
+        modal = QApplication.activeModalWidget()
+        # Our own windows (the "save changes?" question) are not in the way;
+        # isAncestorOf() stops at a window, so the parents are walked here.
+        w = modal
+        while w is not None:
+            if w is self:
+                return None
+            w = w.parentWidget()
+        return modal
+
+    def _follow_modal(self) -> None:
+        if not self._pinned or not self.isVisible():
+            return
+        modal = self._blocking_modal()
+        want = modal is None
+        if want != self._on_top:
+            self._apply_top(want, below=modal)
+
+    def _apply_top(self, on: bool, below=None) -> None:
+        self._on_top = on
+        from PyQt6.QtGui import QGuiApplication
+        if (sys.platform == "win32" and self.isVisible()
+                and QGuiApplication.platformName() == "windows"):
+            try:
+                set_pos = _set_window_pos()
+                hwnd = int(self.winId())
+                flags = 0x0001 | 0x0002 | 0x0010   # NOSIZE | NOMOVE | NOACTIVATE
+                ok = set_pos(hwnd, -1 if on else -2, flags)
+                if ok and not on and below is not None:
+                    # Right under the dialog that needs the user now.
+                    set_pos(hwnd, int(below.winId()), flags)
+                if ok:
+                    return
+            except Exception:
+                pass
         visible = self.isVisible()
+        if bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == on:
+            return
         geo = self.geometry()
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
         if visible:                     # a flag change hides the window
             self.setGeometry(geo)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
             self.show()
-            self.raise_()
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+            if below is not None:
+                below.raise_()
+                below.activateWindow()
 
-    def is_pinned(self) -> bool:
-        return bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._pinned:
+            QTimer.singleShot(0, lambda: self._apply_top(
+                self._blocking_modal() is None, below=self._blocking_modal()))
 
     # ── text ──
     def _load(self):
@@ -677,7 +772,10 @@ class UpgradePanel(QWidget):
         self._day.setText(f"data: {up.today_stamp()}")
         self._status_labels.clear()
         box = QWidget()
-        box.setStyleSheet("background:transparent;")
+        # Scoped: a bare rule would reach the tooltips of the buttons inside
+        # (Qt styles a tooltip with its widget's sheets) and paint them black.
+        box.setObjectName("upgradeContent")
+        box.setStyleSheet("QWidget#upgradeContent { background:transparent; }")
         lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 4, 0)
         lay.setSpacing(8)

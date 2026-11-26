@@ -362,3 +362,54 @@ def test_stale_formatting_gives_way_to_changed_plain_notes(app):
     plan["notes"] = "nowa treść (scalona)\n"
     assert panel.notes_rich(plan) == ""
     assert up.normalize_plan(plan)["notes_html"] == plan["notes_html"]
+
+
+def test_no_bare_background_rule_reaches_a_tooltip(window):
+    """2026-11-26 (owner): tooltips of the command buttons were black boxes.
+    Qt styles a tooltip with the sheets of its widget and the widget's
+    parents, so a bare ``background:transparent;`` on a container made every
+    tooltip inside it transparent — painted black on Windows."""
+    import re
+    from PyQt6.QtWidgets import QWidget
+
+    def bare(sheet: str) -> str:
+        return re.sub(r"\{[^}]*\}", "", re.sub(r"/\*.*?\*/", "", sheet or "", flags=re.S))
+
+    offenders = set()
+    for w in window.findChildren(QWidget):
+        if not w.toolTip():
+            continue
+        p = w
+        while p is not None:
+            if "background" in bare(p.styleSheet()):
+                offenders.add((type(p).__name__, p.objectName(), p.styleSheet()[:60]))
+            p = p.parentWidget()
+    assert not offenders, offenders
+
+
+def test_a_pinned_notes_window_steps_down_for_a_modal_dialog(app, monkeypatch):
+    """2026-11-26 (owner): pinned on top, the notes covered the modal settings
+    dialog of the main window, which then blocked everything unseen."""
+    from PyQt6.QtWidgets import QApplication, QDialog
+    import ui.upgrade_panel as panel
+    p = panel.UpgradePanel(_hospital())
+    p._edit_notes()
+    dlg = p._notes_dlg
+    dlg.pin.setChecked(True)
+    pump(20)
+    assert dlg.is_pinned() and dlg.is_on_top()
+    other = QDialog()
+    monkeypatch.setattr(QApplication, "activeModalWidget", staticmethod(lambda: other))
+    dlg._follow_modal()
+    assert dlg.is_pinned() and not dlg.is_on_top()
+    # Its own question ("Zapisać zmiany?") does not count.
+    own = QDialog(dlg)
+    monkeypatch.setattr(QApplication, "activeModalWidget", staticmethod(lambda: own))
+    dlg._follow_modal()
+    assert dlg.is_on_top()
+    monkeypatch.setattr(QApplication, "activeModalWidget", staticmethod(lambda: None))
+    dlg._follow_modal()
+    assert dlg.is_on_top()
+    dlg.pin.setChecked(False)
+    assert not dlg.is_pinned() and not dlg.is_on_top()
+    assert p.close_notes()

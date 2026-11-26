@@ -7646,7 +7646,9 @@ class _EnvironmentPanel(QWidget):
         )
 
         container = QWidget()
-        container.setStyleSheet("background:transparent;")
+        # Scoped (2026-11-26): a bare rule reaches tooltips and paints them black.
+        container.setObjectName("sshListContent")
+        container.setStyleSheet("QWidget#sshListContent { background:transparent; }")
         cl = QVBoxLayout(container)
         cl.setContentsMargins(0, 0, 2, 0)
         cl.setSpacing(2)
@@ -8768,8 +8770,12 @@ class SshDialog(QDialog):
         # Live stats bar
         stats_bar = QWidget()
         stats_bar.setFixedHeight(28)
+        # Scoped (2026-11-26): a bare rule reached the tooltips of everything
+        # in the bar (Qt styles a tooltip with its widget's sheets).
+        stats_bar.setObjectName("statsBar")
         stats_bar.setStyleSheet(
-            "background:#010409; border-top:1px solid #21262d;")
+            "QWidget#statsBar, QWidget#statsBar * {"
+            " background:#010409; border-top:1px solid #21262d; }")
         sbl = QHBoxLayout(stats_bar)
         sbl.setContentsMargins(10, 0, 12, 0)
         sbl.setSpacing(0)

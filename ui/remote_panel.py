@@ -457,7 +457,9 @@ class RemoteMachinesPanel(QWidget):
         self._active_key = None
 
         container = QWidget()
-        container.setStyleSheet("background:transparent;")
+        # Scoped (2026-11-26): a bare rule reaches tooltips and paints them black.
+        container.setObjectName("remoteMachinesContent")
+        container.setStyleSheet("QWidget#remoteMachinesContent { background:transparent; }")
         lay = QVBoxLayout(container)
         lay.setContentsMargins(0, 0, 2, 0)
         lay.setSpacing(2)
