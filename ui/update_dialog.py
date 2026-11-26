@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QTextBlockFormat, QTextCursor
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
     QTextBrowser, QVBoxLayout,
@@ -35,6 +35,22 @@ def set_quit_all_hook(hook) -> None:
 def _date(iso: str) -> str:
     parts = (iso or "").split("-")
     return ".".join(reversed(parts)) if len(parts) == 3 else iso
+
+
+def _airy(doc) -> None:
+    """Line height and a gap after each paragraph / list item, so a long
+    list of changes does not read as one block."""
+    cursor = QTextCursor(doc)
+    block = doc.begin()
+    while block.isValid():
+        cursor.setPosition(block.position())
+        fmt = QTextBlockFormat()
+        fmt.setLineHeight(135.0, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        fmt.setBottomMargin(8.0)
+        if block.textList() is not None:
+            fmt.setTopMargin(2.0)
+        cursor.mergeBlockFormat(fmt)
+        block = block.next()
 
 
 class _Check(QThread):
@@ -91,11 +107,21 @@ class UpdateDialog(QDialog):
         self._detail.setWordWrap(True)
         self._detail.setStyleSheet("color: #8b949e;")
         lay.addWidget(self._detail)
+        # 2026-11-26 (owner): the list of changes was cramped (200 px, small
+        # print) — now it takes the window, grows with it, and reads easier.
         self._notes = QTextBrowser()
         self._notes.setOpenExternalLinks(True)
-        self._notes.setMaximumHeight(200)
+        self._notes.setMinimumHeight(220)
+        font = self._notes.font()
+        font.setPointSizeF(max(font.pointSizeF(), 9.0) + 1.5)
+        self._notes.setFont(font)
+        self._notes.document().setDocumentMargin(14)
+        self._notes.setStyleSheet(
+            # Palette colours: right on the light and the dark theme.
+            "QTextBrowser { background:palette(base); color:palette(text);"
+            " border:1px solid palette(mid); border-radius:8px; }")
         self._notes.hide()
-        lay.addWidget(self._notes)
+        lay.addWidget(self._notes, 1)
         self._bar = QProgressBar()
         self._bar.hide()
         lay.addWidget(self._bar)
@@ -147,8 +173,11 @@ class UpdateDialog(QDialog):
             self._status.setText(f"Dostępna nowa wersja: {latest}{when}")
             self._detail.setText(f"Ta wersja: {app_version.version_label()}")
             if release.notes:
-                self._notes.setMarkdown(release.notes)
+                self._notes.setMarkdown(updater.changes_only(release.notes))
+                _airy(self._notes.document())
                 self._notes.show()
+                # Room to read: bigger than the bare minimum the first time.
+                self.resize(max(self.width(), 760), max(self.height(), 620))
             if asset is None:
                 self._detail.setText(self._detail.text() + " — brak pliku do pobrania, "
                                      "zobacz stronę wydania.")

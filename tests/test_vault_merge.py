@@ -136,7 +136,8 @@ def test_without_history_a_different_value_is_mine_unless_ticked():
     mine2 = copy.deepcopy(merged)
     mine2[vs.SYNC_KEY] = sync
     p2 = vm.plan(mine2, theirs, show_admin=True)
-    assert not [c for c in p2.changes if c.field == "password"]
+    ch2 = by_key(p2, "f:c1:password")
+    assert ch2.skipped and ch2.status == vm.OLDER and not ch2.default
     assert p2.older_there == 1
 
 
@@ -161,9 +162,13 @@ def test_my_newer_value_is_not_overwritten_by_his_older_one():
     mine = saved(common, mine)
     theirs = copy.deepcopy(common)                             # still "stare"
     p, (merged, _s) = merge(mine, theirs)
-    assert not [c for c in p.changes if c.field == "password"]
+    ch = by_key(p, "f:c1:password")
+    assert ch.skipped and ch.status == vm.OLDER and not ch.default
     assert p.older_there == 1
     assert machine(merged, "c1")["password"] == "moje-nowe"
+    # Shown with „Pokaż pominięte” and ticked: going back is possible.
+    _p, (back, _s2) = merge(mine, theirs, take={"f:c1:password"})
+    assert machine(back, "c1")["password"] == "stare"
 
 
 def test_notes_both_wrote_are_joined():
@@ -311,3 +316,101 @@ def test_the_windows_objects_are_kept_and_updated():
     assert hospitals[0].machines[0] is m1
     assert [c.login for c in m1.credentials] == ["root", "nowy"]
     assert m1.credentials[0].password == "nowe"
+
+
+# ── 2026-11-24 (owner, first real merge): empty here is not "different" ────
+
+def test_an_empty_field_here_is_filled_from_the_import():
+    """Owner's screenshot: AMMS address/login/password empty here, filled
+    there — listed as "different" and unticked; it is a filling-in."""
+    mine = base_vault()
+    theirs = copy.deepcopy(mine)
+    theirs["hospitals"][0]["amms_url"] = "https://amms.alfa.example/"
+    p, (merged, _s) = merge(mine, theirs)
+    ch = by_key(p, "f:h1:amms_url")
+    assert ch.status == vm.FILLED and ch.default
+    assert merged["hospitals"][0]["amms_url"] == "https://amms.alfa.example/"
+
+
+@pytest.mark.parametrize("text", ["Lab Admin: x\nAdmin y", "Lab Admin: x\nAdmin y\n",
+                                  "Lab Admin: x\r\nAdmin y\r\n"])
+def test_empty_notes_here_get_the_imported_text_as_it_is(text):
+    """Owner: with empty notes here one hospital said "newer", another
+    "joined text" — only a trailing newline / CRLF made the difference."""
+    mine = base_vault()
+    mine["hospitals"][1]["notes"] = ""
+    theirs = copy.deepcopy(mine)
+    theirs["hospitals"][1]["notes"] = text
+    p, (merged, _s) = merge(mine, theirs)
+    ch = by_key(p, "f:h2:notes")
+    assert ch.status == vm.FILLED and ch.default
+    assert merged["hospitals"][1]["notes"] == text
+
+
+def test_a_field_empty_in_the_import_is_not_listed():
+    mine = base_vault()
+    mine["hospitals"][0]["amms_login"] = "OPERATOR"
+    theirs = base_vault()
+    p = vm.plan(mine, theirs, show_admin=True)
+    assert [(c.status, c.skipped, c.default) for c in p.changes] == [
+        (vm.EMPTY_THERE, True, False)]
+    assert p.empty_there == 1
+    merged, _s = vm.apply(p, set())
+    assert merged["hospitals"][0]["amms_login"] == "OPERATOR"
+    assert vm.summary(p, set())["kept"] == 0, "pominięte to nie decyzja"
+
+
+def test_line_endings_and_trailing_spaces_are_no_difference():
+    mine = base_vault()
+    theirs = copy.deepcopy(mine)
+    theirs["hospitals"][0]["notes"] = "VPN przez bramkę  \r\nDyżur: 112\r\n"
+    machine(theirs, "m1")["name"] = " srvAPP "
+    assert not vm.plan(mine, theirs, show_admin=True).changes
+
+
+def test_imported_text_with_more_lines_is_extended():
+    mine = base_vault()
+    theirs = copy.deepcopy(mine)
+    theirs["hospitals"][0]["notes"] += "\nNowa linia"
+    ch = by_key(vm.plan(mine, theirs, show_admin=True), "f:h1:notes")
+    assert ch.status == vm.EXTENDED and ch.default
+
+
+# ── 2026-11-25 (owner): one machine, its logins under it; no duplicates ────
+
+def test_rows_carry_the_machine_and_login_they_belong_to():
+    """Owner's screenshot: "Maszyna srvPDF › Login administrator" and
+    "Maszyna srvPDF › Login DIN046\\Admin" read like two machines."""
+    mine = base_vault()
+    theirs = copy.deepcopy(mine)
+    machine(theirs, "c1")["login"] = "ALFA\\platforma"
+    machine(theirs, "m1")["credentials"].append(
+        {"id": "c-new", "login": "DIN046\\Admin", "password": "x"})
+    p = vm.plan(mine, theirs, show_admin=True)
+    field = by_key(p, "f:c1:login")
+    add = by_key(p, "a:c-new")
+    assert field.path == (("m1", "Maszyna srvAPP (192.0.2.10)"), ("c1", "Login root"))
+    assert add.path == (("m1", "Maszyna srvAPP (192.0.2.10)"),)
+    assert add.title == "Login DIN046\\Admin"
+
+
+def test_the_same_machine_added_on_both_sides_under_two_names_is_one():
+    mine = base_vault()
+    theirs = copy.deepcopy(mine)
+    m = machine(theirs, "m1")
+    m["id"], m["name"] = "m-their", "RDP Alfa"
+    for c in m["credentials"]:
+        c["id"] = "t-" + c["id"]
+    p = vm.plan(mine, theirs, show_admin=True)
+    assert p.matched["m-their"] == "m1"
+    assert [c.key for c in p.changes] == ["f:m1:name"], "nie druga kopia maszyny"
+
+
+def test_an_ip_shared_by_two_machines_is_not_guessed():
+    mine = base_vault()
+    machine(mine, "m2")["ip"] = "192.0.2.10"                 # two machines, one IP
+    theirs = copy.deepcopy(mine)
+    m = machine(theirs, "m1")
+    m["id"], m["name"] = "m-their", "Inna nazwa"
+    p = vm.plan(mine, theirs, show_admin=True)
+    assert "m-their" not in p.matched

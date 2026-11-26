@@ -42,15 +42,48 @@ from vault_sync import Node
 
 NEW, REMOVED_HERE, DECLINED, REMOVED_THERE = "new", "removed_here", "declined", "removed_there"
 UPDATE, CONFLICT, JOINED = "update", "conflict", "joined"
+FILLED, EXTENDED = "filled", "extended"
+#: Listed only with „Pokaż pominięte”: nothing happens unless ticked.
+OLDER, EMPTY_THERE = "older", "empty_there"
 
 STATUS_LABELS = {
-    NEW: "nowe u kolegi",
-    REMOVED_HERE: "usunięte u Ciebie",
+    NEW: "nowy element",
+    REMOVED_HERE: "usunięte w Twoim",
     DECLINED: "wcześniej odrzucone",
-    REMOVED_THERE: "usunięte u kolegi",
-    UPDATE: "nowsze u kolegi",
-    CONFLICT: "różni się",
+    REMOVED_THERE: "usunięte w importowanym",
+    FILLED: "uzupełnienie",
+    UPDATE: "nowsza wersja",
+    EXTENDED: "dopisane linie",
+    CONFLICT: "różne wartości",
     JOINED: "połączony tekst",
+    OLDER: "starsza w importowanym",
+    EMPTY_THERE: "puste w importowanym",
+}
+
+#: One sentence per status for the details pane: what it means and what
+#: the tick does.
+STATUS_HELP = {
+    NEW: "Ten element jest tylko w importowanym vaulcie. Zaznaczony zostanie dodany "
+         "do Twojego.",
+    REMOVED_HERE: "Ten element usunąłeś u siebie. Zaznacz, aby go przywrócić.",
+    DECLINED: "Ten element odrzuciłeś przy wcześniejszym scalaniu. Zaznacz, aby go "
+              "jednak dodać.",
+    REMOVED_THERE: "Ten element usunięto w importowanym vaulcie. Zaznacz, aby usunąć "
+                   "go także u siebie — bez zaznaczenia zostaje.",
+    FILLED: "W Twoim vaulcie to pole jest puste. Zaznaczone zostanie uzupełnione "
+            "wartością z importowanego vaulta.",
+    UPDATE: "Twoja wartość była już wcześniej zastąpiona (historia vaulta), więc "
+            "importowana jest nowsza. Zaznaczona zostanie przejęta.",
+    EXTENDED: "Importowany tekst zawiera cały Twój i dodatkowe linie. Zaznaczony "
+              "dopisze brakujące linie.",
+    CONFLICT: "Obie wartości są wypełnione i różne — nie wiadomo, która jest nowsza. "
+              "Bez zaznaczenia zostaje Twoja; zaznacz, aby przejąć importowaną.",
+    OLDER: "Importowana wartość to Twoja poprzednia — zmieniłeś ją później (historia "
+           "vaulta). Zostaje Twoja; zaznacz tylko, jeśli chcesz wrócić do importowanej.",
+    EMPTY_THERE: "W importowanym vaulcie to pole jest puste. Zostaje Twoja wartość; "
+                 "zaznacz, aby je wyczyścić.",
+    JOINED: "Oba teksty się zmieniły. Zaznaczone: Twój tekst plus linie, których w nim "
+            "brakuje (podgląd „Po scaleniu”). Bez zaznaczenia zostaje Twój.",
 }
 
 KIND_LABELS = {"hospital": "Szpital", "machine": "Maszyna", "database": "Baza",
@@ -78,6 +111,11 @@ class Change:
     item_id: str                 # id here (field/delete) or there (add)
     group: str                   # hospital name, or "Profile VPN"
     label: str                   # the item, e.g. "Maszyna srvAPP (10.0.0.5)"
+    #: (id, label) of each item between the hospital and the row — machine,
+    #: login… — so the dialog shows each machine once with its logins under it.
+    path: tuple = ()
+    title: str = ""              # an added/deleted item's own label
+    skipped: bool = False        # older / empty there: listed on request only
     field: str = ""
     mine: object = None
     theirs: object = None
@@ -100,6 +138,7 @@ class Plan:
     changes: list = field(default_factory=list)
     matched: dict = field(default_factory=dict)    # their id -> my id
     older_there: int = 0          # their values already replaced here
+    empty_there: int = 0          # fields empty there, filled here (kept)
     only_here: int = 0            # my items the colleague does not have
 
     @property
@@ -117,6 +156,35 @@ def _norm(text) -> str:
     return " ".join(str(text or "").split()).casefold()
 
 
+def _lines(text) -> list[str]:
+    """Text as lines, line endings and trailing spaces not counting."""
+    lines = [line.rstrip() for line in str(text or "").replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def _empty(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return not value.strip()
+    return value in (None, [], {})
+
+
+def _same(kind: str, name: str, a, b) -> bool:
+    """Equal for the merge: text not by its line endings or trailing spaces,
+    a short value not by spaces around it (passwords exactly)."""
+    if a == b:
+        return True
+    if isinstance(a, str) and isinstance(b, str):
+        if (kind, name) in vs.TEXT_FIELDS:
+            return _lines(a) == _lines(b)
+        if name not in vs.SECRET_FIELDS:
+            return a.strip() == b.strip()
+    return False
+
+
 def _fallback_key(node: Node):
     d = node.data
     if node.kind == "hospital":
@@ -132,12 +200,10 @@ def _fallback_key(node: Node):
     return None
 
 
-def match(mine: dict[str, Node], theirs: dict[str, Node]) -> dict[str, str]:
-    """their id -> my id."""
-    pairs = {tid: tid for tid, t in theirs.items()
-             if tid in mine and mine[tid].kind == t.kind}
-    used = set(pairs.values())
-    for tid, t in theirs.items():                       # top-down order
+def _match_by_keys(mine, theirs, pairs, used) -> None:
+    """Items both sides created on their own: by name / address / login,
+    under parents already paired (top-down)."""
+    for tid, t in theirs.items():
         if tid in pairs:
             continue
         my_parent = pairs.get(t.parent) if t.parent else None
@@ -152,14 +218,49 @@ def match(mine: dict[str, Node], theirs: dict[str, Node]) -> dict[str, str]:
                 pairs[tid] = mid
                 used.add(mid)
                 break
+
+
+def _match_machines_by_ip(mine, theirs, pairs, used) -> bool:
+    """2026-11-25: one machine added on both sides under different names —
+    the same IP, alone in its hospital on each side, is the same machine
+    (not a second copy of it).  True when something was paired."""
+    found = False
+    for tid, t in theirs.items():
+        if tid in pairs or t.kind != "machine" or t.parent not in pairs:
+            continue
+        ip = _norm(t.data.get("ip"))
+        if not ip:
+            continue
+        my_parent = pairs[t.parent]
+        mine_same = [mid for mid, m in mine.items()
+                     if m.kind == "machine" and m.parent == my_parent
+                     and _norm(m.data.get("ip")) == ip]
+        theirs_same = [x for x, n in theirs.items()
+                       if n.kind == "machine" and n.parent == t.parent
+                       and _norm(n.data.get("ip")) == ip]
+        if len(mine_same) == 1 and len(theirs_same) == 1 and mine_same[0] not in used:
+            pairs[tid] = mine_same[0]
+            used.add(mine_same[0])
+            found = True
+    return found
+
+
+def match(mine: dict[str, Node], theirs: dict[str, Node]) -> dict[str, str]:
+    """their id -> my id."""
+    pairs = {tid: tid for tid, t in theirs.items()
+             if tid in mine and mine[tid].kind == t.kind}
+    used = set(pairs.values())
+    _match_by_keys(mine, theirs, pairs, used)
+    if _match_machines_by_ip(mine, theirs, pairs, used):
+        _match_by_keys(mine, theirs, pairs, used)       # their logins too
     return pairs
 
 
 # ── text ───────────────────────────────────────────────────────────────────
 
 def join_text(mine: str, theirs: str) -> str:
-    """Mine with the colleague's lines that mine lacks, each where it stood."""
-    a, b = (mine or "").splitlines(), (theirs or "").splitlines()
+    """Mine with the other copy's lines that mine lacks, each where it stood."""
+    a, b = _lines(mine), _lines(theirs)
     out = []
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
         out += a[i1:i2]
@@ -204,6 +305,16 @@ def _path_label(nodes: dict[str, Node], node: Node) -> str:
     return " › ".join(reversed(parts))
 
 
+def _path_nodes(nodes: dict[str, Node], node, include_self: bool = True) -> tuple:
+    """(id, label) from the hospital's first child down to `node`."""
+    out = []
+    cur = node if include_self else (nodes.get(node.parent) if node and node.parent else None)
+    while cur is not None and cur.kind != "hospital":
+        out.append((cur.id, item_label(cur)))
+        cur = nodes.get(cur.parent) if cur.parent else None
+    return tuple(reversed(out))
+
+
 def _subtree_size(nodes, node, skip=frozenset()) -> int:
     return 1 + sum(_subtree_size(nodes, nodes[c], skip) for c in node.children
                    if c not in skip)
@@ -239,24 +350,31 @@ def plan(mine: dict, theirs: dict, *, show_admin: bool = False) -> Plan:
             if (m.kind, name) in vs.LOCAL_FIELDS:
                 continue
             a, b = vs.field_value(m, name), vs.field_value(t, name)
-            if a == b:
+            if _same(m.kind, name, a, b):
                 continue
             ha, hb = vs.value_hash(a), vs.value_hash(b)
             known_old = seen(mid, tid, name)
             theirs_old = hb in known_old or hb in m_sync["kept"].get(f"{mid}.{name}", [])
             mine_old = ha in known_old
+            text = (m.kind, name) in vs.TEXT_FIELDS
+            skipped = False
             if theirs_old and not mine_old:
                 result.older_there += 1
-                continue
-            text = (m.kind, name) in vs.TEXT_FIELDS
-            if mine_old and not theirs_old:
+                status, proposed, default, skipped = OLDER, b, False, True
+            elif mine_old and not theirs_old:
                 status, proposed, default = UPDATE, b, True
+            elif _empty(a):
+                status, proposed, default = FILLED, b, True
+            elif _empty(b):
+                # Empty there, filled here: most likely never filled there.
+                result.empty_there += 1
+                status, proposed, default, skipped = EMPTY_THERE, b, False, True
             elif text:
                 joined = join_text(a, b)
-                if joined == a:              # theirs adds nothing: shorter/older
+                if _lines(joined) == _lines(a):     # theirs adds no line
                     status, proposed, default = CONFLICT, b, False
-                elif joined == b:            # theirs = mine + more lines
-                    status, proposed, default = UPDATE, b, True
+                elif _lines(joined) == _lines(b):   # theirs = mine + more lines
+                    status, proposed, default = EXTENDED, b, True
                 else:
                     status, proposed, default = JOINED, joined, True
             else:
@@ -264,10 +382,12 @@ def plan(mine: dict, theirs: dict, *, show_admin: bool = False) -> Plan:
             ch = Change(key=f"f:{mid}:{name}", action="field", status=status, kind=m.kind,
                         item_id=mid, group=_group(m_nodes, m), label=_path_label(m_nodes, m),
                         field=name, mine=a, theirs=b, proposed=proposed, default=default,
-                        admin=admin, hidden=hide(admin))
+                        admin=admin, hidden=hide(admin), path=_path_nodes(m_nodes, m),
+                        skipped=skipped)
             if ch.hidden:
-                # As in the colleague's file — the whole value, not a join.
-                ch.auto, ch.proposed = True, b
+                # As in the imported file — the whole value, not a join —
+                # except what is skipped (older there, empty there).
+                ch.auto, ch.proposed = not skipped, b
             result.changes.append(ch)
 
     # Their items I do not have.
@@ -288,7 +408,8 @@ def plan(mine: dict, theirs: dict, *, show_admin: bool = False) -> Plan:
                  else "") + item_label(t)
         ch = Change(key=f"a:{tid}", action="add", status=status, kind=t.kind, item_id=tid,
                     group=group, label=label, theirs=t.data, default=default,
-                    admin=t.admin, hidden=hide(t.admin),
+                    admin=t.admin, hidden=hide(t.admin), title=item_label(t),
+                    path=_path_nodes(m_nodes, parent) if parent else (),
                     count=_subtree_size(t_nodes, t, skip=set(pairs)))
         if ch.hidden:
             ch.auto = True
@@ -304,7 +425,8 @@ def plan(mine: dict, theirs: dict, *, show_admin: bool = False) -> Plan:
             ch = Change(key=f"d:{mid}", action="delete", status=REMOVED_THERE, kind=m.kind,
                         item_id=mid, group=_group(m_nodes, m),
                         label=_path_label(m_nodes, m), mine=m.data, default=False,
-                        admin=m.admin, hidden=hide(m.admin),
+                        admin=m.admin, hidden=hide(m.admin), title=item_label(m),
+                        path=_path_nodes(m_nodes, m, include_self=False),
                         count=_subtree_size(m_nodes, m))
             result.changes.append(ch)              # hidden: never auto-deleted
         else:
@@ -352,7 +474,7 @@ def apply(p: Plan, chosen: set) -> tuple[dict, dict]:
         if ch.action == "field":
             if take(ch):
                 nodes[ch.item_id].data[ch.field] = copy.deepcopy(ch.proposed)
-            else:
+            elif not ch.skipped:
                 key = f"{ch.item_id}.{ch.field}"
                 kept = sync["kept"].setdefault(key, [])
                 h = vs.value_hash(ch.theirs)
@@ -413,7 +535,10 @@ def summary(p: Plan, chosen: set) -> dict:
         if ch.hidden and took:
             counts["admin_auto"] += 1
         if ch.action == "field":
-            counts["changed" if took else "kept"] += 1
+            if took:
+                counts["changed"] += 1
+            elif not ch.skipped:
+                counts["kept"] += 1
         elif ch.action == "add" and took:
             counts["added"] += ch.count
         elif ch.action == "delete" and took:

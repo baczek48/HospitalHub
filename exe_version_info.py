@@ -12,7 +12,8 @@ import app_version
 
 def _numbers(version: str) -> tuple[int, int, int, int]:
     parts = []
-    for p in (version or "").split("."):
+    # "2.0.5_1" (a local test build) → 2.0.5.1
+    for p in (version or "").replace("_", ".").split("."):
         if not p.isdigit():
             break
         parts.append(int(p))

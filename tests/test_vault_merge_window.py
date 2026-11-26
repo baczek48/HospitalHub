@@ -124,7 +124,7 @@ def test_a_vault_under_another_password_asks_for_it(app, tmp_path, monkeypatch, 
     w = open_window(mine_path)
     try:
         w._merge_from_vault(theirs_path)
-        assert asked and "inne hasło" in asked[0]
+        assert asked and "innym hasłem" in asked[0]
         assert w._hospitals[0].machines[0].credentials[0].password == "kolegi"
     finally:
         w._unsaved = False
@@ -201,9 +201,29 @@ def a_plan(show_admin=False):
 
 
 def rows(dlg):
-    root = dlg._tree.invisibleRootItem()
-    return [root.child(i).child(j) for i in range(root.childCount())
-            for j in range(root.child(i).childCount())]
+    """The rows with a decision (leaves), in tree order."""
+    out = []
+
+    def walk(item):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.childCount():
+                walk(child)
+            else:
+                out.append(child)
+    walk(dlg._tree.invisibleRootItem())
+    return out
+
+
+def all_texts(dlg):
+    out = []
+
+    def walk(item):
+        for i in range(item.childCount()):
+            out.append(item.child(i).text(0))
+            walk(item.child(i))
+    walk(dlg._tree.invisibleRootItem())
+    return out
 
 
 def test_dialog_lists_masks_and_ticks(app):
@@ -222,7 +242,7 @@ def test_dialog_lists_masks_and_ticks(app):
     pw = next(r for r in rows(dlg) if r.text(0).endswith("Hasło"))
     assert pw.text(2) == "stare" and pw.text(3) == "kolegi"
     dlg._only_conflicts.setChecked(True)
-    assert [r.text(1) for r in rows(dlg)] == ["różni się"]
+    assert [r.text(1) for r in rows(dlg)] == ["różne wartości"]
     dlg._only_conflicts.setChecked(False)
     dlg._tick_all(True)
     dlg._accept()
@@ -233,7 +253,65 @@ def test_dialog_unlocks_admin_and_shows_admin_rows(app):
     from ui.vault_merge_dialog import VaultMergeDialog
     dlg = VaultMergeDialog(None, "kolegi.vault", a_plan(),
                            replan=lambda show: a_plan(show), unlock=lambda: True)
-    assert not any("[admin]" in r.text(0) for r in rows(dlg))
+    assert not any("[admin]" in t for t in all_texts(dlg))
     dlg._on_unlock()
-    assert any("[admin]" in r.text(0) for r in rows(dlg))
+    assert any("[admin]" in t for t in all_texts(dlg))
     assert not dlg._admin_note.isVisibleTo(dlg)
+
+
+def test_dialog_groups_fields_under_their_item_and_explains_the_row(app):
+    from ui.vault_merge_dialog import VaultMergeDialog
+    common = base_vault()
+    theirs = copy.deepcopy(common)
+    h = theirs["hospitals"][0]
+    h["amms_url"], h["amms_login"], h["amms_password"] = (
+        "https://amms.alfa.example/", "OPERATOR", "x")
+    dlg = VaultMergeDialog(None, "importowany.vault", vm.plan(common, theirs, show_admin=True))
+    group = dlg._tree.topLevelItem(0)
+    assert group.text(0) == "Szpital Alfa" and group.text(1) == "3 zmiany"
+    item = group.child(0)
+    assert item.text(0) == "Dane szpitala"
+    assert [item.child(i).text(0) for i in range(3)] == [
+        "AMMS – adres", "AMMS – login", "AMMS – hasło"]
+    assert {item.child(i).text(1) for i in range(3)} == {"uzupełnienie"}
+    dlg._tree.setCurrentItem(item.child(0))
+    assert "pole jest puste" in dlg._detail_head.text()
+    assert dlg._theirs_pane.text.toPlainText() == "https://amms.alfa.example/"
+    assert dlg._mine_pane.text.toPlainText() == "(puste)"
+
+
+def test_one_machine_once_with_its_logins_under_it_and_closed_at_start(app):
+    """Owner, 2026-11-25: two rows starting with the same machine read like
+    two machines; and the list should start closed."""
+    from ui.vault_merge_dialog import VaultMergeDialog
+    mine = base_vault()
+    theirs = copy.deepcopy(mine)
+    machine(theirs, "c1")["login"] = "ALFA\platforma"
+    machine(theirs, "m1")["credentials"].append(
+        {"id": "c-new", "login": "DIN046\Admin", "password": "x"})
+    dlg = VaultMergeDialog(None, "importowany.vault", vm.plan(mine, theirs, show_admin=True))
+    group = dlg._tree.topLevelItem(0)
+    assert dlg._tree.topLevelItemCount() == 1 and not group.isExpanded()
+    assert group.childCount() == 1
+    srv = group.child(0)
+    assert srv.text(0) == "Maszyna srvAPP (192.0.2.10)"
+    assert [srv.child(i).text(0) for i in range(srv.childCount())] == [
+        "Login root", "Login DIN046\Admin"]
+    assert srv.child(0).child(0).text(0) == "Login"
+    assert srv.child(1).text(1) == "nowy element"
+
+
+def test_skipped_rows_only_on_request(app):
+    from ui.vault_merge_dialog import VaultMergeDialog
+    mine = base_vault()
+    mine["hospitals"][0]["amms_login"] = "OPERATOR"           # empty in the import
+    theirs = base_vault()
+    theirs["hospitals"].append({"id": "h3", "name": "Szpital Gamma", "machines": [],
+                                "databases": []})
+    dlg = VaultMergeDialog(None, "importowany.vault", vm.plan(mine, theirs, show_admin=True))
+    assert [r.text(1) for r in rows(dlg)] == ["nowy element"]
+    assert dlg._show_skipped.text() == "Pokaż pominięte (1)"
+    assert "Pokaż pominięte" in dlg._quiet.text()
+    dlg._show_skipped.setChecked(True)
+    assert sorted(r.text(1) for r in rows(dlg)) == ["nowy element", "puste w importowanym"]
+    assert dlg._ok.text() == "Scal zaznaczone (1)"

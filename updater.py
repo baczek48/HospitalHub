@@ -67,8 +67,10 @@ class Release:
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:
-    m = re.fullmatch(r"v?(\d+(?:\.\d+)*)", (text or "").strip())
-    return tuple(int(p) for p in m.group(1).split(".")) if m else None
+    """"2.0.5" → (2, 0, 5); a local test build "2.0.5_1" → (2, 0, 5, 1):
+    newer than 2.0.5, older than 2.0.6."""
+    m = re.fullmatch(r"v?(\d+(?:[._]\d+)*)", (text or "").strip())
+    return tuple(int(p) for p in re.split(r"[._]", m.group(1))) if m else None
 
 
 def compare(latest: str, current: str) -> int | None:
@@ -104,6 +106,25 @@ def release_from_json(data: dict) -> Release:
                    notes=str(data.get("body") or ""), assets=assets)
 
 
+def changes_only(notes: str) -> str:
+    """The "### Zmiany…" section of the release notes — what the update
+    window shows; how to install and the file list are for the web page."""
+    lines = (notes or "").splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if re.match(r"^#{1,6}\s*Zmiany", line.strip(), re.I)), None)
+    if start is None:
+        return notes or ""
+    level = len(lines[start].strip()) - len(lines[start].strip().lstrip("#"))
+    out = [lines[start]]
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        depth = len(stripped) - len(stripped.lstrip("#"))
+        if 0 < depth <= level and stripped[depth:depth + 1] == " ":
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def fetch_latest(opener=_get) -> Release:
     try:
         with opener(API_LATEST, "application/vnd.github+json") as resp:
@@ -132,7 +153,11 @@ def download(asset: Asset, dest_dir: str | None = None, progress=None,
                           "nie da się go sprawdzić, pobierz ręcznie ze strony wydania.")
     if os.path.basename(asset.name) != asset.name or not asset.name:
         raise UpdateError("Nieprawidłowa nazwa pliku wydania.")
-    dest_dir = dest_dir or download_dir()
+    if dest_dir is None:
+        dest_dir = download_dir()
+        # Our own folder: installers of earlier updates (~40 MB each) go.
+        for name in os.listdir(dest_dir):
+            _remove(os.path.join(dest_dir, name))
     final = os.path.join(dest_dir, asset.name)
     part = final + ".part"
     digest = hashlib.sha256()

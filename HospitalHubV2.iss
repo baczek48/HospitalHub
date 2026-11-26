@@ -63,7 +63,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 ; /CURRENTUSER tylko z linii poleceń (testy, brak admina) — kreator bez zmian
 PrivilegesRequiredOverridesAllowed=commandline
-VersionInfoVersion={#MyAppVersion}
+; Windows wants digits only: a local test build "2.0.5_1" becomes 2.0.5.1
+VersionInfoVersion={#StringChange(MyAppVersion, "_", ".")}
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription={#MyAppName} — instalator
 VersionInfoCompany={#MyAppPublisher}

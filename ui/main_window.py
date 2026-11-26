@@ -631,7 +631,7 @@ class MainWindow(QMainWindow):
                 pass
             finally:
                 QApplication.restoreOverrideCursor()
-            prompt = ("Ten vault ma inne hasło niż Twój.\nPodaj hasło vaulta kolegi:"
+            prompt = ("Wybrany vault jest zaszyfrowany innym hasłem.\nPodaj hasło tego vaulta:"
                       if attempt == 0 else "Nieprawidłowe hasło. Spróbuj ponownie:")
             password, ok = QInputDialog.getText(self, "Hasło vaulta", prompt,
                                                 QLineEdit.EchoMode.Password)
@@ -650,7 +650,7 @@ class MainWindow(QMainWindow):
         if not path:
             start_dir = os.path.dirname(self._vault_path) if self._vault_path else ""
             path, _ = QFileDialog.getOpenFileName(
-                self, "Scal zmiany z vaulta (np. od kolegi)", start_dir,
+                self, "Scal zmiany z innego vaulta", start_dir,
                 "Vault files (*.vault);;Wszystkie pliki (*)")
         if not path:
             return
@@ -673,12 +673,15 @@ class MainWindow(QMainWindow):
             return vault_merge.plan(mine, theirs, show_admin=show_admin)
 
         plan = replan(self._vault_type == "vpn" or self._admin_unlocked)
-        if not plan.changes:
+        if not [c for c in plan.changes if not c.skipped]:
             extra = []
             if plan.older_there:
-                extra.append(f"Starsze dane u kolegi: {plan.older_there} (zostają Twoje).")
+                extra.append(f"Starsze dane w importowanym vaulcie: {plan.older_there} (zostają Twoje).")
+            if plan.empty_there:
+                extra.append(f"Pola puste w importowanym vaulcie: {plan.empty_there} "
+                             "(zostają Twoje).")
             if plan.only_here:
-                extra.append(f"Twoje elementy, których kolega nie ma: {plan.only_here}.")
+                extra.append(f"Elementy tylko w Twoim vaulcie: {plan.only_here}.")
             QMessageBox.information(
                 self, "Scalanie", "Nie ma nic nowego do przejęcia."
                 + ("\n\n" + "\n".join(extra) if extra else ""))

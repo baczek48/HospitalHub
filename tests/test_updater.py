@@ -217,3 +217,40 @@ def test_quit_all_calls_the_hand_over_after_the_questions(app, monkeypatch, tmp_
     assert mgr._quit_all(lambda: False) is False, "nieudane przekazanie = nie zamykaj"
     assert mgr._quit_all(lambda: True) is True
     assert mgr._quit_all() is True
+
+
+def test_the_window_shows_only_what_changed():
+    notes = "\n".join([
+        "Instalator aktualizuje HospitalHub w miejscu.", "",
+        "**Z wersji 2.0.4: Info …**", "",
+        "### Pliki", "- `HospitalHub-Setup-2.0.5.exe`", "",
+        "### Zmiany względem 2.0.4", "", "**Scalanie**", "- punkt",
+        "#### Szczegóły", "- głębiej", "",
+        "### Instalacja", "Zamknij HospitalHub."])
+    out = updater.changes_only(notes)
+    assert out.startswith("### Zmiany względem 2.0.4")
+    assert "punkt" in out and "głębiej" in out
+    assert "Instalator" not in out and "Pliki" not in out and "Instalacja" not in out
+    assert updater.changes_only("bez nagłówków") == "bez nagłówków"
+
+
+def test_the_update_folder_keeps_only_the_newest_installer(tmp_path, monkeypatch):
+    folder = tmp_path / "HospitalHubUpdate"
+    folder.mkdir()
+    (folder / "HospitalHub-Setup-2.0.4.exe").write_bytes(b"old")
+    (folder / "HospitalHub-Setup-2.0.5.exe.part").write_bytes(b"half")
+    monkeypatch.setattr(updater, "download_dir", lambda: str(folder))
+    asset = updater.release_from_json(api_json()).asset_for("V2")
+    path = updater.download(asset, opener=Opener({asset.url: PAYLOAD}))
+    assert os.listdir(folder) == [asset.name] and path == str(folder / asset.name)
+
+
+def test_a_local_test_build_number_compares_between_releases():
+    import exe_version_info
+    assert updater.parse_version("2.0.5_1") == (2, 0, 5, 1)
+    assert updater.compare("2.0.6", "2.0.5_1") == 1, "2.0.6 ma się zaproponować"
+    assert updater.compare("2.0.5", "2.0.5_1") == -1
+    assert exe_version_info._numbers("2.0.5_1") == (2, 0, 5, 1)
+    iss = open(os.path.join(os.path.dirname(updater.__file__), "HospitalHubV2.iss"),
+               encoding="utf-8-sig").read()
+    assert 'VersionInfoVersion={#StringChange(MyAppVersion, "_", ".")}' in iss
