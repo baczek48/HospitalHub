@@ -58,11 +58,20 @@ class _Check(QThread):
 
     def run(self):
         try:
-            self.done.emit(updater.fetch_latest(), "")
+            release = updater.fetch_latest()
         except updater.UpdateError as exc:
             self.done.emit(None, str(exc))
+            return
         except Exception as exc:            # never let the thread die silently
             self.done.emit(None, f"Błąd sprawdzania ({type(exc).__name__}).")
+            return
+        # The skipped versions' changes: a nicety — without them the window
+        # still shows the newest release's.
+        try:
+            release.history = updater.fetch_history()
+        except Exception:
+            release.history = []
+        self.done.emit(release, "")
 
 
 class _Download(QThread):
@@ -172,8 +181,15 @@ class UpdateDialog(QDialog):
         if cmp == 1:
             self._status.setText(f"Dostępna nowa wersja: {latest}{when}")
             self._detail.setText(f"Ta wersja: {app_version.version_label()}")
-            if release.notes:
-                self._notes.setMarkdown(updater.changes_only(release.notes))
+            notes = updater.changes_since(release, release.history,
+                                          current)
+            skipped = notes.count("\n### v") + (1 if notes.startswith("### v") else 0)
+            if skipped > 1:
+                self._detail.setText(f"Ta wersja: {app_version.version_label()} — poniżej "
+                                     f"zmiany ze wszystkich {skipped} nowszych wersji, "
+                                     "od najnowszej.")
+            if notes:
+                self._notes.setMarkdown(notes)
                 _airy(self._notes.document())
                 self._notes.show()
                 # Room to read: bigger than the bare minimum the first time.

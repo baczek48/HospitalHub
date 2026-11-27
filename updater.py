@@ -4,6 +4,9 @@ No Qt here — the dialog (ui/update_dialog.py) runs these in a thread.
 
 * :func:`fetch_latest` asks the public GitHub API for the latest release; the
   request carries nothing about this machine or its vaults.
+* :func:`fetch_history` reads the recent releases, so the window can show the
+  changes of every version skipped since this build, not only the newest
+  (:func:`changes_since`).
 * :func:`compare` tells whether that release is newer than this build
   (``dev`` and unreadable numbers are "unknown", never "newer").
 * :func:`download` writes the asset to a private folder under %TEMP% and only
@@ -25,6 +28,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 API_LATEST = "https://api.github.com/repos/baczek48/HospitalHub/releases/latest"
+API_LIST = "https://api.github.com/repos/baczek48/HospitalHub/releases?per_page=30"
 USER_AGENT = "HospitalHub-updater"
 TIMEOUT_S = 15
 CHUNK = 256 * 1024
@@ -58,6 +62,8 @@ class Release:
     published: str
     notes: str
     assets: list[Asset] = field(default_factory=list)
+    #: The recent releases (:func:`fetch_history`), for the skipped changes.
+    history: list = field(default_factory=list)
 
     def asset_for(self, variant: str) -> Asset | None:
         pattern = ASSET_PATTERNS.get(variant)
@@ -123,6 +129,58 @@ def changes_only(notes: str) -> str:
             break
         out.append(line)
     return "\n".join(out).strip()
+
+
+def fetch_history(opener=_get) -> list[Release]:
+    """The recent published releases (no drafts, no pre-releases), any order.
+    Only for the list of changes — the release to install is
+    :func:`fetch_latest`'s."""
+    try:
+        with opener(API_LIST, "application/vnd.github+json") as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise UpdateError(f"Nie udało się pobrać historii wydań ({type(exc).__name__}).") from exc
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data:
+        if not isinstance(item, dict) or item.get("draft") or item.get("prerelease"):
+            continue
+        rel = release_from_json(item)
+        if parse_version(rel.version) is not None:
+            out.append(rel)
+    return out
+
+
+def _date_pl(iso: str) -> str:
+    parts = (iso or "").split("-")
+    return ".".join(reversed(parts)) if len(parts) == 3 else iso
+
+
+def changes_since(latest: Release, history: list[Release], current: str) -> str:
+    """2026-11-27 (owner): updating 2.0.5 → 2.0.7 showed only what 2.0.7
+    changed — 2.0.6 was lost.  Now every release newer than this build, up
+    to `latest`, newest first, each under its own "### vX.Y.Z · date"
+    heading.  One release (or no readable history): its notes as before."""
+    picked = {latest.version: latest}
+    if parse_version(current) is not None:
+        for rel in history:
+            if (compare(rel.version, current) == 1
+                    and compare(rel.version, latest.version) in (0, -1)):
+                picked.setdefault(rel.version, rel)
+    if len(picked) == 1:
+        return changes_only(latest.notes)
+    ordered = sorted(picked.values(), key=lambda r: parse_version(r.version), reverse=True)
+    parts = []
+    for rel in ordered:
+        body = changes_only(rel.notes)
+        lines = body.splitlines()
+        # Its own "### Zmiany względem …" heading gives way to the version.
+        if lines and re.match(r"^#{1,6}\s*Zmiany", lines[0].strip(), re.I):
+            body = "\n".join(lines[1:]).strip()
+        when = f" · {_date_pl(rel.published)}" if rel.published else ""
+        parts.append(f"### v{rel.version}{when}\n\n{body or '(brak opisu zmian)'}")
+    return "\n\n".join(parts)
 
 
 def fetch_latest(opener=_get) -> Release:

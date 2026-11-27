@@ -254,3 +254,57 @@ def test_a_local_test_build_number_compares_between_releases():
     iss = open(os.path.join(os.path.dirname(updater.__file__), "HospitalHubV2.iss"),
                encoding="utf-8-sig").read()
     assert 'VersionInfoVersion={#StringChange(MyAppVersion, "_", ".")}' in iss
+
+
+# ── 2026-11-27 (owner): 2.0.5 → 2.0.7 showed only 2.0.7's changes ─────────
+
+def _rel(tag, body, published="2026-11-26T10:00:00Z", **extra):
+    data = api_json(tag)
+    data.update(body=body, published_at=published, **extra)
+    return data
+
+
+HISTORY = [
+    _rel("v2.0.7", "### Zmiany względem 2.0.6\n- dymki\n\n### Instalacja\n- x"),
+    _rel("v2.0.6", "### Zmiany względem 2.0.5\n- scalanie drzewem\n\n### Pliki\n- y",
+         published="2026-11-25T10:00:00Z"),
+    _rel("v2.0.5", "### Zmiany względem 2.0.4\n- stare"),
+    _rel("v2.0.8", "### Zmiany\n- szkic", draft=True),
+    _rel("v2.0.9", "### Zmiany\n- beta", prerelease=True),
+]
+
+
+def test_history_skips_drafts_and_prereleases():
+    op = Opener({updater.API_LIST: json.dumps(HISTORY).encode()})
+    got = [r.version for r in updater.fetch_history(opener=op)]
+    assert got == ["2.0.7", "2.0.6", "2.0.5"]
+
+
+def test_changes_of_every_skipped_version_newest_first():
+    history = [updater.release_from_json(d) for d in HISTORY[:3]]
+    out = updater.changes_since(history[0], history, "2.0.5")
+    assert out.index("### v2.0.7 · 26.11.2026") < out.index("### v2.0.6 · 25.11.2026")
+    assert "dymki" in out and "scalanie drzewem" in out
+    assert "stare" not in out, "zainstalowana wersja się nie powtarza"
+    assert "Instalacja" not in out and "Pliki" not in out and "Zmiany względem" not in out
+
+
+def test_one_version_behind_looks_as_before():
+    history = [updater.release_from_json(d) for d in HISTORY[:3]]
+    out = updater.changes_since(history[0], history, "2.0.6")
+    assert out.startswith("### Zmiany względem 2.0.6") and "scalanie" not in out
+    assert updater.changes_since(history[0], [], "2.0.5").startswith("### Zmiany względem 2.0.6")
+
+
+def test_dialog_lists_the_skipped_versions(app, version):
+    from ui.update_dialog import UpdateDialog
+    version("2.0.5")
+    history = [updater.release_from_json(d) for d in HISTORY[:3]]
+    latest = history[0]
+    latest.history = history
+    dlg = UpdateDialog("V2", check=False)
+    dlg.show_result(latest)
+    text = dlg._notes.toPlainText()
+    assert "v2.0.7" in text and "v2.0.6" in text and "scalanie drzewem" in text
+    assert "2 nowszych wersji" in dlg._detail.text()
+    dlg.close()
